@@ -588,7 +588,14 @@ function countConflictSignals() {
 }
 
 async function continueHistoryRebuild() {
-    if (HISTORY_RUNNING || BUSY) return;
+    if (HISTORY_RUNNING) {
+        toast('历史重建已经在运行。', 'info');
+        return;
+    }
+    if (BUSY) {
+        toast('当前有另一项总结任务正在运行，请稍后再试。', 'warning');
+        return;
+    }
 
     const chat = C().chat || [];
     const mem = M();
@@ -601,6 +608,11 @@ async function continueHistoryRebuild() {
 
     HISTORY_RUNNING = true;
     HISTORY_STOP_REQUESTED = false;
+    BUSY = true;
+
+    // Critical mobile fix: show RUNNING before waiting for the first model call.
+    refreshNative();
+    toast(`历史重建已启动：从第 ${start + 1} 条继续。第一批正在总结，请等待模型返回。`, 'success');
 
     const beforeConflictCount = countConflictSignals();
 
@@ -609,8 +621,21 @@ async function continueHistoryRebuild() {
             const batch = Math.max(4, Number(S().batchMessages) || 20);
             const end = Math.min(chat.length, start + batch);
 
+            const stats = document.getElementById('smm2_native_stats');
+            if (stats) {
+                const st = stat();
+                stats.innerHTML =
+                    `剧情时间：<b>${esc(st.time)}</b><br>` +
+                    `已处理：${st.done}/${st.total}　待总结：${st.pending}<br>` +
+                    `事件：${st.events}　未完成：${st.loops}　冲突/隔离：${st.conflicts}<br>` +
+                    `历史重建：<b>运行中</b><br>` +
+                    `正在处理：第 ${start + 1}–${end} 条`;
+            }
+
             await summarizeRange(start, end);
-            start = end;
+
+            // Trust persisted memory index instead of only the local counter.
+            start = Math.max(end, Number(M().last_processed_index ?? end - 1) + 1);
 
             refresh();
             refreshNative();
@@ -622,8 +647,7 @@ async function continueHistoryRebuild() {
                 break;
             }
 
-            // Let the mobile UI breathe between batches.
-            await new Promise(resolve => setTimeout(resolve, 250));
+            await new Promise(resolve => setTimeout(resolve, 300));
         }
 
         if (!HISTORY_STOP_REQUESTED && start >= chat.length) {
@@ -636,6 +660,7 @@ async function continueHistoryRebuild() {
         toast(`历史重建失败：${e.message || e}`, 'error');
     } finally {
         HISTORY_RUNNING = false;
+        BUSY = false;
         refreshNative();
     }
 }
