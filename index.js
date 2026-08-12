@@ -11,8 +11,9 @@
         b.setAttribute('data-version', '0.2.3');
         Object.assign(b.style, {
             position: 'fixed',
-            right: '10px',
-            bottom: '150px',
+            left: '10px',
+            right: 'auto',
+            bottom: '165px',
             zIndex: '2147483647',
             padding: '10px 14px',
             border: '2px solid #fff',
@@ -478,6 +479,36 @@ function installUI() {
         const b=document.createElement('button');
         b.id=BUTTON_ID; b.textContent='记忆';
         b.title='剧情自动记忆';
+
+        const placeMemoryButton = () => {
+            const mobile = window.matchMedia?.('(max-width: 800px)')?.matches ?? (window.innerWidth <= 800);
+            Object.assign(b.style, mobile ? {
+                position:'fixed',
+                left:'10px',
+                right:'auto',
+                bottom:'110px',
+                zIndex:'2147483646',
+                display:'block',
+                visibility:'visible',
+                opacity:'1',
+                transform:'none'
+            } : {
+                position:'fixed',
+                left:'auto',
+                right:'12px',
+                bottom:'96px',
+                zIndex:'9998',
+                display:'block',
+                visibility:'visible',
+                opacity:'1',
+                transform:'none'
+            });
+        };
+
+        placeMemoryButton();
+        window.addEventListener('resize', placeMemoryButton, { passive:true });
+        window.addEventListener('orientationchange', () => setTimeout(placeMemoryButton, 150), { passive:true });
+
         document.body.appendChild(b);
         b.onclick=()=>document.getElementById(PANEL_ID)?.classList.toggle('smm2-hidden');
     }

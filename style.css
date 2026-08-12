@@ -22,3 +22,50 @@
 .smm2-card input[type=text]{display:block;width:100%;box-sizing:border-box;margin-top:5px;padding:7px}
 .smm2-note{opacity:.75;font-size:.9em;line-height:1.5;margin-top:12px}
 @media(max-width:480px){.smm2-grid{grid-template-columns:1fr}.smm2-card{max-height:92vh}}
+
+
+/* v0.2.4 mobile visibility fix */
+#smm2_fab{
+  z-index:2147483646 !important;
+}
+@media (max-width: 800px){
+  #smm2_fab{
+    position:fixed !important;
+    left:10px !important;
+    right:auto !important;
+    bottom:110px !important;
+    display:block !important;
+    visibility:visible !important;
+    opacity:1 !important;
+    transform:none !important;
+    width:auto !important;
+    min-width:58px !important;
+    min-height:42px !important;
+    padding:9px 12px !important;
+    font-size:14px !important;
+  }
+
+  #smm2_panel{
+    position:fixed !important;
+    inset:0 !important;
+    padding:10px !important;
+    z-index:2147483647 !important;
+  }
+
+  .smm2-card{
+    width:calc(100vw - 20px) !important;
+    max-width:none !important;
+    max-height:88vh !important;
+    box-sizing:border-box !important;
+  }
+
+  .smm2-grid{
+    grid-template-columns:1fr 1fr !important;
+  }
+}
+
+@media (max-width: 420px){
+  .smm2-grid{
+    grid-template-columns:1fr !important;
+  }
+}
