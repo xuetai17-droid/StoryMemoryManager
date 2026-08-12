@@ -1,4 +1,45 @@
 
+// ===== Story Memory Manager v0.2.3 diagnostic boot =====
+// This block intentionally does NOT depend on SillyTavern.getContext().
+(function SMM_DIAGNOSTIC_BOOT() {
+    const ID = 'smm_diagnostic_boot_button';
+    function mountDiagnostic() {
+        if (!document.body || document.getElementById(ID)) return;
+        const b = document.createElement('button');
+        b.id = ID;
+        b.textContent = 'SMM诊断';
+        b.setAttribute('data-version', '0.2.3');
+        Object.assign(b.style, {
+            position: 'fixed',
+            right: '10px',
+            bottom: '150px',
+            zIndex: '2147483647',
+            padding: '10px 14px',
+            border: '2px solid #fff',
+            borderRadius: '10px',
+            background: '#d97706',
+            color: '#fff',
+            fontWeight: '700',
+            fontSize: '14px',
+            boxShadow: '0 3px 16px rgba(0,0,0,.45)'
+        });
+        b.onclick = () => {
+            alert('Story Memory Manager v0.2.3 的 index.js 已成功加载。');
+        };
+        document.body.appendChild(b);
+        console.log('[StoryMemory] DIAGNOSTIC BOOT v0.2.3 mounted');
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', mountDiagnostic, { once: true });
+    } else {
+        mountDiagnostic();
+    }
+    setTimeout(mountDiagnostic, 500);
+    setTimeout(mountDiagnostic, 1500);
+})();
+
+
 const MODULE = 'story_memory_manager_v2';
 const META_KEY = 'story_memory_manager_v2';
 const PANEL_ID = 'smm2_panel';

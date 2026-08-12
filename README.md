@@ -1,6 +1,6 @@
 # 剧情自动记忆 Story Memory Manager
 
-版本：0.2.2
+版本：0.2.3
 
 SillyTavern 长线 RP 自动记忆扩展。安装一次，可用于不同角色卡和不同聊天；记忆按“聊天”隔离。
 
@@ -55,3 +55,8 @@ SillyTavern 长线 RP 自动记忆扩展。安装一次，可用于不同角色�
 - 不再依赖 `hooks.activate` 生命周期才能启动。
 - 脚本加载后直接初始化，并在 DOMContentLoaded / APP_READY / APP_INITIALIZED 多阶段兜底。
 - 专门处理“扩展显示已安装且启用，但手机端看不到记忆按钮”的情况。
+
+## v0.2.3 诊断
+
+页面加载后会无条件显示橙色 `SMM诊断` 按钮。
+它不依赖 SillyTavern context，用于判断入口 JS 是否被真正执行。
