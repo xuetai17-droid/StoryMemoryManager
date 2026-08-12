@@ -153,6 +153,20 @@ function uniqMerge(oldArr, newArr, keyFn) {
     return out;
 }
 
+function isMetaInstructionSignal(x) {
+    const text = JSON.stringify(x || {}).toLowerCase();
+    // These are model explanations/categories that explicitly identify a non-diegetic
+    // user editing/generation instruction rather than an in-story contradiction.
+    return /(用户修改请求|用户.*(?:修改|重写|改写).*(?:请求|要求)|非正文事实|非剧情事实|元指令|ooc|写作指令|生成指令|回复修改|重写要求|改写要求|文风要求|格式要求|尺度要求|剧情规则变更|写作规则变更)/i.test(text);
+}
+
+function filterMetaSignals(r) {
+    if (!r || typeof r !== 'object') return r;
+    if (Array.isArray(r.conflicts)) r.conflicts = r.conflicts.filter(x => !isMetaInstructionSignal(x));
+    if (Array.isArray(r.quarantined)) r.quarantined = r.quarantined.filter(x => !isMetaInstructionSignal(x));
+    return r;
+}
+
 function mergeResult(mem, r, endIndex) {
     mem.timeline = uniqMerge(mem.timeline, r.timeline, x => JSON.stringify([x.date, x.time, x.event, x.source]));
     mem.facts = uniqMerge(mem.facts, r.facts, x => JSON.stringify([x.fact, x.source]));
@@ -195,11 +209,13 @@ const SYSTEM_PROMPT = `你是长线角色扮演的“剧情记忆审计器”。
 3. 如果上一场景是夜晚，后文明确“半夜2点/凌晨2点”等，必须考虑跨日。
 4. 不得把尚未在“新增原始聊天”中发生的预测、计划、旧总结预告写成已发生事实。
 5. 角色的猜测、医学推断、心理推测等，不可直接升级成事实。
-6. 与已有记忆冲突时，写入 conflicts；明显错误/超前记忆写入 quarantined。
-7. 只记录对后续连续性有价值的信息。闲聊、重复描写、纯修辞可省略。
-8. relationships 只记录文本已经支持的关系状态，不擅自把暧昧升级成恋爱/伴侣。
-9. open_loops 保存约定、任务、秘密、待处理矛盾、明确的未来约会。
-10. 必须输出 JSON 对象，不要输出 Markdown。`;
+6. 与已有记忆中的“剧情事实”冲突时，才写入 conflicts；明显错误/超前的“剧情事实”才写入 quarantined。
+7. USER 的元指令（要求 AI 修改/重写/续写/调整回复、OOC 指令、文风/格式/尺度/生成规则、临时写作要求）不是剧情事实：不得写入 timeline/facts/events/relationships/open_loops/conflicts/quarantined，也不得据此改写 current_story_time/current_scene。若 USER 消息同时含元指令和角色在剧情中的言行，只忽略元指令部分，保留真实剧情内容。
+8. “角色在剧情中改变主意/规则/约定”属于剧情事实；“用户要求模型把上一回复改成另一版本”属于元指令。必须区分二者。
+9. 只记录对后续连续性有价值的信息。闲聊、重复描写、纯修辞可省略。
+10. relationships 只记录文本已经支持的关系状态，不擅自把暧昧升级成恋爱/伴侣。
+11. open_loops 保存约定、任务、秘密、待处理矛盾、明确的未来约会。
+12. 必须输出 JSON 对象，不要输出 Markdown。`;
 
 function schema() {
     const nullable = (type='string') => ({type:[type,'null']});
@@ -278,7 +294,7 @@ ${messagesText(start, end)}
     let raw;
     try {
         raw = await c.generateRaw({ systemPrompt:SYSTEM_PROMPT, prompt, jsonSchema:schema() });
-        let r = parseJSON(raw);
+        let r = filterMetaSignals(parseJSON(raw));
         mergeResult(mem, r, end);
     } catch (e) {
         // Fallback for models/backends without structured output.
@@ -286,7 +302,7 @@ ${messagesText(start, end)}
             systemPrompt:SYSTEM_PROMPT,
             prompt: prompt + '\n\n请严格返回合法 JSON，字段必须包含 story_start,current_story_time,current_scene,timeline,facts,events,characters,relationships,open_loops,locations,items,conflicts,quarantined。'
         });
-        let r = parseJSON(raw);
+        let r = filterMetaSignals(parseJSON(raw));
         mergeResult(mem, r, end);
     }
     await saveMeta();
