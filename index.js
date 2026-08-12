@@ -492,19 +492,35 @@ async function maybeAuto() {
 }
 
 
+
 let INITIALIZED = false;
 
 function initializeExtension() {
     if (INITIALIZED) return;
-    INITIALIZED = true;
 
-    const c = C();
-    S();
+    // Do not mark initialized until SillyTavern context is actually ready.
+    if (!globalThis.SillyTavern || typeof SillyTavern.getContext !== 'function') {
+        setTimeout(initializeExtension, 500);
+        return;
+    }
+
+    let c;
+    try {
+        c = C();
+        if (!c) throw new Error('SillyTavern context unavailable');
+        S();
+    } catch (e) {
+        console.warn('[StoryMemory] context not ready yet', e);
+        setTimeout(initializeExtension, 700);
+        return;
+    }
+
+    INITIALIZED = true;
 
     const safeOn = (eventName, handler) => {
         try {
             const evt = c.event_types?.[eventName];
-            if (evt) c.eventSource.on(evt, handler);
+            if (evt && c.eventSource?.on) c.eventSource.on(evt, handler);
         } catch (e) {
             console.warn('[StoryMemory] event registration failed:', eventName, e);
         }
@@ -516,25 +532,25 @@ function initializeExtension() {
     safeOn('MESSAGE_EDITED', () => setTimeout(refresh, 50));
     safeOn('MESSAGE_DELETED', () => setTimeout(refresh, 50));
     safeOn('APP_READY', () => setTimeout(() => { installUI(); refresh(); }, 100));
+    safeOn('APP_INITIALIZED', () => setTimeout(() => { installUI(); refresh(); }, 100));
 
-    // Important compatibility fallback:
-    // some SillyTavern builds load the module after APP_READY has already fired.
-    // Therefore we also mount the UI directly after the module itself is evaluated.
-    setTimeout(() => {
-        try {
-            installUI();
-            refresh();
-            console.log('[StoryMemory] UI initialized');
-        } catch (e) {
-            console.error('[StoryMemory] UI initialization failed', e);
-            toast(`插件界面加载失败：${e.message || e}`, 'error');
-        }
-    }, 250);
+    try {
+        installUI();
+        refresh();
+        console.log('[StoryMemory] v0.2.2 loaded successfully');
+    } catch (e) {
+        console.error('[StoryMemory] UI initialization failed', e);
+    }
 }
 
-export function onActivate() {
-    initializeExtension();
+// Compatibility boot:
+// works whether SillyTavern loads this file as a classic script or as an ES module.
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => setTimeout(initializeExtension, 100), { once: true });
+} else {
+    setTimeout(initializeExtension, 100);
 }
 
-// Fallback for builds where lifecycle activation is unavailable/missed.
-initializeExtension();
+// Additional retries for mobile / slow-loading builds.
+setTimeout(initializeExtension, 1000);
+setTimeout(initializeExtension, 2500);
