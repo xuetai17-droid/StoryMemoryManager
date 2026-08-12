@@ -598,9 +598,9 @@ function toggleReadableMemory() {
     }
 }
 
-function countConflictSignals() {
+function countTrueConflicts() {
     const m = M();
-    return (m.conflicts?.length || 0) + (m.quarantined?.length || 0);
+    return (m.conflicts?.length || 0);
 }
 
 async function continueHistoryRebuild() {
@@ -630,7 +630,7 @@ async function continueHistoryRebuild() {
     refreshNative();
     toast(`历史重建已启动：从第 ${start + 1} 条继续。第一批正在总结，请等待模型返回。`, 'success');
 
-    const beforeConflictCount = countConflictSignals();
+    let beforeConflictCount = countTrueConflicts();
 
     try {
         while (start < chat.length && !HISTORY_STOP_REQUESTED) {
@@ -656,12 +656,14 @@ async function continueHistoryRebuild() {
             refresh();
             refreshNative();
 
-            const newConflictCount = countConflictSignals();
+            const newConflictCount = countTrueConflicts();
             if (newConflictCount > beforeConflictCount) {
                 HISTORY_STOP_REQUESTED = true;
-                toast('检测到新的冲突/隔离记忆，历史重建已自动暂停。请先查看记忆。', 'warning');
+                toast('检测到新的剧情事实冲突，历史重建已自动暂停。请先查看记忆。', 'warning');
                 break;
             }
+            // quarantined 仅表示待后文确认的候选事实，不阻断历史扫描。
+            beforeConflictCount = newConflictCount;
 
             await new Promise(resolve => setTimeout(resolve, 300));
         }
