@@ -1,0 +1,15 @@
+{
+  "display_name": "剧情自动记忆 Story Memory Manager",
+  "loading_order": 30,
+  "dependencies": [],
+  "js": "index.js",
+  "css": "style.css",
+  "author": "OpenAI-assisted custom extension",
+  "version": "0.2.0",
+  "auto_update": false,
+  "minimum_client_version": "1.13.5",
+  "generate_interceptor": "storyMemoryManagerInterceptor",
+  "hooks": {
+    "activate": "onActivate"
+  }
+}
