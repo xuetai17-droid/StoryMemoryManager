@@ -293,6 +293,8 @@ ${messagesText(start, end)}
 }
 
 let BUSY = false;
+let HISTORY_RUNNING = false;
+let HISTORY_STOP_REQUESTED = false;
 
 async function summarizeNew(force=false) {
     if (BUSY) return;
@@ -481,18 +483,188 @@ function panelHTML() {
 
 
 
+
+function memoryReadableHTML() {
+    const m = M();
+
+    const timeline = (m.timeline || []).slice(-50).map(x =>
+        `<div class="smm2-memory-item"><b>${esc(x.date || '')} ${esc(x.time || '')}</b><br>${esc(x.event || '')}</div>`
+    ).join('') || '<div class="smm2-empty">暂无时间线</div>';
+
+    const characters = Object.entries(m.characters || {}).map(([name, data]) =>
+        `<details class="smm2-memory-details">
+            <summary>${esc(name)}</summary>
+            <pre>${esc(JSON.stringify(data, null, 2))}</pre>
+         </details>`
+    ).join('') || '<div class="smm2-empty">暂无人物档案</div>';
+
+    const relationships = (m.relationships || []).map(x =>
+        `<div class="smm2-memory-item"><b>${esc((x.people || x.pair || []).join(' ↔ '))}</b><br>
+         ${esc(x.state || '')}${x.change ? '｜' + esc(x.change) : ''}</div>`
+    ).join('') || '<div class="smm2-empty">暂无关系记录</div>';
+
+    const loops = (m.open_loops || []).map(x =>
+        `<div class="smm2-memory-item"><b>${esc(x.id || 'OPEN')}</b> ${x.due ? '｜' + esc(x.due) : ''}<br>
+         ${esc(x.description || '')}</div>`
+    ).join('') || '<div class="smm2-empty">暂无未完成事项</div>';
+
+    const conflicts = [
+        ...(m.conflicts || []).map(x => ({title:'冲突', body: JSON.stringify(x)})),
+        ...(m.quarantined || []).map(x => ({title:'隔离', body: JSON.stringify(x)}))
+    ].map(x =>
+        `<div class="smm2-memory-item smm2-memory-warning"><b>${esc(x.title)}</b><br>${esc(x.body)}</div>`
+    ).join('') || '<div class="smm2-empty">暂无冲突/隔离记忆</div>';
+
+    return `
+      <div class="smm2-memory-view">
+        <div class="smm2-memory-top">
+          <div><b>剧情起点：</b>${esc(m.story_start || '未建立')}</div>
+          <div><b>当前剧情时间：</b>${esc(m.current_story_time || '未建立')}</div>
+          <div><b>已处理到：</b>${Math.max(0, Number(m.last_processed_index ?? -1) + 1)} 条</div>
+        </div>
+
+        <details open class="smm2-memory-details">
+          <summary>当前场景</summary>
+          <pre>${esc(JSON.stringify(m.current_scene || {}, null, 2))}</pre>
+        </details>
+
+        <details open class="smm2-memory-details">
+          <summary>时间线</summary>
+          ${timeline}
+        </details>
+
+        <details class="smm2-memory-details">
+          <summary>人物</summary>
+          ${characters}
+        </details>
+
+        <details class="smm2-memory-details">
+          <summary>人物关系</summary>
+          ${relationships}
+        </details>
+
+        <details open class="smm2-memory-details">
+          <summary>未完成事项</summary>
+          ${loops}
+        </details>
+
+        <details open class="smm2-memory-details">
+          <summary>冲突 / 隔离</summary>
+          ${conflicts}
+        </details>
+
+        <button id="smm2_raw_json" class="menu_button">查看原始 JSON</button>
+      </div>
+    `;
+}
+
+function toggleReadableMemory() {
+    const box = document.getElementById('smm2_native_memory_box');
+    if (!box) return;
+
+    if (box.dataset.open === '1') {
+        box.innerHTML = '';
+        box.dataset.open = '0';
+        return;
+    }
+
+    box.innerHTML = memoryReadableHTML();
+    box.dataset.open = '1';
+
+    const raw = document.getElementById('smm2_raw_json');
+    if (raw) {
+        raw.onclick = () => {
+            const blob = new Blob([JSON.stringify(M(), null, 2)], {type:'application/json'});
+            const url = URL.createObjectURL(blob);
+            window.open(url, '_blank');
+            setTimeout(() => URL.revokeObjectURL(url), 60000);
+        };
+    }
+}
+
+function countConflictSignals() {
+    const m = M();
+    return (m.conflicts?.length || 0) + (m.quarantined?.length || 0);
+}
+
+async function continueHistoryRebuild() {
+    if (HISTORY_RUNNING || BUSY) return;
+
+    const chat = C().chat || [];
+    const mem = M();
+    let start = Math.max(0, Number(mem.last_processed_index ?? -1) + 1);
+
+    if (start >= chat.length) {
+        toast('整条聊天已经处理完成。', 'success');
+        return;
+    }
+
+    HISTORY_RUNNING = true;
+    HISTORY_STOP_REQUESTED = false;
+
+    const beforeConflictCount = countConflictSignals();
+
+    try {
+        while (start < chat.length && !HISTORY_STOP_REQUESTED) {
+            const batch = Math.max(4, Number(S().batchMessages) || 20);
+            const end = Math.min(chat.length, start + batch);
+
+            await summarizeRange(start, end);
+            start = end;
+
+            refresh();
+            refreshNative();
+
+            const newConflictCount = countConflictSignals();
+            if (newConflictCount > beforeConflictCount) {
+                HISTORY_STOP_REQUESTED = true;
+                toast('检测到新的冲突/隔离记忆，历史重建已自动暂停。请先查看记忆。', 'warning');
+                break;
+            }
+
+            // Let the mobile UI breathe between batches.
+            await new Promise(resolve => setTimeout(resolve, 250));
+        }
+
+        if (!HISTORY_STOP_REQUESTED && start >= chat.length) {
+            toast('历史聊天重建完成。', 'success');
+        } else if (HISTORY_STOP_REQUESTED) {
+            toast('历史重建已暂停。', 'info');
+        }
+    } catch (e) {
+        console.error('[StoryMemory] history rebuild failed', e);
+        toast(`历史重建失败：${e.message || e}`, 'error');
+    } finally {
+        HISTORY_RUNNING = false;
+        refreshNative();
+    }
+}
+
+function stopHistoryRebuild() {
+    if (!HISTORY_RUNNING) {
+        toast('当前没有正在运行的历史重建。');
+        return;
+    }
+    HISTORY_STOP_REQUESTED = true;
+    toast('将在当前批次完成后暂停。', 'info');
+}
+
 function nativeManagerHTML() {
     return `
       <div id="smm2_native_stats" class="smm2-stats"></div>
 
       <div class="smm2-native-grid">
         <button id="smm2_native_new" class="menu_button">总结新增</button>
-        <button id="smm2_native_rebuild" class="menu_button">重扫整条聊天</button>
+        <button id="smm2_native_history" class="menu_button">继续历史重建</button>
+        <button id="smm2_native_stop" class="menu_button">暂停历史重建</button>
+        <button id="smm2_native_rebuild" class="menu_button">从头重扫整条聊天</button>
         <button id="smm2_native_import" class="menu_button">导入记忆 JSON</button>
         <button id="smm2_native_export" class="menu_button">导出记忆 JSON</button>
-        <button id="smm2_native_view" class="menu_button">查看记忆</button>
+        <button id="smm2_native_view" class="menu_button">查看/收起记忆</button>
         <button id="smm2_native_clear" class="menu_button">清空本聊天记忆</button>
       </div>
+
+      <div id="smm2_native_memory_box" data-open="0"></div>
 
       <div class="smm2-native-settings">
         <label><input id="smm2_native_enabled" type="checkbox"> 启用插件</label>
@@ -529,17 +701,14 @@ function bindNativeManager() {
     if (!q('smm2_native_new')) return;
 
     q('smm2_native_new').onclick = () => summarizeNew(true);
+    q('smm2_native_history').onclick = continueHistoryRebuild;
+    q('smm2_native_stop').onclick = stopHistoryRebuild;
     q('smm2_native_rebuild').onclick = rebuildAll;
     q('smm2_native_import').onclick = importMemory;
     q('smm2_native_export').onclick = exportMemory;
     q('smm2_native_clear').onclick = clearMemory;
 
-    q('smm2_native_view').onclick = () => {
-        const text = JSON.stringify(M(), null, 2);
-        const w = window.open('', '_blank');
-        if (!w) return toast('浏览器阻止了弹窗。', 'warning');
-        w.document.write(`<pre style="white-space:pre-wrap;font-family:monospace">${esc(text)}</pre>`);
-    };
+    q('smm2_native_view').onclick = toggleReadableMemory;
 
     const s = S();
 
@@ -589,7 +758,8 @@ function refreshNative() {
     stats.innerHTML =
         `剧情时间：<b>${esc(st.time)}</b><br>` +
         `已处理：${st.done}/${st.total}　待总结：${st.pending}<br>` +
-        `事件：${st.events}　未完成：${st.loops}　冲突/隔离：${st.conflicts}`;
+        `事件：${st.events}　未完成：${st.loops}　冲突/隔离：${st.conflicts}<br>` +
+        `历史重建：<b>${HISTORY_RUNNING ? '运行中' : '已暂停/未运行'}</b>`;
 
     const setChecked = (id, val) => {
         const el = document.getElementById(id);

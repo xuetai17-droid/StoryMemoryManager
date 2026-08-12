@@ -256,3 +256,65 @@
     font-size:16px !important;
   }
 }
+
+
+/* v0.2.8 readable memory + history rebuild */
+#smm2_native_memory_box{
+  margin:10px 0 14px;
+}
+
+.smm2-memory-view{
+  border:1px solid var(--SmartThemeBorderColor,#777);
+  border-radius:10px;
+  padding:10px;
+  background:rgba(0,0,0,.06);
+}
+
+.smm2-memory-top{
+  line-height:1.7;
+  margin-bottom:10px;
+}
+
+.smm2-memory-details{
+  margin:8px 0;
+  border:1px solid var(--SmartThemeBorderColor,#777);
+  border-radius:8px;
+  overflow:hidden;
+}
+
+.smm2-memory-details > summary{
+  cursor:pointer;
+  padding:9px 10px;
+  font-weight:700;
+}
+
+.smm2-memory-details > pre{
+  white-space:pre-wrap;
+  word-break:break-word;
+  padding:10px;
+  margin:0;
+  overflow:auto;
+  max-height:420px;
+}
+
+.smm2-memory-item{
+  padding:8px 10px;
+  border-top:1px solid var(--SmartThemeBorderColor,#777);
+  line-height:1.55;
+}
+
+.smm2-memory-warning{
+  border-left:4px solid currentColor;
+}
+
+.smm2-empty{
+  padding:8px 10px;
+  opacity:.7;
+}
+
+@media (max-width:480px){
+  .smm2-memory-details > pre{
+    max-height:300px;
+    font-size:13px;
+  }
+}
