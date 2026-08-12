@@ -167,7 +167,75 @@ function filterMetaSignals(r) {
     return r;
 }
 
+
+function sourceRangeSize(source) {
+    const nums = String(source || '').match(/\d+/g)?.map(Number) || [];
+    if (nums.length >= 2) return Math.abs(nums[nums.length - 1] - nums[0]) + 1;
+    return nums.length ? 1 : 0;
+}
+
+function looksLikeTemporalEvolutionConflict(c) {
+    if (!c || typeof c !== 'object') return false;
+
+    const topic = String(c.topic || '').toLowerCase();
+    const oldv = String(c.old_value || '').toLowerCase();
+    const newv = String(c.new_value || '').toLowerCase();
+    const joined = `${topic} ${oldv} ${newv}`;
+
+    // Explicit progression/state-change language: these normally describe "then → later",
+    // not two incompatible facts asserted for the same moment.
+    const evolutionWords = [
+        '升级','进展','发展','推进','转变','变化','改变','更新','切换','转换',
+        '后来','随后','之后','进一步','加深','升温','恶化','缓和','和好','分手',
+        '关系变化','关系进展','态度变化','情绪变化','状态变化','地点变化','场景变化',
+        '玩法升级','行为升级','行为变化','姿势变化','阶段变化','身份变化',
+        '从冷淡','变得亲密','从敌对','转为','改为','换成','开始','停止','结束'
+    ];
+
+    if (evolutionWords.some(w => joined.includes(w))) return true;
+
+    // A source spanning several sequential messages is more likely to be a progression
+    // when the topic is behavior/scene/relationship/state rather than a fixed biography fact.
+    if (sourceRangeSize(c.source) >= 2) {
+        const dynamicTopics = [
+            '行为','互动','玩法','姿势','场景','地点','关系','态度','情绪',
+            '状态','约会','行动','活动','安排','计划','衣着','位置'
+        ];
+        if (dynamicTopics.some(w => topic.includes(w))) return true;
+    }
+
+    return false;
+}
+
+function filterConflictsForStoryContinuity(items) {
+    const keep = [];
+    const evolved = [];
+
+    for (const c of Array.isArray(items) ? items : []) {
+        if (looksLikeTemporalEvolutionConflict(c)) {
+            evolved.push(c);
+        } else {
+            keep.push(c);
+        }
+    }
+
+    return { keep, evolved };
+}
+
 function mergeResult(mem, r, endIndex) {
+    // A chronological state change is not a contradiction.
+    // Only keep conflicts that survive the continuity filter.
+    const conflictFilter = filterConflictsForStoryContinuity(r.conflicts);
+    r.conflicts = conflictFilter.keep;
+
+    if (conflictFilter.evolved.length) {
+        mem.audit.push({
+            at: new Date().toISOString(),
+            type: 'temporal_evolution_not_conflict',
+            items: conflictFilter.evolved
+        });
+    }
+
     mem.timeline = uniqMerge(mem.timeline, r.timeline, x => JSON.stringify([x.date, x.time, x.event, x.source]));
     mem.facts = uniqMerge(mem.facts, r.facts, x => JSON.stringify([x.fact, x.source]));
     mem.events = uniqMerge(mem.events, r.events, x => JSON.stringify([x.date, x.title, x.source]));
@@ -209,7 +277,10 @@ const SYSTEM_PROMPT = `你是长线角色扮演的“剧情记忆审计器”。
 3. 如果上一场景是夜晚，后文明确“半夜2点/凌晨2点”等，必须考虑跨日。
 4. 不得把尚未在“新增原始聊天”中发生的预测、计划、旧总结预告写成已发生事实。
 5. 角色的猜测、医学推断、心理推测等，不可直接升级成事实。
-6. 与已有记忆中的“剧情事实”冲突时，才写入 conflicts；明显错误/超前的“剧情事实”才写入 quarantined。
+6. conflicts 的定义必须极严格：只有“同一时间点/同一事实维度上，两条已经确定的剧情事实无法同时成立”才写入 conflicts。
+   下列情况绝对不算冲突：前后时序中的状态变化、关系发展、情绪变化、地点移动、衣着变化、行为/性爱玩法变化、角色改变主意、计划更新、从A阶段进入B阶段。它们属于 timeline/events/relationships 的剧情演进。
+   例如“上午在宿舍→下午去教室”“关系冷淡→后来亲密”“先采用A行为→后来改为B行为”都不是冲突。
+   明显错误/超前、尚未由正文确认的候选事实才写入 quarantined。
 7. USER 的元指令（要求 AI 修改/重写/续写/调整回复、OOC 指令、文风/格式/尺度/生成规则、临时写作要求）不是剧情事实：不得写入 timeline/facts/events/relationships/open_loops/conflicts/quarantined，也不得据此改写 current_story_time/current_scene。若 USER 消息同时含元指令和角色在剧情中的言行，只忽略元指令部分，保留真实剧情内容。
 8. “角色在剧情中改变主意/规则/约定”属于剧情事实；“用户要求模型把上一回复改成另一版本”属于元指令。必须区分二者。
 9. 只记录对后续连续性有价值的信息。闲聊、重复描写、纯修辞可省略。
@@ -630,7 +701,7 @@ async function continueHistoryRebuild() {
     refreshNative();
     toast(`历史重建已启动：从第 ${start + 1} 条继续。第一批正在总结，请等待模型返回。`, 'success');
 
-    let beforeConflictCount = countTrueConflicts();
+    let baselineConflictCount = countTrueConflicts();
 
     try {
         while (start < chat.length && !HISTORY_STOP_REQUESTED) {
@@ -657,13 +728,12 @@ async function continueHistoryRebuild() {
             refreshNative();
 
             const newConflictCount = countTrueConflicts();
-            if (newConflictCount > beforeConflictCount) {
+            if (newConflictCount > baselineConflictCount) {
                 HISTORY_STOP_REQUESTED = true;
-                toast('检测到新的剧情事实冲突，历史重建已自动暂停。请先查看记忆。', 'warning');
+                toast('检测到新的剧情事实冲突，历史重建已自动暂停。隔离项不会触发暂停。请先查看记忆。', 'warning');
                 break;
             }
-            // quarantined 仅表示待后文确认的候选事实，不阻断历史扫描。
-            beforeConflictCount = newConflictCount;
+            baselineConflictCount = newConflictCount;
 
             await new Promise(resolve => setTimeout(resolve, 300));
         }
