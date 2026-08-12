@@ -480,8 +480,135 @@ function panelHTML() {
 }
 
 
+
+function nativeManagerHTML() {
+    return `
+      <div id="smm2_native_stats" class="smm2-stats"></div>
+
+      <div class="smm2-native-grid">
+        <button id="smm2_native_new" class="menu_button">总结新增</button>
+        <button id="smm2_native_rebuild" class="menu_button">重扫整条聊天</button>
+        <button id="smm2_native_import" class="menu_button">导入记忆 JSON</button>
+        <button id="smm2_native_export" class="menu_button">导出记忆 JSON</button>
+        <button id="smm2_native_view" class="menu_button">查看记忆</button>
+        <button id="smm2_native_clear" class="menu_button">清空本聊天记忆</button>
+      </div>
+
+      <div class="smm2-native-settings">
+        <label><input id="smm2_native_enabled" type="checkbox"> 启用插件</label>
+        <label><input id="smm2_native_inject" type="checkbox"> 生成时自动注入记忆</label>
+        <label><input id="smm2_native_auto" type="checkbox"> 自动增量总结</label>
+
+        <label>
+          每
+          <input id="smm2_native_trigger" type="number" min="1" max="50">
+          条新消息总结一次
+        </label>
+
+        <label>
+          每批最多
+          <input id="smm2_native_batch" type="number" min="4" max="60">
+          条消息
+        </label>
+
+        <label>
+          新聊天剧情起点（可空）
+          <input id="smm2_native_start" type="text" placeholder="如 2025-09-10 / 架空历法">
+        </label>
+
+        <div class="smm2-note">
+          记忆按“聊天”隔离。同一角色开新聊天，也会得到另一套记忆。
+          酒馆楼层发送时间不作为剧情时间。
+        </div>
+      </div>
+    `;
+}
+
+function bindNativeManager() {
+    const q = id => document.getElementById(id);
+    if (!q('smm2_native_new')) return;
+
+    q('smm2_native_new').onclick = () => summarizeNew(true);
+    q('smm2_native_rebuild').onclick = rebuildAll;
+    q('smm2_native_import').onclick = importMemory;
+    q('smm2_native_export').onclick = exportMemory;
+    q('smm2_native_clear').onclick = clearMemory;
+
+    q('smm2_native_view').onclick = () => {
+        const text = JSON.stringify(M(), null, 2);
+        const w = window.open('', '_blank');
+        if (!w) return toast('浏览器阻止了弹窗。', 'warning');
+        w.document.write(`<pre style="white-space:pre-wrap;font-family:monospace">${esc(text)}</pre>`);
+    };
+
+    const s = S();
+
+    q('smm2_native_enabled').onchange = e => {
+        s.enabled = e.target.checked;
+        saveSettings();
+        refreshNative();
+    };
+
+    q('smm2_native_inject').onchange = e => {
+        s.injectMemory = e.target.checked;
+        saveSettings();
+    };
+
+    q('smm2_native_auto').onchange = e => {
+        s.autoSummarize = e.target.checked;
+        saveSettings();
+    };
+
+    q('smm2_native_trigger').onchange = e => {
+        s.triggerMessages = Math.max(1, Number(e.target.value) || 8);
+        saveSettings();
+    };
+
+    q('smm2_native_batch').onchange = e => {
+        s.batchMessages = Math.max(4, Number(e.target.value) || 20);
+        saveSettings();
+    };
+
+    q('smm2_native_start').onchange = async e => {
+        s.storyStart = e.target.value.trim();
+        saveSettings();
+        const m = M();
+        if (m.last_processed_index < 0 || !m.story_start) {
+            m.story_start = s.storyStart || null;
+            await saveMeta();
+        }
+        refreshNative();
+    };
+}
+
+function refreshNative() {
+    const stats = document.getElementById('smm2_native_stats');
+    if (!stats) return;
+
+    const s = S(), st = stat();
+    stats.innerHTML =
+        `剧情时间：<b>${esc(st.time)}</b><br>` +
+        `已处理：${st.done}/${st.total}　待总结：${st.pending}<br>` +
+        `事件：${st.events}　未完成：${st.loops}　冲突/隔离：${st.conflicts}`;
+
+    const setChecked = (id, val) => {
+        const el = document.getElementById(id);
+        if (el) el.checked = !!val;
+    };
+    const setValue = (id, val) => {
+        const el = document.getElementById(id);
+        if (el) el.value = val ?? '';
+    };
+
+    setChecked('smm2_native_enabled', s.enabled);
+    setChecked('smm2_native_inject', s.injectMemory);
+    setChecked('smm2_native_auto', s.autoSummarize);
+    setValue('smm2_native_trigger', s.triggerMessages);
+    setValue('smm2_native_batch', s.batchMessages);
+    setValue('smm2_native_start', s.storyStart);
+}
+
 function installNativeExtensionEntry() {
-    // Put a native, mobile-safe entry inside SillyTavern's Extensions settings panel.
     const host =
         document.querySelector('#extensions_settings2') ||
         document.querySelector('#extensions_settings') ||
@@ -489,8 +616,10 @@ function installNativeExtensionEntry() {
 
     if (!host) return;
 
-    if (!document.getElementById('smm2_native_entry')) {
-        const wrap = document.createElement('div');
+    let wrap = document.getElementById('smm2_native_entry');
+
+    if (!wrap) {
+        wrap = document.createElement('div');
         wrap.id = 'smm2_native_entry';
         wrap.className = 'inline-drawer';
 
@@ -500,25 +629,18 @@ function installNativeExtensionEntry() {
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
           </div>
           <div class="inline-drawer-content">
-            <div class="smm2-native-summary">按聊天独立保存时间线、人物关系、事件和未完成事项。</div>
-            <button id="smm2_native_open" class="menu_button">打开剧情记忆管理器</button>
+            ${nativeManagerHTML()}
           </div>
         `;
 
         host.appendChild(wrap);
-
-        const btn = wrap.querySelector('#smm2_native_open');
-        if (btn) {
-            btn.addEventListener('click', () => {
-                const panel = document.getElementById(PANEL_ID);
-                if (panel) {
-                    panel.classList.remove('smm2-hidden');
-                    const card = panel.querySelector('.smm2-card');
-                    if (card) card.scrollTop = 0;
-                }
-            });
-        }
+    } else {
+        const content = wrap.querySelector('.inline-drawer-content');
+        if (content) content.innerHTML = nativeManagerHTML();
     }
+
+    bindNativeManager();
+    refreshNative();
 }
 
 function installUI() {
@@ -598,6 +720,7 @@ function bind() {
 }
 
 function refresh() {
+    refreshNative();
     if (!document.getElementById(PANEL_ID)) return;
     const s=S(), st=stat();
     document.getElementById('smm2_stats').innerHTML =

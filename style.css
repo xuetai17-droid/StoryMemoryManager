@@ -199,3 +199,60 @@
     }
   }
 }
+
+
+/* v0.2.7 full inline mobile manager */
+#smm2_native_entry .inline-drawer-content{
+  padding:10px 12px 14px !important;
+}
+
+#smm2_native_stats{
+  margin-bottom:10px !important;
+}
+
+.smm2-native-grid{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:8px;
+  margin-bottom:12px;
+}
+
+.smm2-native-grid .menu_button{
+  width:100%;
+  min-height:42px;
+  white-space:normal;
+}
+
+.smm2-native-settings label{
+  display:block;
+  margin:10px 0;
+  line-height:1.55;
+}
+
+.smm2-native-settings input[type=number]{
+  width:72px;
+}
+
+.smm2-native-settings input[type=text]{
+  display:block;
+  width:100%;
+  box-sizing:border-box;
+  margin-top:6px;
+  padding:8px;
+}
+
+@media (max-width:480px){
+  .smm2-native-grid{
+    grid-template-columns:1fr !important;
+  }
+
+  #smm2_native_entry .inline-drawer-content{
+    padding:8px 10px 12px !important;
+  }
+
+  .smm2-native-settings input,
+  .smm2-native-settings label,
+  #smm2_native_entry button{
+    font-size:16px !important;
+  }
+}
