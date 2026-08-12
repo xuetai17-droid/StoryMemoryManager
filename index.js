@@ -511,7 +511,11 @@ function installNativeExtensionEntry() {
         if (btn) {
             btn.addEventListener('click', () => {
                 const panel = document.getElementById(PANEL_ID);
-                if (panel) panel.classList.remove('smm2-hidden');
+                if (panel) {
+                    panel.classList.remove('smm2-hidden');
+                    const card = panel.querySelector('.smm2-card');
+                    if (card) card.scrollTop = 0;
+                }
             });
         }
     }
@@ -548,7 +552,15 @@ function installUI() {
         window.addEventListener('orientationchange', () => setTimeout(placeMemoryButton, 150), { passive:true });
 
         document.body.appendChild(b);
-        b.onclick=()=>document.getElementById(PANEL_ID)?.classList.toggle('smm2-hidden');
+        b.onclick=()=>{
+            const panel = document.getElementById(PANEL_ID);
+            if (!panel) return;
+            panel.classList.toggle('smm2-hidden');
+            if (!panel.classList.contains('smm2-hidden')) {
+                const card = panel.querySelector('.smm2-card');
+                if (card) card.scrollTop = 0;
+            }
+        };
     }
 
     if (!document.getElementById(PANEL_ID)) {
