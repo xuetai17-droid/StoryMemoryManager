@@ -69,3 +69,30 @@
     grid-template-columns:1fr !important;
   }
 }
+
+
+/* v0.2.5 native mobile extensions entry */
+#smm2_native_entry {
+  margin-top: 8px;
+}
+
+#smm2_native_entry .inline-drawer-content {
+  padding: 8px 10px 12px;
+}
+
+.smm2-native-summary {
+  opacity: .8;
+  line-height: 1.5;
+  margin-bottom: 8px;
+}
+
+#smm2_native_open {
+  width: 100%;
+}
+
+@media (max-width: 800px){
+  #smm2_fab,
+  #smm_diagnostic_boot_button {
+    display:none !important;
+  }
+}

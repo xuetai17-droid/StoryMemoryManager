@@ -28,6 +28,11 @@
             alert('Story Memory Manager v0.2.3 的 index.js 已成功加载。');
         };
         document.body.appendChild(b);
+        try {
+            if (window.matchMedia?.('(max-width: 800px)')?.matches ?? (window.innerWidth <= 800)) {
+                b.style.display = 'none';
+            }
+        } catch {}
         console.log('[StoryMemory] DIAGNOSTIC BOOT v0.2.3 mounted');
     }
 
@@ -474,7 +479,46 @@ function panelHTML() {
     </div>`;
 }
 
+
+function installNativeExtensionEntry() {
+    // Put a native, mobile-safe entry inside SillyTavern's Extensions settings panel.
+    const host =
+        document.querySelector('#extensions_settings2') ||
+        document.querySelector('#extensions_settings') ||
+        document.querySelector('#extensionsMenu');
+
+    if (!host) return;
+
+    if (!document.getElementById('smm2_native_entry')) {
+        const wrap = document.createElement('div');
+        wrap.id = 'smm2_native_entry';
+        wrap.className = 'inline-drawer';
+
+        wrap.innerHTML = `
+          <div class="inline-drawer-toggle inline-drawer-header">
+            <b>剧情自动记忆</b>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+          </div>
+          <div class="inline-drawer-content">
+            <div class="smm2-native-summary">按聊天独立保存时间线、人物关系、事件和未完成事项。</div>
+            <button id="smm2_native_open" class="menu_button">打开剧情记忆管理器</button>
+          </div>
+        `;
+
+        host.appendChild(wrap);
+
+        const btn = wrap.querySelector('#smm2_native_open');
+        if (btn) {
+            btn.addEventListener('click', () => {
+                const panel = document.getElementById(PANEL_ID);
+                if (panel) panel.classList.remove('smm2-hidden');
+            });
+        }
+    }
+}
+
 function installUI() {
+    // Keep floating button for desktop, but the native Extensions entry is the primary mobile path.
     if (!document.getElementById(BUTTON_ID)) {
         const b=document.createElement('button');
         b.id=BUTTON_ID; b.textContent='记忆';
@@ -482,27 +526,21 @@ function installUI() {
 
         const placeMemoryButton = () => {
             const mobile = window.matchMedia?.('(max-width: 800px)')?.matches ?? (window.innerWidth <= 800);
-            Object.assign(b.style, mobile ? {
-                position:'fixed',
-                left:'10px',
-                right:'auto',
-                bottom:'110px',
-                zIndex:'2147483646',
-                display:'block',
-                visibility:'visible',
-                opacity:'1',
-                transform:'none'
-            } : {
-                position:'fixed',
-                left:'auto',
-                right:'12px',
-                bottom:'96px',
-                zIndex:'9998',
-                display:'block',
-                visibility:'visible',
-                opacity:'1',
-                transform:'none'
-            });
+            if (mobile) {
+                b.style.display = 'none';
+            } else {
+                Object.assign(b.style, {
+                    position:'fixed',
+                    left:'auto',
+                    right:'12px',
+                    bottom:'96px',
+                    zIndex:'9998',
+                    display:'block',
+                    visibility:'visible',
+                    opacity:'1',
+                    transform:'none'
+                });
+            }
         };
 
         placeMemoryButton();
@@ -512,9 +550,12 @@ function installUI() {
         document.body.appendChild(b);
         b.onclick=()=>document.getElementById(PANEL_ID)?.classList.toggle('smm2-hidden');
     }
+
     if (!document.getElementById(PANEL_ID)) {
         document.body.insertAdjacentHTML('beforeend', panelHTML());
     }
+
+    installNativeExtensionEntry();
     bind();
     refresh();
 }
