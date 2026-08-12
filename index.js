@@ -491,14 +491,50 @@ async function maybeAuto() {
     if (st.pending >= Math.max(1,Number(s.triggerMessages)||8)) await summarizeNew(false);
 }
 
-export function onActivate() {
-    const c=C();
+
+let INITIALIZED = false;
+
+function initializeExtension() {
+    if (INITIALIZED) return;
+    INITIALIZED = true;
+
+    const c = C();
     S();
-    c.eventSource.on(c.event_types.APP_READY, ()=>setTimeout(installUI,100));
-    c.eventSource.on(c.event_types.CHAT_CHANGED, ()=>setTimeout(()=>{installUI();refresh();},150));
-    c.eventSource.on(c.event_types.MESSAGE_RECEIVED, ()=>setTimeout(async()=>{refresh();await maybeAuto();},100));
-    c.eventSource.on(c.event_types.MESSAGE_SENT, ()=>setTimeout(refresh,50));
-    c.eventSource.on(c.event_types.MESSAGE_EDITED, ()=>setTimeout(refresh,50));
-    c.eventSource.on(c.event_types.MESSAGE_DELETED, ()=>setTimeout(refresh,50));
-    setTimeout(installUI,250);
+
+    const safeOn = (eventName, handler) => {
+        try {
+            const evt = c.event_types?.[eventName];
+            if (evt) c.eventSource.on(evt, handler);
+        } catch (e) {
+            console.warn('[StoryMemory] event registration failed:', eventName, e);
+        }
+    };
+
+    safeOn('CHAT_CHANGED', () => setTimeout(() => { installUI(); refresh(); }, 150));
+    safeOn('MESSAGE_RECEIVED', () => setTimeout(async () => { refresh(); await maybeAuto(); }, 100));
+    safeOn('MESSAGE_SENT', () => setTimeout(refresh, 50));
+    safeOn('MESSAGE_EDITED', () => setTimeout(refresh, 50));
+    safeOn('MESSAGE_DELETED', () => setTimeout(refresh, 50));
+    safeOn('APP_READY', () => setTimeout(() => { installUI(); refresh(); }, 100));
+
+    // Important compatibility fallback:
+    // some SillyTavern builds load the module after APP_READY has already fired.
+    // Therefore we also mount the UI directly after the module itself is evaluated.
+    setTimeout(() => {
+        try {
+            installUI();
+            refresh();
+            console.log('[StoryMemory] UI initialized');
+        } catch (e) {
+            console.error('[StoryMemory] UI initialization failed', e);
+            toast(`插件界面加载失败：${e.message || e}`, 'error');
+        }
+    }, 250);
 }
+
+export function onActivate() {
+    initializeExtension();
+}
+
+// Fallback for builds where lifecycle activation is unavailable/missed.
+initializeExtension();
