@@ -1270,7 +1270,7 @@ function cleanLegacyTasksForThisChat(mem=M()) {
         mem.quarantined = Array.isArray(mem.quarantined) ? mem.quarantined : [];
         mem.quarantined.push(...archived.map(t => ({
             type:'legacy_task_archived',
-            reason:'v0.4.1 严格待办清洗：非用户确认的真实未来待办，移出待办区',
+            reason:'v0.5.0 严格待办清洗：非用户确认的真实未来待办，移出待办区',
             task:t
         })));
     }
@@ -1553,6 +1553,85 @@ function countTrueConflicts() {
     return (m.conflicts?.length || 0);
 }
 
+
+function exportRawChat() {
+    const c = C();
+    const payload = {
+        exported_at: new Date().toISOString(),
+        chat_name: c?.name || null,
+        story_start: M().story_start || S().storyStart || null,
+        messages: (c.chat || []).map((m,i)=>({
+            index:i,
+            role:m.is_user ? 'user' : (m.is_system ? 'system' : 'assistant'),
+            name:m.name || null,
+            mes:m.mes || '',
+            send_date:m.send_date || null
+        }))
+    };
+    const blob = new Blob([JSON.stringify(payload,null,2)], {type:'application/json'});
+    const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+    a.download=`story-raw-chat-${Date.now()}.json`; a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+}
+
+function safeRebuildFreshMemory(anchor, currentDate) {
+    const m=freshMemory();
+    m.story_start=anchor;
+    m.current_story_date=anchor;
+    m.current_story_time=null;
+    m.rebuild_target_date=currentDate || null;
+    m.rebuild_mode='safe_v050';
+    m.audit.push({at:new Date().toISOString(),type:'safe_rebuild_started',anchor,target_date:currentDate||null});
+    return m;
+}
+
+async function safeHistoryRebuild() {
+    if (HISTORY_RUNNING || BUSY) return toast('当前有任务正在运行，请先暂停或等待完成。','warning');
+    const c=C(), chat=c.chat||[];
+    if (!chat.length) return toast('当前聊天为空。','warning');
+    const anchor=(M().story_start || S().storyStart || '2025-09-10').trim();
+    const target=M().current_story_date || detectCurrentDateFromRecentChat()?.date || null;
+    if (!confirm(`将从第1条原始聊天安全重建临时记忆。\n剧情起点锁定：${anchor}\n当前日期参考：${target||'未设置'}\n\n不会修改原聊天；旧记忆会完整备份。继续吗？`)) return;
+
+    const old=JSON.parse(JSON.stringify(M()));
+    c.chatMetadata[META_KEY+'_backup_v050_'+Date.now()]=old;
+    c.chatMetadata[META_KEY]=safeRebuildFreshMemory(anchor,target);
+    await saveMeta();
+
+    HISTORY_RUNNING=true; HISTORY_STOP_REQUESTED=false; BUSY=true; refreshNative();
+    toast('v0.5.0 安全历史重建已启动。旧记忆已备份。','success');
+    try {
+        let start=0;
+        while(start<chat.length && !HISTORY_STOP_REQUESTED){
+            const batch=Math.max(4,Number(S().batchMessages)||20);
+            const end=Math.min(chat.length,start+batch);
+            const beforeDate=M().current_story_date;
+            await summarizeRange(start,end);
+            const after=M().current_story_date;
+            // Hard anchor and monotonic-date guard.
+            M().story_start=anchor;
+            if (beforeDate && after && after < beforeDate) {
+                M().quarantined.push({content:`批次 #${start+1}-#${end} 尝试将当前日期 ${beforeDate} 倒退为 ${after}`,
+                    reason:'v0.5.0 单向时间守卫：当前主线日期禁止倒退',source:`#${start+1}-#${end}`});
+                M().current_story_date=beforeDate;
+            }
+            // Never allow a current date before the locked story anchor.
+            if (M().current_story_date && M().current_story_date < anchor) M().current_story_date=anchor;
+            await saveMeta();
+            start=end; refresh(); refreshNative();
+            await new Promise(r=>setTimeout(r,250));
+        }
+        if (!HISTORY_STOP_REQUESTED) {
+            // Normalize into v4 view only after the full source scan.
+            try { await rebuildV4Data(); } catch(e) { console.warn('[StoryMemory] v4 normalize after safe rebuild',e); }
+            toast('v0.5.0 安全历史重建完成。请先检查日期、时间线和待办，再继续聊天。','success');
+        }
+    } catch(e){
+        console.error('[StoryMemory] safe rebuild failed',e);
+        toast(`安全历史重建失败：${e.message||e}`,'error');
+    } finally { HISTORY_RUNNING=false; BUSY=false; refreshNative(); refresh(); }
+}
+
 async function continueHistoryRebuild() {
     if (HISTORY_RUNNING) {
         toast('历史重建已经在运行。', 'info');
@@ -1649,7 +1728,8 @@ function nativeManagerHTML() {
         <button id="smm2_native_new" class="menu_button">总结新增</button>
         <button id="smm2_native_history" class="menu_button">继续历史重建</button>
         <button id="smm2_native_stop" class="menu_button">暂停历史重建</button>
-        <button id="smm2_native_rebuild" class="menu_button">从头重扫整条聊天</button>
+        <button id="smm2_native_rebuild" class="menu_button">安全重建 1～全部原始聊天</button>
+        <button id="smm50_export_raw" class="menu_button">导出原始聊天 JSON</button>
         <button id="smm2_native_import" class="menu_button">导入记忆 JSON</button>
         <button id="smm2_native_export" class="menu_button">导出记忆 JSON</button>
         <button id="smm2_native_view" class="menu_button">查看/收起记忆</button>
@@ -1669,7 +1749,7 @@ function nativeManagerHTML() {
       </details>
       <details class="smm2-tool-card" open>
         <summary>
-          <span class="smm2-tool-title">时间基准修复 v0.4.1</span>
+          <span class="smm2-tool-title">时间基准修复 v0.5.0</span>
           <span class="smm2-tool-subtitle">绝对日期用于计算，学期时间用于显示</span>
         </summary>
         <div class="smm2-tool-body">
@@ -1748,9 +1828,10 @@ function bindNativeManager() {
     if (!q('smm2_native_new')) return;
 
     q('smm2_native_new').onclick = () => summarizeNew(true);
-    q('smm2_native_history').onclick = continueHistoryRebuild;
+    q('smm2_native_history').onclick = () => toast('v0.5.0 已停用旧版“继续历史重建”。请使用“安全重建 1～全部原始聊天”。','warning');
     q('smm2_native_stop').onclick = stopHistoryRebuild;
-    q('smm2_native_rebuild').onclick = rebuildAll;
+    q('smm2_native_rebuild').onclick = safeHistoryRebuild;
+    const raw50=q('smm50_export_raw'); if(raw50) raw50.onclick=exportRawChat;
     q('smm2_native_import').onclick = importMemory;
     q('smm2_native_export').onclick = exportMemory;
     q('smm2_native_clear').onclick = clearMemory;
