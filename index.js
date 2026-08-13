@@ -82,6 +82,7 @@ function freshMemory() {
         schema: 'story_memory_manager_v2',
         version: 2,
         story_start: S().storyStart || null,
+        current_story_date: null,
         current_story_time: S().currentStoryTime || null,
         last_processed_index: -1,
         timeline: [],
@@ -262,6 +263,10 @@ function mergeResult(mem, r, endIndex) {
     } else if (typeof r.story_start === 'string' && r.story_start.trim()) {
         mem.story_start = r.story_start.trim();
     }
+    if (typeof r.current_story_date === 'string' && r.current_story_date.trim()) {
+        const d = normalizeDateInput(r.current_story_date.trim());
+        if (d) mem.current_story_date = d.iso;
+    }
     if (typeof r.current_story_time === 'string' && r.current_story_time.trim()) mem.current_story_time = r.current_story_time.trim();
 
     mem.last_processed_index = endIndex - 1;
@@ -309,6 +314,7 @@ function schema() {
             type:'object',
             properties:{
                 story_start: nullable(),
+                current_story_date: nullable(),
                 current_story_time: nullable(),
                 current_scene:{type:'object',additionalProperties:true},
                 timeline:{type:'array',items:{type:'object',properties:{
@@ -350,6 +356,7 @@ function compact(mem) {
     const s = S();
     return {
         story_start: mem.story_start,
+        current_story_date: mem.current_story_date || isoDateFromAny(mem.current_story_time),
         current_story_time: mem.current_story_time,
         current_scene: mem.current_scene,
         timeline: mem.timeline.slice(-Math.min(30, Number(s.maxTimeline)||50)),
@@ -374,6 +381,8 @@ ${messagesText(start, end)}
 
 请只从“新增原始聊天”更新记忆。source 使用 #消息编号。旧记忆只用于对照，不允许把旧记忆中尚未发生的未来内容变成事实。
 【v4数据规范】
+- 必须单独输出 current_story_date，格式严格为 YYYY-MM-DD；这是机器计算使用的绝对剧情日期。
+- current_story_time 可以保留“秋季学期 周X HH:MM”作为显示时间，但不能代替 current_story_date。
 - 时间线必须尽量给出具体 YYYY-MM-DD；“秋季学期/周五/上午”只能作为附加描述，不能替代日期。
 - 人物资料分稳定资料与当前状态。地点、衣着、陪伴者、身体状态属于当前状态，后文更新时覆盖，不要不断堆成数组。
 - 人物别名必须归一；同一人物不得因中英文名/昵称拆成多个实体。
@@ -391,7 +400,7 @@ ${messagesText(start, end)}
         // Fallback for models/backends without structured output.
         raw = await c.generateRaw({
             systemPrompt:SYSTEM_PROMPT,
-            prompt: prompt + '\n\n请严格返回合法 JSON，字段必须包含 story_start,current_story_time,current_scene,timeline,facts,events,characters,relationships,open_loops,locations,items,conflicts,quarantined。'
+            prompt: prompt + '\n\n请严格返回合法 JSON，字段必须包含 story_start,current_story_date,current_story_time,current_scene,timeline,facts,events,characters,relationships,open_loops,locations,items,conflicts,quarantined。'
         });
         let r = filterMetaSignals(parseJSON(raw));
         mergeResult(mem, r, end);
@@ -499,7 +508,7 @@ function memoryForPrompt() {
     const m = compact(M());
     return `<STORY_MEMORY>
 以下是“当前聊天专属”的剧情状态数据库。它不能覆盖原始聊天中的明确事实。
-时间规则：用户正文明确时间 > 相对时间推进 > 连续事件 > AI的<date>；禁止使用酒馆楼层发送时间作为剧情时间。
+时间规则：current_story_date（绝对日期）用于机器计算；current_story_time（学期/星期/时分）仅用于显示。用户正文明确时间 > 相对时间推进 > 连续事件 > AI的<date>；禁止使用酒馆楼层发送时间作为剧情时间。
 如 conflicts/quarantined 与正文发生冲突，以正文为准。
 ${JSON.stringify(m, null, 2)}
 </STORY_MEMORY>`;
@@ -992,6 +1001,7 @@ function emptyV4MemoryFromLegacy(mem) {
         schema: SMM4_SCHEMA,
         version: 4,
         story_start: mem.story_start || S().storyStart || null,
+        current_story_date: mem.current_story_date || isoDateFromAny(mem.current_story_time) || null,
         current_story_time: mem.current_story_time || null,
         current_scene: mem.current_scene || {},
         last_processed_index: Number(mem.last_processed_index ?? -1),
@@ -1199,6 +1209,127 @@ async function migrateToV4Now() {
     toast('v4 数据重构完成。旧记忆已备份，可继续检查后再重建。','success');
 }
 
+
+function extractDateTagFromMessage(text) {
+    const s = String(text || '');
+    let m = s.match(/<date>\s*(20\d{2})年\s*(\d{1,2})月\s*(\d{1,2})日\s*<\/date>/i);
+    if (!m) m = s.match(/<date>\s*(20\d{2})[-\/](\d{1,2})[-\/](\d{1,2})\s*<\/date>/i);
+    if (!m) return null;
+    return `${m[1]}-${String(m[2]).padStart(2,'0')}-${String(m[3]).padStart(2,'0')}`;
+}
+
+function detectCurrentDateFromRecentChat() {
+    const chat = C().chat || [];
+    for (let i=chat.length-1; i>=0; i--) {
+        const d = extractDateTagFromMessage(cleanMes(chat[i]));
+        if (d) return {date:d, source:`#${i} <date>`};
+    }
+    return null;
+}
+
+function effectiveCurrentDate(mem=M()) {
+    return mem.current_story_date ||
+           detectCurrentDateFromRecentChat()?.date ||
+           isoDateFromAny(mem.current_story_time) ||
+           null;
+}
+
+function combinedStoryTime(mem=M()) {
+    const d = effectiveCurrentDate(mem);
+    const t = String(mem.current_story_time || '').trim();
+    return d ? `${d}${t ? '｜'+t : ''}` : (t || '未建立');
+}
+
+function cleanLegacyTasksForThisChat(mem=M()) {
+    if (mem.schema !== SMM4_SCHEMA) return {kept:0, archived:0};
+    const current = effectiveCurrentDate(mem);
+    const kept = [];
+    const archived = [];
+
+    for (const t of (mem.tasks_v4 || [])) {
+        const text = `${t.title||''} ${t.due||''} ${t.description||''}`;
+        const due = isoDateFromAny(t.due);
+
+        // This chat has one user-confirmed unresolved appointment:
+        // Vera meeting. Preserve it unless later explicitly resolved.
+        const isVeraMeeting = /薇拉|vera/i.test(text) && /会面|见面|KKI|KKT/i.test(text);
+
+        const clearlyPast = !!(due && current && due < current);
+        const historicalState = /确立.*关系|已经|已完成|完成性|已结束|发生第一次|今晚.*性行为|游泳课|游泳练习|学习海豚打腿/i.test(text);
+
+        if (isVeraMeeting && !/已会面|会面完成|已取消|取消会面/i.test(text)) {
+            kept.push({...t, status:'pending'});
+        } else if (clearlyPast || historicalState || !isVeraMeeting) {
+            archived.push({...t, status:'archived_by_v041'});
+        } else {
+            kept.push(t);
+        }
+    }
+
+    if (archived.length) {
+        mem.quarantined = Array.isArray(mem.quarantined) ? mem.quarantined : [];
+        mem.quarantined.push(...archived.map(t => ({
+            type:'legacy_task_archived',
+            reason:'v0.4.1 严格待办清洗：非用户确认的真实未来待办，移出待办区',
+            task:t
+        })));
+    }
+    mem.tasks_v4 = kept;
+    return {kept:kept.length, archived:archived.length};
+}
+
+async function repairTimeBaselineV041() {
+    if (HISTORY_RUNNING || BUSY) {
+        toast('请先暂停历史重建，等待当前请求结束。','warning');
+        return;
+    }
+    const mem = M();
+    if (mem.schema !== SMM4_SCHEMA) {
+        toast('请先执行 v4 数据重构。','warning');
+        return;
+    }
+
+    const startEl = document.getElementById('smm41_story_start');
+    const dateEl = document.getElementById('smm41_current_date');
+    const start = normalizeDateInput(startEl?.value || '2025-09-10');
+    const detected = detectCurrentDateFromRecentChat();
+    const cur = normalizeDateInput(dateEl?.value || detected?.date || '');
+
+    if (!start) return toast('剧情起点格式必须为 YYYY-MM-DD。','warning');
+    if (!cur) return toast('当前剧情日期无法自动识别，请手动填写 YYYY-MM-DD。','warning');
+
+    const backupKey = `${META_KEY}_pre_v041_time_repair`;
+    C().chatMetadata[backupKey] = JSON.parse(JSON.stringify(mem));
+
+    mem.story_start = start.iso;
+    mem.current_story_date = cur.iso;
+
+    // Keep the display-form worldbook time, but absolute date is authoritative.
+    if (!mem.current_story_time) mem.current_story_time = cur.iso;
+
+    const taskResult = cleanLegacyTasksForThisChat(mem);
+    mem.audit = Array.isArray(mem.audit) ? mem.audit : [];
+    mem.audit.push({
+        at:new Date().toISOString(),
+        type:'v041_time_baseline_repair',
+        story_start:start.iso,
+        current_story_date:cur.iso,
+        date_source: detected?.source || 'manual',
+        tasks_kept:taskResult.kept,
+        tasks_archived:taskResult.archived
+    });
+
+    await saveMeta();
+    refresh();
+    refreshNative();
+    const box=document.getElementById('smm2_native_memory_box');
+    if (box?.dataset.open==='1') {
+        box.innerHTML=memoryReadableHTML();
+        bindHistoryBrowserV4();
+    }
+    toast(`时间基准已修复：起点 ${start.iso}，当前日期 ${cur.iso}；待办保留 ${taskResult.kept} 条。`,'success');
+}
+
 function v4DaysSorted(mem=M()) {
     return Object.values(mem.days || {}).sort((a,b)=>String(a.date).localeCompare(String(b.date)));
 }
@@ -1253,7 +1384,7 @@ function v4TasksHTML(mem=M()) {
 
 function v4DateAudit(mem=M()) {
     const start=isoDateFromAny(mem.story_start || S().storyStart);
-    const current=isoDateFromAny(mem.current_story_time);
+    const current=effectiveCurrentDate(mem);
     if (!start || !current) return {ok:false, message:'当前剧情时间尚未标准化为具体日期，暂不能检查缺失日期。'};
     const present=new Set(Object.keys(mem.days||{}));
     const a=new Date(`${start}T00:00:00Z`), b=new Date(`${current}T00:00:00Z`);
@@ -1333,7 +1464,9 @@ function memoryReadableHTML() {
         <div class="smm2-memory-top">
           <div><b>数据结构：</b>v4 标准化</div>
           <div><b>剧情起点：</b>${esc(mem.story_start || '未建立')} <span class="smm2-lock">🔒</span></div>
-          <div><b>当前剧情时间：</b>${esc(mem.current_story_time || '未建立')}</div>
+          <div><b>当前剧情日期：</b>${esc(effectiveCurrentDate(mem) || '未建立')}</div>
+          <div><b>显示时间：</b>${esc(mem.current_story_time || '未建立')}</div>
+          <div><b>计算时间基准：</b>${esc(combinedStoryTime(mem))}</div>
           <div><b>已处理到：</b>${Math.max(0, Number(mem.last_processed_index ?? -1)+1)} 条</div>
           ${auditHtml}
         </div>
@@ -1534,6 +1667,24 @@ function nativeManagerHTML() {
           <button id="smm4_native_migrate" class="menu_button smm2-primary-tool">执行数据重构</button>
         </div>
       </details>
+      <details class="smm2-tool-card" open>
+        <summary>
+          <span class="smm2-tool-title">时间基准修复 v0.4.1</span>
+          <span class="smm2-tool-subtitle">绝对日期用于计算，学期时间用于显示</span>
+        </summary>
+        <div class="smm2-tool-body">
+          <div class="smm2-note">
+            会修正插件记忆，不修改原聊天。优先从最近聊天的 &lt;date&gt; 标签读取绝对日期；读取不到时可手动填写。
+          </div>
+          <div class="smm41-grid">
+            <label><span>剧情起点</span><input id="smm41_story_start" type="text" value="2025-09-10"></label>
+            <label><span>当前剧情日期</span><input id="smm41_current_date" type="text" placeholder="如 2025-09-20"></label>
+          </div>
+          <button id="smm41_detect_date" class="menu_button">从最近聊天同步日期</button>
+          <button id="smm41_repair_time" class="menu_button smm2-primary-tool">执行时间基准修复 + 清洗旧待办</button>
+        </div>
+      </details>
+
 
 
       <details class="smm2-tool-card smm2-time-fix">
@@ -1607,6 +1758,19 @@ function bindNativeManager() {
     q('smm2_native_view').onclick = toggleReadableMemory;
     const migrateNative = document.getElementById('smm4_native_migrate');
     if (migrateNative) migrateNative.onclick = migrateToV4Now;
+    const detectDateBtn = document.getElementById('smm41_detect_date');
+    if (detectDateBtn) detectDateBtn.onclick = () => {
+        const found = detectCurrentDateFromRecentChat();
+        const el = document.getElementById('smm41_current_date');
+        if (found) {
+            if (el) el.value = found.date;
+            toast(`已从 ${found.source} 识别当前剧情日期：${found.date}`,'success');
+        } else {
+            toast('最近聊天中没有找到 <date>YYYY年MM月DD日</date>，请手动填写当前剧情日期。','warning');
+        }
+    };
+    const repairTimeBtn = document.getElementById('smm41_repair_time');
+    if (repairTimeBtn) repairTimeBtn.onclick = repairTimeBaselineV041;
 
     q('smm2_native_fix_time').onclick = correctMemoryDate;
 

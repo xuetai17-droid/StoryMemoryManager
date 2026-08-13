@@ -486,3 +486,8 @@
 .smm2-v4-section{margin:8px 0}
 .smm2-v4-section>b{display:block;margin-bottom:4px}
 .smm2-v4-section pre{margin:0;white-space:pre-wrap;word-break:break-word}
+
+.smm41-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:10px 0}
+.smm41-grid label{display:flex;flex-direction:column;gap:5px}
+.smm41-grid input{width:100%;box-sizing:border-box}
+@media(max-width:480px){.smm41-grid{grid-template-columns:1fr}}
