@@ -275,6 +275,9 @@ const SYSTEM_PROMPT = `你是长线角色扮演的“剧情记忆审计器”。
 1. 酒馆消息发送时间/楼层时间戳不是剧情时间，禁止据此推断剧情日期。
 2. 时间证据优先级：用户正文明确时间 > 正文明确相对推进（第二天/几小时后/跨午夜） > 可验证事件连续性 > AI正文中的<date>标签。
 3. 如果上一场景是夜晚，后文明确“半夜2点/凌晨2点”等，必须考虑跨日。
+3A. 月份锁：若已有可靠记忆处于某月，而“新增原始聊天”没有明确出现新的年月日、明确“下个月/数周后/一个月后”等跨月推进证据，禁止自行改变月份。
+3B. 单独出现“17日/周五/早晨”等信息时，默认继承当前可靠月份；不得仅凭 AI 的 <date> 标签把 9 月推成 10 月。
+3C. AI 的 <date> 只属于低优先级证据；若它造成无正文证据的跨月、倒退或大跨度跳跃，必须忽略该日期，并维持上一可靠时间。
 4. 不得把尚未在“新增原始聊天”中发生的预测、计划、旧总结预告写成已发生事实。
 5. 角色的猜测、医学推断、心理推测等，不可直接升级成事实。
 6. conflicts 的定义必须极严格：只有“同一时间点/同一事实维度上，两条已经确定的剧情事实无法同时成立”才写入 conflicts。
@@ -361,7 +364,8 @@ ${JSON.stringify(compact(mem), null, 2)}
 【新增原始聊天】
 ${messagesText(start, end)}
 
-请只从“新增原始聊天”更新记忆。source 使用 #消息编号。旧记忆只用于对照，不允许把旧记忆中尚未发生的未来内容变成事实。`;
+请只从“新增原始聊天”更新记忆。source 使用 #消息编号。旧记忆只用于对照，不允许把旧记忆中尚未发生的未来内容变成事实。
+特别检查日期连续性：没有新增原始聊天中的明确跨月证据，就必须继承已有可靠月份；禁止仅凭 AI <date> 或自行推算跨月。`;
     let raw;
     try {
         raw = await c.generateRaw({ systemPrompt:SYSTEM_PROMPT, prompt, jsonSchema:schema() });
@@ -571,6 +575,88 @@ function panelHTML() {
 
 
 
+
+function normalizeDateInput(s) {
+    const m = String(s || '').trim().match(/^(\d{4})[-\/年](\d{1,2})[-\/月](\d{1,2})(?:日)?$/);
+    if (!m) return null;
+    return {
+        y: Number(m[1]), m: Number(m[2]), d: Number(m[3]),
+        iso: `${m[1]}-${String(m[2]).padStart(2,'0')}-${String(m[3]).padStart(2,'0')}`,
+        cn: `${m[1]}年${Number(m[2])}月${Number(m[3])}日`
+    };
+}
+
+function replaceDateFormsInString(text, from, to) {
+    if (typeof text !== 'string') return text;
+    const forms = [
+        [from.iso, to.iso],
+        [from.cn, to.cn],
+        [`${from.y}/${String(from.m).padStart(2,'0')}/${String(from.d).padStart(2,'0')}`,
+         `${to.y}/${String(to.m).padStart(2,'0')}/${String(to.d).padStart(2,'0')}`],
+        [`${from.y}/${from.m}/${from.d}`, `${to.y}/${to.m}/${to.d}`]
+    ];
+    let out = text;
+    for (const [a,b] of forms) out = out.split(a).join(b);
+    return out;
+}
+
+function deepReplaceDate(value, from, to) {
+    if (typeof value === 'string') return replaceDateFormsInString(value, from, to);
+    if (Array.isArray(value)) return value.map(v => deepReplaceDate(v, from, to));
+    if (value && typeof value === 'object') {
+        const out = {};
+        for (const [k,v] of Object.entries(value)) out[k] = deepReplaceDate(v, from, to);
+        return out;
+    }
+    return value;
+}
+
+async function correctMemoryDate() {
+    if (HISTORY_RUNNING || BUSY) {
+        toast('请先暂停历史重建，等待当前批次结束后再修正时间。', 'warning');
+        return;
+    }
+
+    const fromEl = document.getElementById('smm2_fix_from');
+    const toEl = document.getElementById('smm2_fix_to');
+    const from = normalizeDateInput(fromEl?.value);
+    const to = normalizeDateInput(toEl?.value);
+
+    if (!from || !to) {
+        toast('日期格式请填写为 YYYY-MM-DD，例如 2025-10-17。', 'warning');
+        return;
+    }
+    if (from.iso === to.iso) {
+        toast('错误日期和正确日期相同，无需修正。', 'warning');
+        return;
+    }
+
+    const mem = M();
+    const snapshot = JSON.parse(JSON.stringify(mem));
+    const corrected = deepReplaceDate(snapshot, from, to);
+
+    // Keep a compact rollback record in audit without duplicating the whole memory.
+    corrected.audit = Array.isArray(corrected.audit) ? corrected.audit : [];
+    corrected.audit.push({
+        at: new Date().toISOString(),
+        type: 'manual_date_correction',
+        from: from.iso,
+        to: to.iso,
+        processed_to: Number(mem.last_processed_index ?? -1)
+    });
+    if (corrected.audit.length > 50) corrected.audit = corrected.audit.slice(-50);
+
+    C().chatMetadata[META_KEY] = corrected;
+    await saveMeta();
+    refresh();
+    refreshNative();
+
+    const box = document.getElementById('smm2_native_memory_box');
+    if (box?.dataset.open === '1') box.innerHTML = memoryReadableHTML();
+
+    toast(`时间修正完成：${from.iso} → ${to.iso}。聊天原文未修改。`, 'success');
+}
+
 function memoryReadableHTML() {
     const m = M();
 
@@ -779,6 +865,18 @@ function nativeManagerHTML() {
 
       <div id="smm2_native_memory_box" data-open="0"></div>
 
+      <div class="smm2-native-settings smm2-time-fix">
+        <b>时间修正</b>
+        <div class="smm2-note">只修正插件记忆，不修改原聊天。历史重建暂停后再执行。</div>
+        <label>错误日期
+          <input id="smm2_fix_from" type="text" placeholder="2025-10-17">
+        </label>
+        <label>正确日期
+          <input id="smm2_fix_to" type="text" placeholder="2025-09-17">
+        </label>
+        <button id="smm2_native_fix_time" class="menu_button">执行时间修正</button>
+      </div>
+
       <div class="smm2-native-settings">
         <label><input id="smm2_native_enabled" type="checkbox"> 启用插件</label>
         <label><input id="smm2_native_inject" type="checkbox"> 生成时自动注入记忆</label>
@@ -822,6 +920,7 @@ function bindNativeManager() {
     q('smm2_native_clear').onclick = clearMemory;
 
     q('smm2_native_view').onclick = toggleReadableMemory;
+    q('smm2_native_fix_time').onclick = correctMemoryDate;
 
     const s = S();
 
