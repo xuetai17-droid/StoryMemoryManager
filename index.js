@@ -301,7 +301,7 @@ function addDaysISO(date, days=1) {
 function previousDayISO(date) { return addDaysISO(date,-1); }
 
 /*
- * v0.5.4 夜间归属修正：
+ * v0.5.5 夜间归属修正：
  * 旧摘要常把“前一日晚间 -> 次日凌晨”整段贴到次日。
  * 当同一日期桶同时出现“凌晨/半夜”和“21:00以后晚间”时，
  * 且该日期前一天已经存在于时间线，允许把晚间段回拨到前一天。
@@ -408,31 +408,50 @@ function calibrateTimeline(mem=M(), {allowCrossMidnight=true}={}) {
                 diagnostics.push({type:'date_regression',source:row.source,content:`${prev.date} → ${row.date}`,reason:'原始消息顺序中日期倒退'});
             }
             if(row.date===prev.date && prev.__clock!=null && row.__clock!=null &&
-               prev.__clock-row.__clock>6*60 && !/回忆|此前|之前|早些时候/.test(`${row.event||''}`)){
-                diagnostics.push({type:'clock_regression',source:row.source,content:`${prev.time||''} → ${row.time||''}`,reason:'同日原始消息顺序出现大幅时间倒退，建议人工核对是否跨日或回忆'});
+               row.__src>=prev.__src && row.__clock < prev.__clock &&
+               !/回忆|此前|之前|早些时候/.test(`${row.event||''}`)){
+                const delta=prev.__clock-row.__clock;
+                diagnostics.push({
+                    type:'clock_source_conflict',
+                    source:row.source,
+                    content:`原始顺序 ${prev.source||''} → ${row.source||''}；时间文本 ${prev.time||''} → ${row.time||''}`,
+                    reason: delta>6*60
+                      ? '时间文本与原始消息顺序严重冲突：以 source 顺序为准，建议检查是否跨日或摘要时间误写'
+                      : '时间文本与原始消息顺序冲突：显示顺序以 source 为准'
+                });
             }
         }
         if(row.__clock!=null) prev=row;
     }
 
-    // 5) Canonical display ordering: date first, then parsed clock, then source.
+    // 5) Canonical display ordering:
+    // date first; within the same date, original chat source order is authoritative.
+    // Parsed clock is only a fallback when source order is unavailable.
     const cleaned=merged.map(({__i,__src,__last,__clock,...e})=>e).sort((a,b)=>{
         const da=isoDateFromAny(a.date)||'9999-99-99', db=isoDateFromAny(b.date)||'9999-99-99';
         if(da!==db) return da.localeCompare(db);
+
+        const sa=sourceFirst(a.source), sb=sourceFirst(b.source);
+        const aHasSource=sa!==Number.MAX_SAFE_INTEGER, bHasSource=sb!==Number.MAX_SAFE_INTEGER;
+        if(aHasSource && bHasSource && sa!==sb) return sa-sb;
+        if(aHasSource && !bHasSource) return -1;
+        if(!aHasSource && bHasSource) return 1;
+
         const ca=parseStoryClock(a.time), cb=parseStoryClock(b.time);
         if(ca!=null && cb!=null && ca!==cb) return ca-cb;
         if(ca!=null && cb==null) return -1;
         if(ca==null && cb!=null) return 1;
-        return sourceFirst(a.source)-sourceFirst(b.source);
+        return 0;
     });
     mem.timeline=cleaned;
 
     mem.timeline_calibration={
-        version:'0.5.4',
+        version:'0.5.5',
         at:new Date().toISOString(),
         duplicate_merged:duplicateMerged,
         cross_midnight_fixed:crossMidnightFixed,
         night_ownership_fixed:nightOwnershipFixed,
+        ordering:'source_first',
         diagnostics:diagnostics.slice(-100)
     };
     return mem.timeline_calibration;
@@ -628,7 +647,8 @@ ${messagesText(start, end)}
 - open_loops / 未完成事项采用严格模式：只有明确未来承诺、预约、任务且尚未发生的事项才保留。
 - “正在进行”“尚未回答”“等待回应”“关系确认”“已经完成的性行为/课程/会面/讨论”都不能长期留作未来待办。
 - timeline 中同一段剧情只能保留一条主事件；如果多条消息只是补充同一事件，请合并为一条并合并 source，不要重复写近义事件。
-- source 对应原始聊天顺序。判断剧情先后时优先服从 source 顺序；同一天的显示时间必须与事件先后相容。
+- source 对应原始聊天顺序，是同一天内剧情先后的最高优先级证据。禁止因为摘要中的 22:00、22:30 等时间文本而把后出现的 source 移到前面。
+- 如果 source 顺序与时间文本冲突，保留 source 顺序，并在时间字段中谨慎描述；不要为了“钟点看起来顺”而改剧情先后。
 - 若前一事件为深夜/23点后，后续原始消息明确出现“凌晨/半夜/次日/第二天”，必须把日期推进到下一天，不能继续挂在前一天。
 - 如果正文是在回忆过去，timeline 可记录过去日期，但 current_story_date 不得倒退。
 - 如果后文已经完成某事项，必须删除/关闭对应 open_loop，不得重复保留。
@@ -1516,7 +1536,7 @@ function cleanLegacyTasksForThisChat(mem=M()) {
         mem.quarantined = Array.isArray(mem.quarantined) ? mem.quarantined : [];
         mem.quarantined.push(...archived.map(t => ({
             type:'legacy_task_archived',
-            reason:'v0.5.4 严格待办清洗：非用户确认的真实未来待办，移出待办区',
+            reason:'v0.5.5 严格待办清洗：非用户确认的真实未来待办，移出待办区',
             task:t
         })));
     }
@@ -1692,11 +1712,17 @@ function legacyDaysGrouped(mem=M()) {
     });
     return keys.map(date=>{
         const events=groups.get(date).sort((a,b)=>{
+            const sa=sourceFirst(a.source), sb=sourceFirst(b.source);
+            const aHasSource=sa!==Number.MAX_SAFE_INTEGER, bHasSource=sb!==Number.MAX_SAFE_INTEGER;
+            if(aHasSource && bHasSource && sa!==sb) return sa-sb;
+            if(aHasSource && !bHasSource) return -1;
+            if(!aHasSource && bHasSource) return 1;
+
             const ca=parseStoryClock(a.time), cb=parseStoryClock(b.time);
             if(ca!=null && cb!=null && ca!==cb) return ca-cb;
             if(ca!=null && cb==null) return -1;
             if(ca==null && cb!=null) return 1;
-            return sourceFirst(a.source)-sourceFirst(b.source);
+            return 0;
         });
         return {date,events};
     });
@@ -1816,7 +1842,7 @@ function legacyReadableHTML(mem=M()) {
           const ds=Array.isArray(c.diagnostics)?c.diagnostics:[];
           return `<details class="smm2-memory-details smm53-audit" ${ds.length?'open':''}>
             <summary>时间线校准检查｜重复合并 ${Number(c.duplicate_merged||0)}｜跨日修正 ${Number(c.cross_midnight_fixed||0)}｜异常 ${ds.length}</summary>
-            <div class="smm2-note">排序与重复合并会自动执行；只有“深夜→明确凌晨/次日”的高置信情况才自动换日。其余可疑倒退只提示，不擅自改剧情。</div>
+            <div class="smm2-note">同一天显示顺序以原始聊天 source 编号为准；时间文本只作辅助。只有“深夜→明确凌晨/次日”的高置信情况才自动换日。时间文本与 source 冲突时只标记，不会反向打乱剧情。</div>
             ${ds.length?ds.slice(-30).map(d=>`<div class="smm53-warning"><b>${esc(d.reason||d.type)}</b><br>${esc(d.content||'')}${d.source?`<br><small>${esc(d.source)}</small>`:''}</div>`).join(''):'<div class="smm2-empty">当前没有检测到时间倒退异常。</div>'}
           </details>`;
         })()}
@@ -2028,9 +2054,9 @@ async function safeHistoryRun({fresh=false}={}) {
     if (fresh) {
         if (!confirm(`将从第1条原始聊天重新开始安全重建。\\n剧情起点锁定：${anchor}\\n\\n现有记忆会备份，然后重新从0开始。继续吗？`)) return;
         const old=JSON.parse(JSON.stringify(existing));
-        c.chatMetadata[META_KEY+'_backup_v054_'+Date.now()]=old;
+        c.chatMetadata[META_KEY+'_backup_v055_'+Date.now()]=old;
         c.chatMetadata[META_KEY]=safeRebuildFreshMemory(anchor,target);
-        M().rebuild_mode='safe_v054';
+        M().rebuild_mode='safe_v055';
         M().rebuild_state={status:'starting',next_index:0,last_error:null,updated_at:new Date().toISOString()};
         await saveMeta();
     } else {
@@ -2038,7 +2064,7 @@ async function safeHistoryRun({fresh=false}={}) {
         const next=Math.max(0,Number(mem.last_processed_index??-1)+1);
         if (next>=chat.length) return toast('安全重建已经完成全部原始聊天。','success');
         mem.story_start=anchor;
-        mem.rebuild_mode='safe_v054';
+        mem.rebuild_mode='safe_v055';
         mem.rebuild_state=mem.rebuild_state||{};
         mem.rebuild_state.status='resuming';
         mem.rebuild_state.next_index=next;
@@ -2066,7 +2092,7 @@ async function safeHistoryRun({fresh=false}={}) {
             M().story_start=anchor;
             if (beforeDate && after && after < beforeDate) {
                 M().quarantined.push({content:`批次 #${start+1}-#${end} 尝试将当前日期 ${beforeDate} 倒退为 ${after}`,
-                    reason:'v0.5.4 单向时间守卫：当前主线日期禁止倒退',source:`#${start+1}-#${end}`});
+                    reason:'v0.5.5 单向时间守卫：当前主线日期禁止倒退',source:`#${start+1}-#${end}`});
                 M().current_story_date=beforeDate;
             }
             if (M().current_story_date && M().current_story_date < anchor) M().current_story_date=anchor;
@@ -2089,7 +2115,7 @@ async function safeHistoryRun({fresh=false}={}) {
             try { await rebuildV4Data(); } catch(e) { console.warn('[StoryMemory] v4 normalize after safe rebuild',e); }
             M().rebuild_state={...(M().rebuild_state||{}),status:'complete',next_index:chat.length,updated_at:new Date().toISOString()};
             await saveMeta();
-            toast('v0.5.4 安全历史重建完成。已执行时间线排序、去重与跨日检查。','success');
+            toast('v0.5.5 安全历史重建完成。已执行时间线排序、去重与跨日检查。','success');
         }
     } catch(e){
         console.error('[StoryMemory] safe rebuild failed',e);
@@ -2206,7 +2232,7 @@ function nativeManagerHTML() {
         <button id="smm2_native_history" class="menu_button">继续历史重建</button>
         <button id="smm2_native_stop" class="menu_button">暂停历史重建</button>
         <button id="smm51_native_resume" class="menu_button">继续安全重建（断点续跑）</button>
-        <button id="smm53_calibrate" class="menu_button">校准当前时间线（含前夜→次日凌晨归属修正）</button>
+        <button id="smm53_calibrate" class="menu_button">校准当前时间线（source主序＋跨日检查）</button>
         <button id="smm2_native_rebuild" class="menu_button">重新安全重建（从第1条）</button>
         <button id="smm50_export_raw" class="menu_button">导出原始聊天 JSON</button>
         <button id="smm2_native_import" class="menu_button">导入记忆 JSON</button>
@@ -2228,7 +2254,7 @@ function nativeManagerHTML() {
       </details>
       <details class="smm2-tool-card" open>
         <summary>
-          <span class="smm2-tool-title">时间基准修复 v0.5.4</span>
+          <span class="smm2-tool-title">时间基准修复 v0.5.5</span>
           <span class="smm2-tool-subtitle">绝对日期用于计算，学期时间用于显示</span>
         </summary>
         <div class="smm2-tool-body">
@@ -2324,7 +2350,7 @@ function bindNativeManager() {
             box.innerHTML=memoryReadableHTML();
             if(M().schema===SMM4_SCHEMA) bindHistoryBrowserV4(); else bindHistoryBrowserLegacy();
         }
-        toast(`时间线校准完成：合并重复 ${r.duplicate_merged}，夜间归属修正 ${r.night_ownership_fixed||0}，跨日修正 ${r.cross_midnight_fixed}，异常提示 ${r.diagnostics.length}。`,'success');
+        toast(`时间线校准完成：source主序已应用；合并重复 ${r.duplicate_merged}，夜间归属修正 ${r.night_ownership_fixed||0}，跨日修正 ${r.cross_midnight_fixed}，时间冲突提示 ${r.diagnostics.length}。`,'success');
     };
     const raw50=q('smm50_export_raw'); if(raw50) raw50.onclick=exportRawChat;
     q('smm2_native_import').onclick = importMemory;
