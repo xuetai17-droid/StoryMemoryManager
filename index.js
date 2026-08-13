@@ -254,7 +254,14 @@ function mergeResult(mem, r, endIndex) {
     if (r.current_scene && typeof r.current_scene === 'object') {
         mem.current_scene = { ...mem.current_scene, ...r.current_scene };
     }
-    if (typeof r.story_start === 'string' && r.story_start.trim()) mem.story_start = r.story_start.trim();
+    // story_start is a user-controlled hard anchor. Once established it must not drift
+    // because of model summaries. Model output may only fill an empty anchor.
+    const lockedStart = String(S().storyStart || mem.story_start || '').trim();
+    if (lockedStart) {
+        mem.story_start = lockedStart;
+    } else if (typeof r.story_start === 'string' && r.story_start.trim()) {
+        mem.story_start = r.story_start.trim();
+    }
     if (typeof r.current_story_time === 'string' && r.current_story_time.trim()) mem.current_story_time = r.current_story_time.trim();
 
     mem.last_processed_index = endIndex - 1;
@@ -567,7 +574,7 @@ function panelHTML() {
         <label><input id="smm2_auto" type="checkbox"> 自动增量总结</label>
         <label>每 <input id="smm2_trigger" type="number" min="1" max="50"> 条新消息总结一次</label>
         <label>每批最多 <input id="smm2_batch" type="number" min="4" max="60"> 条消息</label>
-        <label>新聊天剧情起点（可空）<input id="smm2_start" type="text" placeholder="如 2025-09-10 / 架空历法"></label>
+        <label>剧情起点（建立记忆后自动锁定）<input id="smm2_start" type="text" placeholder="如 2025-09-10"></label>
         <div class="smm2-note">记忆按“聊天”隔离。同一角色开新聊天，也会得到另一套记忆。酒馆楼层时间不会作为剧情时间。</div>
       </div>
     </div>`;
@@ -767,28 +774,211 @@ function countStoredTimeBacktracks(items) {
     return count;
 }
 
+
+function isoDateFromAny(value) {
+    const p = storyDateParts({date:String(value || '')});
+    return p?.key || null;
+}
+
+function dateRangeAudit() {
+    const m = M();
+    const start = isoDateFromAny(S().storyStart || m.story_start);
+    const end = isoDateFromAny(m.current_story_time);
+    if (!start || !end) return {start, end, days:[], missing:[]};
+
+    const a = new Date(`${start}T00:00:00Z`);
+    const b = new Date(`${end}T00:00:00Z`);
+    if (!Number.isFinite(a.getTime()) || !Number.isFinite(b.getTime()) || b < a) {
+        return {start, end, days:[], missing:[]};
+    }
+
+    const present = new Set((m.timeline || []).map(x => storyDateParts(x)?.key).filter(Boolean));
+    const days = [];
+    for (let d = new Date(a); d <= b && days.length < 3700; d.setUTCDate(d.getUTCDate()+1)) {
+        const key = d.toISOString().slice(0,10);
+        days.push({key, present:present.has(key)});
+    }
+    return {start, end, days, missing:days.filter(x=>!x.present)};
+}
+
+function canonicalPersonName(name) {
+    const raw = String(name || '').trim();
+    if (!raw) return '未命名人物';
+    const compact = raw.toLowerCase().replace(/[·•.\s_'’\-]/g,'');
+    // Known bilingual alias already present in this chat's rebuilt memory.
+    if (compact === 'xueling' || raw === '薛伶') return '薛伶';
+    return raw;
+}
+
+function mergedCharactersView() {
+    const groups = new Map();
+    for (const [name, data] of Object.entries(M().characters || {})) {
+        const canon = canonicalPersonName(name);
+        if (!groups.has(canon)) groups.set(canon, {name:canon, aliases:new Set(), states:[]});
+        const g = groups.get(canon);
+        if (name !== canon) g.aliases.add(name);
+        g.states.push(data);
+    }
+    return [...groups.values()];
+}
+
+function relationKey(x) {
+    const people = (x?.people || x?.pair || []).map(canonicalPersonName).filter(Boolean);
+    return [...new Set(people)].sort((a,b)=>a.localeCompare(b,'zh-CN')).join(' ↔ ');
+}
+
+function mergedRelationshipsView() {
+    const map = new Map();
+    for (const x of (M().relationships || [])) {
+        const key = relationKey(x) || '关系对象未确定';
+        if (!map.has(key)) map.set(key, {key, history:[]});
+        map.get(key).history.push(x);
+    }
+    return [...map.values()];
+}
+
+function classifyOpenLoop(x) {
+    const text = `${x?.description || ''} ${x?.due || ''} ${x?.status || ''}`;
+    const now = isoDateFromAny(M().current_story_time);
+    const due = isoDateFromAny(x?.due);
+    if (due && now && due < now) return 'overdue';
+    if (/明天|明日|后天|约定|预约|会面|课程|上课|计划|等待.*时间/i.test(text) || due) return 'future';
+    if (/正在|尚未结束|继续|进行中|等待回应|尚未回答|未正面回答/i.test(text)) return 'active';
+    return 'unresolved';
+}
+
+function cleanLoopTitle(x) {
+    let s = String(x?.id || '').trim();
+    if (/^loop_/i.test(s)) s = '';
+    return s || String(x?.description || '未命名事项').replace(/[，。；：:].*$/,'').slice(0,26) || '未命名事项';
+}
+
+function mergedOpenLoopsView() {
+    const map = new Map();
+    for (const x of (M().open_loops || [])) {
+        const desc = String(x?.description || '').trim();
+        const key = desc.toLowerCase().replace(/\s+/g,'').slice(0,80) || String(x?.id || '');
+        if (!map.has(key)) map.set(key, x);
+        else map.set(key, {...map.get(key), ...x});
+    }
+    const groups = {future:[], active:[], unresolved:[], overdue:[]};
+    for (const x of map.values()) groups[classifyOpenLoop(x)].push(x);
+    return groups;
+}
+
+function historyBrowserHTML() {
+    return `
+      <details class="smm2-memory-details smm2-history-browser">
+        <summary>历史记忆浏览器</summary>
+        <div class="smm2-history-tools">
+          <input id="smm2_history_search" type="search" placeholder="搜索日期、人物、事件、关键词">
+          <select id="smm2_history_type">
+            <option value="all">全部类型</option>
+            <option value="timeline">时间线</option>
+            <option value="character">人物</option>
+            <option value="relationship">人物关系</option>
+            <option value="loop">未完成事项</option>
+          </select>
+        </div>
+        <div id="smm2_history_results"></div>
+      </details>`;
+}
+
+function historyRecords() {
+    const m=M(), out=[];
+    for (const x of chronologicalCopy(m.timeline||[])) {
+        const p=storyDateParts(x);
+        out.push({type:'timeline', label:`${p?.label || x.date || '日期未定'} ${x.time || ''}`, text:x.event || '', raw:x});
+    }
+    for (const g of mergedCharactersView()) {
+        out.push({type:'character', label:g.name, text:JSON.stringify(g.states), raw:g});
+    }
+    for (const g of mergedRelationshipsView()) {
+        out.push({type:'relationship', label:g.key, text:JSON.stringify(g.history), raw:g});
+    }
+    for (const x of (m.open_loops||[])) {
+        out.push({type:'loop', label:cleanLoopTitle(x), text:`${x.due||''} ${x.description||''}`, raw:x});
+    }
+    return out;
+}
+
+function refreshHistoryBrowser() {
+    const host=document.getElementById('smm2_history_results');
+    if (!host) return;
+    const q=String(document.getElementById('smm2_history_search')?.value || '').trim().toLowerCase();
+    const type=document.getElementById('smm2_history_type')?.value || 'all';
+    const rows=historyRecords().filter(r =>
+        (type==='all' || r.type===type) &&
+        (!q || `${r.label} ${r.text}`.toLowerCase().includes(q))
+    );
+    host.innerHTML = rows.length ? rows.slice(-500).map(r =>
+        `<div class="smm2-history-row"><b>${esc(r.label)}</b><br>${esc(r.text)}</div>`
+    ).join('') : '<div class="smm2-empty">没有匹配的历史记忆</div>';
+}
+
+function bindHistoryBrowser() {
+    const s=document.getElementById('smm2_history_search');
+    const t=document.getElementById('smm2_history_type');
+    if (s) s.oninput=refreshHistoryBrowser;
+    if (t) t.onchange=refreshHistoryBrowser;
+    refreshHistoryBrowser();
+}
+
 function memoryReadableHTML() {
     const m = M();
-
     const backtrackCount = countStoredTimeBacktracks(m.timeline || []);
     const timeline = dailyTimelineHTML(m.timeline || []);
+    const audit = dateRangeAudit();
 
-    const characters = Object.entries(m.characters || {}).map(([name, data]) =>
-        `<details class="smm2-memory-details">
-            <summary>${esc(name)}</summary>
-            <pre>${esc(JSON.stringify(data, null, 2))}</pre>
-         </details>`
-    ).join('') || '<div class="smm2-empty">暂无人物档案</div>';
+    const missing = audit.days.length
+        ? `<div class="smm2-date-audit">
+             <b>日期完整性：</b>${audit.start} → ${audit.end}　
+             有记录 ${audit.days.length-audit.missing.length} 天 / 共 ${audit.days.length} 天
+             ${audit.missing.length
+                ? `<details><summary>⚠ ${audit.missing.length} 个无记录日期（仅提示，不自动编造剧情）</summary>
+                    <div class="smm2-missing-days">${audit.missing.map(x=>`<span>${esc(x.key)}</span>`).join('')}</div>
+                   </details>`
+                : `<span>✓ 未发现缺失日期</span>`}
+           </div>`
+        : `<div class="smm2-date-audit">日期完整性：需要有效的剧情起点和当前剧情日期后才能检查。</div>`;
 
-    const relationships = (m.relationships || []).map(x =>
-        `<div class="smm2-memory-item"><b>${esc((x.people || x.pair || []).join(' ↔ '))}</b><br>
-         ${esc(x.state || '')}${x.change ? '｜' + esc(x.change) : ''}</div>`
-    ).join('') || '<div class="smm2-empty">暂无关系记录</div>';
+    const characters = mergedCharactersView().map(g => {
+        const aliases = [...g.aliases];
+        const merged = Object.assign({}, ...g.states.filter(x=>x && typeof x==='object'));
+        return `<details class="smm2-memory-details smm2-person-card">
+            <summary>${esc(g.name)}</summary>
+            ${aliases.length ? `<div class="smm2-alias">别名：${esc(aliases.join(' / '))}</div>` : ''}
+            <pre>${esc(JSON.stringify(merged, null, 2))}</pre>
+         </details>`;
+    }).join('') || '<div class="smm2-empty">暂无人物档案</div>';
 
-    const loops = (m.open_loops || []).map(x =>
-        `<div class="smm2-memory-item"><b>${esc(x.id || 'OPEN')}</b> ${x.due ? '｜' + esc(x.due) : ''}<br>
-         ${esc(x.description || '')}</div>`
-    ).join('') || '<div class="smm2-empty">暂无未完成事项</div>';
+    const relationships = mergedRelationshipsView().map(g => {
+        const latest = g.history[g.history.length-1] || {};
+        const history = g.history.map(x =>
+            `<div class="smm2-relation-history">${esc(x.state || '')}${x.change ? '｜'+esc(x.change) : ''}</div>`
+        ).join('');
+        return `<details class="smm2-memory-details smm2-relation-card">
+          <summary>${esc(g.key)}</summary>
+          <div><b>当前：</b>${esc(latest.state || '未确定')}</div>
+          ${g.history.length > 1 ? `<details><summary>关系发展 ${g.history.length} 条</summary>${history}</details>` : history}
+        </details>`;
+    }).join('') || '<div class="smm2-empty">暂无关系记录</div>';
+
+    const loopGroups=mergedOpenLoopsView();
+    const loopBlock=(title, arr) => arr.length ? `
+        <details class="smm2-loop-group" open>
+          <summary>${title} <span>${arr.length}</span></summary>
+          ${arr.map(x=>`<div class="smm2-memory-item">
+              <b>${esc(cleanLoopTitle(x))}</b>${x.due ? `｜${esc(x.due)}` : ''}<br>
+              ${esc(x.description || '')}
+          </div>`).join('')}
+        </details>` : '';
+    const loops = [
+        loopBlock('待办 / 未来事件',loopGroups.future),
+        loopBlock('当前进行中的剧情',loopGroups.active),
+        loopBlock('悬而未决',loopGroups.unresolved),
+        loopBlock('过期 / 待确认',loopGroups.overdue)
+    ].join('') || '<div class="smm2-empty">暂无未完成事项</div>';
 
     const conflicts = [
         ...(m.conflicts || []).map(x => ({title:'冲突', body: JSON.stringify(x)})),
@@ -800,12 +990,15 @@ function memoryReadableHTML() {
     return `
       <div class="smm2-memory-view">
         <div class="smm2-memory-top">
-          <div><b>剧情起点：</b>${esc(m.story_start || '未建立')}</div>
+          <div><b>剧情起点：</b>${esc(m.story_start || S().storyStart || '未建立')} <span class="smm2-lock">🔒 锁定</span></div>
           <div><b>当前剧情时间：</b>${esc(m.current_story_time || '未建立')}</div>
           <div><b>已处理到：</b>${Math.max(0, Number(m.last_processed_index ?? -1) + 1)} 条</div>
           <div><b>时间线显示：</b>同一天合并显示，日期与时间自动排序</div>
           ${backtrackCount ? `<div class="smm2-memory-warning-text"><b>原始写入顺序存在 ${backtrackCount} 处时间倒退</b>；查看时已自动整理，不会改动原事件。</div>` : ''}
+          ${missing}
         </div>
+
+        ${historyBrowserHTML()}
 
         <details open class="smm2-memory-details">
           <summary>当前场景</summary>
@@ -818,12 +1011,12 @@ function memoryReadableHTML() {
         </details>
 
         <details class="smm2-memory-details">
-          <summary>人物</summary>
+          <summary>人物（${mergedCharactersView().length}）</summary>
           ${characters}
         </details>
 
         <details class="smm2-memory-details">
-          <summary>人物关系</summary>
+          <summary>人物关系（${mergedRelationshipsView().length}）</summary>
           ${relationships}
         </details>
 
@@ -854,6 +1047,7 @@ function toggleReadableMemory() {
 
     box.innerHTML = memoryReadableHTML();
     box.dataset.open = '1';
+    bindHistoryBrowser();
 
     const raw = document.getElementById('smm2_raw_json');
     if (raw) {
@@ -976,17 +1170,31 @@ function nativeManagerHTML() {
 
       <div id="smm2_native_memory_box" data-open="0"></div>
 
-      <div class="smm2-native-settings smm2-time-fix">
-        <b>时间修正</b>
-        <div class="smm2-note">只修正插件记忆，不修改原聊天。历史重建暂停后再执行。</div>
-        <label>错误日期
-          <input id="smm2_fix_from" type="text" placeholder="2025-10-17">
-        </label>
-        <label>正确日期
-          <input id="smm2_fix_to" type="text" placeholder="2025-09-17">
-        </label>
-        <button id="smm2_native_fix_time" class="menu_button">执行时间修正</button>
-      </div>
+      <details class="smm2-tool-card smm2-time-fix">
+        <summary>
+          <span class="smm2-tool-title">时间修正</span>
+          <span class="smm2-tool-subtitle">修正错误剧情日期</span>
+        </summary>
+        <div class="smm2-tool-body">
+          <div class="smm2-note">只修正插件记忆，不修改原聊天。历史重建暂停后再执行。</div>
+
+          <div class="smm2-fix-grid">
+            <label>
+              <span>错误日期</span>
+              <input id="smm2_fix_from" type="text" placeholder="2025-10-17">
+            </label>
+
+            <div class="smm2-fix-arrow">→</div>
+
+            <label>
+              <span>正确日期</span>
+              <input id="smm2_fix_to" type="text" placeholder="2025-09-17">
+            </label>
+          </div>
+
+          <button id="smm2_native_fix_time" class="menu_button smm2-primary-tool">执行时间修正</button>
+        </div>
+      </details>
 
       <div class="smm2-native-settings">
         <label><input id="smm2_native_enabled" type="checkbox"> 启用插件</label>
@@ -1006,8 +1214,8 @@ function nativeManagerHTML() {
         </label>
 
         <label>
-          新聊天剧情起点（可空）
-          <input id="smm2_native_start" type="text" placeholder="如 2025-09-10 / 架空历法">
+          剧情起点（建立记忆后自动锁定）
+          <input id="smm2_native_start" type="text" placeholder="如 2025-09-10">
         </label>
 
         <div class="smm2-note">
@@ -1062,13 +1270,18 @@ function bindNativeManager() {
     };
 
     q('smm2_native_start').onchange = async e => {
-        s.storyStart = e.target.value.trim();
-        saveSettings();
+        const proposed = e.target.value.trim();
         const m = M();
-        if (m.last_processed_index < 0 || !m.story_start) {
-            m.story_start = s.storyStart || null;
-            await saveMeta();
+        const existing = String(m.story_start || s.storyStart || '').trim();
+        if (existing && m.last_processed_index >= 0 && proposed !== existing) {
+            toast(`剧情起点已锁定为 ${existing}。如确需修改，请先清空本聊天记忆后重新建立。`, 'warning');
+            e.target.value = existing;
+            return;
         }
+        s.storyStart = proposed;
+        saveSettings();
+        m.story_start = proposed || null;
+        await saveMeta();
         refreshNative();
     };
 }

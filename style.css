@@ -357,3 +357,126 @@
   line-height:1.45;
   opacity:.9;
 }
+
+
+/* v0.2.15 compact collapsible tool cards */
+.smm2-tool-card{
+  margin:10px 0;
+  border:1px solid var(--SmartThemeBorderColor,#777);
+  border-radius:12px;
+  overflow:hidden;
+  background:rgba(127,127,127,.05);
+}
+
+.smm2-tool-card > summary{
+  list-style:none;
+  cursor:pointer;
+  padding:12px 14px;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+  user-select:none;
+}
+
+.smm2-tool-card > summary::-webkit-details-marker{
+  display:none;
+}
+
+.smm2-tool-card > summary::after{
+  content:"▾";
+  font-size:16px;
+  opacity:.72;
+  transition:transform .18s ease;
+}
+
+.smm2-tool-card:not([open]) > summary::after{
+  transform:rotate(-90deg);
+}
+
+.smm2-tool-title{
+  font-weight:700;
+  font-size:1.02em;
+}
+
+.smm2-tool-subtitle{
+  margin-left:auto;
+  font-size:.88em;
+  opacity:.58;
+}
+
+.smm2-tool-body{
+  padding:0 12px 12px;
+  border-top:1px solid rgba(127,127,127,.22);
+}
+
+.smm2-fix-grid{
+  display:grid;
+  grid-template-columns:1fr auto 1fr;
+  align-items:end;
+  gap:8px;
+  margin:10px 0;
+}
+
+.smm2-fix-grid label{
+  display:flex;
+  flex-direction:column;
+  gap:5px;
+  min-width:0;
+}
+
+.smm2-fix-grid input{
+  width:100%;
+  box-sizing:border-box;
+}
+
+.smm2-fix-arrow{
+  padding:0 2px 9px;
+  opacity:.65;
+  font-weight:700;
+}
+
+.smm2-primary-tool{
+  width:100%;
+  margin-top:4px;
+}
+
+@media (max-width:480px){
+  .smm2-tool-card > summary{
+    padding:11px 12px;
+  }
+
+  .smm2-tool-subtitle{
+    display:none;
+  }
+
+  .smm2-fix-grid{
+    grid-template-columns:1fr;
+    gap:8px;
+  }
+
+  .smm2-fix-arrow{
+    text-align:center;
+    padding:0;
+    transform:rotate(90deg);
+  }
+}
+
+
+/* v0.3.0 integrated memory console */
+.smm2-lock{font-size:.85em;opacity:.68;margin-left:6px}
+.smm2-date-audit{margin-top:8px;padding:9px 10px;border:1px solid rgba(127,127,127,.28);border-radius:9px}
+.smm2-missing-days{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}
+.smm2-missing-days span{padding:3px 7px;border:1px solid rgba(127,127,127,.25);border-radius:999px;font-size:.86em}
+.smm2-history-tools{display:grid;grid-template-columns:1fr auto;gap:8px;padding:8px 0}
+.smm2-history-tools input,.smm2-history-tools select{width:100%;box-sizing:border-box}
+.smm2-history-row{padding:8px 4px;border-bottom:1px solid rgba(127,127,127,.2)}
+.smm2-person-card,.smm2-relation-card{margin:7px 0}
+.smm2-alias{opacity:.72;font-size:.9em;padding:6px 0}
+.smm2-relation-history{padding:6px 0;border-bottom:1px solid rgba(127,127,127,.18)}
+.smm2-loop-group{margin:7px 0;border:1px solid rgba(127,127,127,.24);border-radius:9px;padding:7px}
+.smm2-loop-group>summary{font-weight:700;cursor:pointer}
+.smm2-loop-group>summary span{opacity:.55;font-weight:400}
+@media(max-width:480px){
+ .smm2-history-tools{grid-template-columns:1fr}
+}
