@@ -318,3 +318,42 @@
     font-size:13px;
   }
 }
+
+
+/* v0.2.14 daily grouped timeline */
+.smm2-day-card{
+  margin:8px 0;
+  border:1px solid var(--SmartThemeBorderColor,#777);
+  border-radius:9px;
+  overflow:hidden;
+}
+
+.smm2-day-card > summary{
+  padding:9px 10px;
+  cursor:pointer;
+  font-weight:700;
+}
+
+.smm2-day-count{
+  opacity:.65;
+  font-weight:400;
+  font-size:.9em;
+}
+
+.smm2-day-body{
+  padding:0 10px 8px;
+}
+
+.smm2-day-row{
+  padding:7px 0;
+  border-top:1px solid rgba(127,127,127,.25);
+  line-height:1.55;
+}
+
+.smm2-memory-warning-text{
+  margin-top:6px;
+  padding:7px 9px;
+  border-left:3px solid currentColor;
+  line-height:1.45;
+  opacity:.9;
+}

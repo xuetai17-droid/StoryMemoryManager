@@ -278,6 +278,7 @@ const SYSTEM_PROMPT = `你是长线角色扮演的“剧情记忆审计器”。
 3A. 月份锁：若已有可靠记忆处于某月，而“新增原始聊天”没有明确出现新的年月日、明确“下个月/数周后/一个月后”等跨月推进证据，禁止自行改变月份。
 3B. 单独出现“17日/周五/早晨”等信息时，默认继承当前可靠月份；不得仅凭 AI 的 <date> 标签把 9 月推成 10 月。
 3C. AI 的 <date> 只属于低优先级证据；若它造成无正文证据的跨月、倒退或大跨度跳跃，必须忽略该日期，并维持上一可靠时间。
+3D. 若新增批次提及过去已经发生的日期，只能作为旧事件/回忆补充写入 timeline，不得把 current_story_time 倒退。当前剧情时间必须沿主线单向推进，除非正文明确进入闪回并明确标记。
 4. 不得把尚未在“新增原始聊天”中发生的预测、计划、旧总结预告写成已发生事实。
 5. 角色的猜测、医学推断、心理推测等，不可直接升级成事实。
 6. conflicts 的定义必须极严格：只有“同一时间点/同一事实维度上，两条已经确定的剧情事实无法同时成立”才写入 conflicts。
@@ -657,12 +658,120 @@ async function correctMemoryDate() {
     toast(`时间修正完成：${from.iso} → ${to.iso}。聊天原文未修改。`, 'success');
 }
 
+
+function parseClockMinutes(s) {
+    const text = String(s || '');
+    const m = text.match(/(\d{1,2})[:：](\d{2})/);
+    if (!m) {
+        if (/凌晨/.test(text)) return 120;
+        if (/早晨|清晨/.test(text)) return 420;
+        if (/上午/.test(text)) return 540;
+        if (/中午/.test(text)) return 720;
+        if (/下午/.test(text)) return 900;
+        if (/傍晚/.test(text)) return 1080;
+        if (/晚上|夜间|夜晚/.test(text)) return 1260;
+        if (/深夜/.test(text)) return 1380;
+        return 720;
+    }
+    let h = Number(m[1]);
+    const min = Number(m[2]);
+    if (/下午|傍晚|晚上|夜间|夜晚|深夜/.test(text) && h < 12) h += 12;
+    if (/凌晨/.test(text) && h === 12) h = 0;
+    return h * 60 + min;
+}
+
+function storyDateParts(item) {
+    const text = [item?.date, item?.time, item?.event, item?.title, item?.result]
+        .filter(Boolean).join(' ');
+    let m = text.match(/(20\d{2})年\s*(\d{1,2})月\s*(\d{1,2})日/);
+    if (!m) m = text.match(/(20\d{2})[-\/](\d{1,2})[-\/](\d{1,2})/);
+    if (!m) return null;
+    return {
+        y: Number(m[1]),
+        m: Number(m[2]),
+        d: Number(m[3]),
+        label: `${Number(m[1])}年${Number(m[2])}月${Number(m[3])}日`,
+        key: `${m[1]}-${String(m[2]).padStart(2,'0')}-${String(m[3]).padStart(2,'0')}`,
+        minutes: parseClockMinutes(text)
+    };
+}
+
+function chronologicalCopy(items) {
+    return (Array.isArray(items) ? items : [])
+        .map((item, index) => {
+            const p = storyDateParts(item);
+            const sortKey = p
+                ? Date.UTC(p.y, p.m - 1, p.d, Math.floor(p.minutes/60), p.minutes%60)
+                : Number.MAX_SAFE_INTEGER;
+            return { item, index, known: !!p, sortKey };
+        })
+        .sort((a,b) => {
+            if (a.known && b.known) return a.sortKey - b.sortKey || a.index - b.index;
+            if (a.known !== b.known) return a.known ? -1 : 1;
+            return a.index - b.index;
+        })
+        .map(x => x.item);
+}
+
+function groupTimelineByDay(items) {
+    const sorted = chronologicalCopy(items);
+    const groups = [];
+    const byKey = new Map();
+
+    for (const item of sorted) {
+        const p = storyDateParts(item);
+        const key = p?.key || '__unknown__';
+        if (!byKey.has(key)) {
+            const g = {
+                key,
+                label: p?.label || '日期未确定',
+                items: []
+            };
+            byKey.set(key, g);
+            groups.push(g);
+        }
+        byKey.get(key).items.push(item);
+    }
+    return groups;
+}
+
+function dailyTimelineHTML(items) {
+    const groups = groupTimelineByDay(items);
+    if (!groups.length) return '<div class="smm2-empty">暂无时间线</div>';
+
+    return groups.slice(-30).map(g => {
+        const rows = g.items.map(x => {
+            const t = esc(x.time || '');
+            const e = esc(x.event || '');
+            return `<div class="smm2-day-row">${t ? `<b>${t}</b>　` : ''}${e}</div>`;
+        }).join('');
+
+        return `
+          <details open class="smm2-day-card">
+            <summary>${esc(g.label)} <span class="smm2-day-count">${g.items.length} 条</span></summary>
+            <div class="smm2-day-body">${rows}</div>
+          </details>
+        `;
+    }).join('');
+}
+
+function countStoredTimeBacktracks(items) {
+    let last = null, count = 0;
+    for (const item of (items || [])) {
+        const p = storyDateParts(item);
+        if (!p) continue;
+        const k = Date.UTC(p.y, p.m - 1, p.d, Math.floor(p.minutes/60), p.minutes%60);
+        if (last !== null && k < last) count++;
+        last = k;
+    }
+    return count;
+}
+
 function memoryReadableHTML() {
     const m = M();
 
-    const timeline = (m.timeline || []).slice(-50).map(x =>
-        `<div class="smm2-memory-item"><b>${esc(x.date || '')} ${esc(x.time || '')}</b><br>${esc(x.event || '')}</div>`
-    ).join('') || '<div class="smm2-empty">暂无时间线</div>';
+    const backtrackCount = countStoredTimeBacktracks(m.timeline || []);
+    const timeline = dailyTimelineHTML(m.timeline || []);
 
     const characters = Object.entries(m.characters || {}).map(([name, data]) =>
         `<details class="smm2-memory-details">
@@ -694,6 +803,8 @@ function memoryReadableHTML() {
           <div><b>剧情起点：</b>${esc(m.story_start || '未建立')}</div>
           <div><b>当前剧情时间：</b>${esc(m.current_story_time || '未建立')}</div>
           <div><b>已处理到：</b>${Math.max(0, Number(m.last_processed_index ?? -1) + 1)} 条</div>
+          <div><b>时间线显示：</b>同一天合并显示，日期与时间自动排序</div>
+          ${backtrackCount ? `<div class="smm2-memory-warning-text"><b>原始写入顺序存在 ${backtrackCount} 处时间倒退</b>；查看时已自动整理，不会改动原事件。</div>` : ''}
         </div>
 
         <details open class="smm2-memory-details">
