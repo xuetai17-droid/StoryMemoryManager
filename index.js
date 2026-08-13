@@ -301,7 +301,7 @@ function addDaysISO(date, days=1) {
 function previousDayISO(date) { return addDaysISO(date,-1); }
 
 /*
- * v0.5.8 夜间归属修正：
+ * v0.5.9 夜间归属修正：
  * 旧摘要常把“前一日晚间 -> 次日凌晨”整段贴到次日。
  * 当同一日期桶同时出现“凌晨/半夜”和“21:00以后晚间”时，
  * 且该日期前一天已经存在于时间线，允许把晚间段回拨到前一天。
@@ -371,146 +371,126 @@ function rebuildDatesBySourceAxis(mem=M()) {
     })).sort((a,b)=>(a.__src-b.__src)||(a.__i-b.__i));
 
     if(!rows.length) return {
-        changed:0,islands_fixed:0,explicit_overrides:0,strong_rollovers:0,
-        diagnostics:[]
+        changed:0,midnight_rollovers:0,explicit_overrides:0,diagnostics:[]
     };
 
     const diagnostics=[];
-    let changed=0, islandsFixed=0, explicitOverrides=0, strongRollovers=0;
+    let changed=0, midnightRollovers=0, explicitOverrides=0;
 
-    // ------------------------------------------------------------------
-    // v0.5.8 principle:
-    // Existing timeline dates are SOFT segment labels, not hard truth and not discarded.
-    // We preserve normal contiguous date runs, and only repair suspicious "date islands":
-    //
-    //    2025-09-11 ... -> 2025-09-12 (small middle run) -> 2025-09-11 ...
-    //
-    // If the middle run contains no explicit absolute date / next-day cue / midnight cue,
-    // it is treated as an old-summary date drift and merged back to the surrounding date.
-    // This prevents the v0.5.6 failure where every row inherited the very first date.
-    // ------------------------------------------------------------------
+    const storyStart = normalizeDateInput(mem.story_start||S().storyStart)?.iso || null;
 
-    // Absolute dates explicitly written in the event text override soft date labels.
+    function isEarlyNight(r){
+        const blob=`${r.time||''} ${r.event||''}`;
+        if(r.__clock!=null && r.__clock <= 5*60) return true;
+        return /凌晨|半夜|午夜后|零点后|清晨0[0-5]?[:：]?/.test(blob);
+    }
+    function isLateNight(r){
+        const blob=`${r.time||''} ${r.event||''}`;
+        if(r.__clock!=null && r.__clock >= 21*60) return true;
+        return /晚间|深夜|晚上|夜间/.test(blob) && !/凌晨|半夜/.test(blob);
+    }
+    function isMorningOrDay(r){
+        const blob=`${r.time||''} ${r.event||''}`;
+        if(r.__clock!=null && r.__clock >= 6*60 && r.__clock < 21*60) return true;
+        return /早晨|早上|上午|中午|下午|傍晚/.test(blob);
+    }
+
+    // Find a reasonable initial date from the earliest row's soft date, else story start.
+    let currentDate = rows.find(r=>r.__oldDate)?.__oldDate || storyStart;
+    let prev = null;
+    let justRolledAtSource = null;
+
     for(const r of rows){
-        if(r.__explicitDate){
-            if(r.__oldDate !== r.__explicitDate){
+        const oldDate = r.__oldDate;
+        const explicit = r.__explicitDate;
+
+        // 1) Explicit absolute date in event/time text wins.
+        if(explicit){
+            if(currentDate !== explicit){
                 diagnostics.push({
                     type:'explicit_date_override',
                     source:r.source,
-                    content:`${r.__oldDate||'无日期'} → ${r.__explicitDate}`,
+                    content:`${currentDate||'无日期'} → ${explicit}`,
                     reason:'事件文本包含明确绝对日期'
                 });
                 explicitOverrides++;
-                changed++;
             }
-            r.date=r.__explicitDate;
-        } else {
-            r.date=r.__oldDate || null;
+            currentDate = explicit;
+            justRolledAtSource = null;
         }
-    }
-
-    // Fill only genuinely missing dates from nearest prior soft/explicit date.
-    let lastKnown = normalizeDateInput(mem.story_start||S().storyStart)?.iso || null;
-    for(const r of rows){
-        if(r.date) lastKnown=r.date;
-        else if(lastKnown){
-            r.date=lastKnown;
-            changed++;
+        // 2) Explicit relative next-day cue advances once.
+        else if(currentDate && hasStrongNextDayCue(r) && !hasStrongSameDayCue(r)){
+            currentDate = addDaysISO(currentDate,1) || currentDate;
+            midnightRollovers++;
+            justRolledAtSource = r.__src;
             diagnostics.push({
-                type:'missing_date_filled',
+                type:'relative_next_day_rollover',
                 source:r.source,
-                content:`无日期 → ${lastKnown}`,
-                reason:'该事件没有日期，仅继承最近的已知日期；不会覆盖已有日期段'
+                content:`推进至 ${currentDate}`,
+                reason:'检测到“次日/第二天/翌日/隔天”等明确跨日语义'
             });
         }
-    }
-
-    // Build contiguous runs by source order.
-    function makeRuns() {
-        const runs=[];
-        for(let i=0;i<rows.length;i++){
-            const d=rows[i].date || '日期未定';
-            const last=runs[runs.length-1];
-            if(last && last.date===d) last.end=i;
-            else runs.push({date:d,start:i,end:i});
+        // 3) Source-order state machine:
+        // late night -> early morning means a single midnight crossing.
+        else if(currentDate && prev && isLateNight(prev) && isEarlyNight(r)){
+            currentDate = addDaysISO(currentDate,1) || currentDate;
+            midnightRollovers++;
+            justRolledAtSource = r.__src;
+            diagnostics.push({
+                type:'midnight_state_rollover',
+                source:r.source,
+                content:`${prev.time||'晚间'} → ${r.time||'凌晨'}；推进至 ${currentDate}`,
+                reason:'source 连续剧情由晚间/深夜进入凌晨，判定跨过午夜'
+            });
         }
-        return runs;
-    }
 
-    // Strong evidence that a run really is a calendar transition.
-    function runHasStrongDateEvidence(run) {
-        for(let i=run.start;i<=run.end;i++){
-            const r=rows[i];
-            const blob=`${r.time||''} ${r.event||''}`;
-            if(r.__explicitDate) return true;
-            if(hasStrongNextDayCue(r)) return true;
-            if(/跨过(?:午夜|零点|00:00)|过了(?:午夜|零点)|午夜之后|零点之后|00[:：]\d{2}/.test(blob)) return true;
-        }
-        return false;
-    }
-
-    // Repair date islands iteratively because one repair can expose another island.
-    let safety=0;
-    while(safety++ < 20){
-        const runs=makeRuns();
-        let didFix=false;
-
-        for(let k=1;k<runs.length-1;k++){
-            const prev=runs[k-1], cur=runs[k], next=runs[k+1];
-            if(prev.date==='日期未定' || cur.date==='日期未定' || next.date==='日期未定') continue;
-
-            // Classic date island: same surrounding date, different middle date.
-            if(prev.date===next.date && cur.date!==prev.date && !runHasStrongDateEvidence(cur)){
-                const count=cur.end-cur.start+1;
-
-                // Be conservative: only auto-fix a relatively small local island.
-                // This is sufficient for the #71-#79 case without flattening genuine days.
-                if(count <= 8){
-                    const old=cur.date;
-                    for(let i=cur.start;i<=cur.end;i++){
-                        rows[i].date=prev.date;
-                        changed++;
-                    }
-                    islandsFixed++;
-                    diagnostics.push({
-                        type:'date_island_repaired',
-                        source:`${rows[cur.start].source||''} ... ${rows[cur.end].source||''}`,
-                        content:`${old} → ${prev.date}（${count} 条）`,
-                        reason:'source 顺序中该日期段被相同前后日期夹住，且没有明确跨日证据；判定为旧摘要日期漂移'
-                    });
-                    didFix=true;
-                    break;
-                }
+        // 4) Important guard:
+        // after a rollover into early morning, later daytime/evening remains SAME DATE.
+        // Do not advance again merely because clock increases from early morning to 22:00.
+        if(currentDate){
+            if(oldDate !== currentDate){
+                changed++;
+                diagnostics.push({
+                    type:'date_reassigned_by_midnight_state',
+                    source:r.source,
+                    content:`${oldDate||'无日期'} → ${currentDate}`,
+                    reason:'按 source 顺序和跨午夜状态机重新归属日期'
+                });
             }
+            r.date = currentDate;
+        } else if(oldDate){
+            currentDate = oldDate;
+            r.date = oldDate;
+        } else if(storyStart){
+            currentDate = storyStart;
+            r.date = storyStart;
+            changed++;
         }
-        if(!didFix) break;
-    }
 
-    // Detect source/time contradictions for review, but do NOT mutate dates.
-    let prev=null;
-    for(const r of rows){
+        // 5) Clock regression diagnostics only; never reorder source.
         if(prev && r.date===prev.date && prev.__clock!=null && r.__clock!=null &&
-           r.__src>=prev.__src && r.__clock<prev.__clock &&
+           r.__src>=prev.__src && r.__clock < prev.__clock &&
+           !(isLateNight(prev) && isEarlyNight(r)) &&
            !/回忆|此前|过去|之前/.test(`${r.event||''}`)){
             diagnostics.push({
                 type:'clock_text_conflict',
                 source:r.source,
                 content:`source ${prev.source||''} → ${r.source||''}; 时间 ${prev.time||''} → ${r.time||''}`,
-                reason:'同日时间文本与 source 顺序冲突；保留 source 顺序，不改日期'
+                reason:'同日时间文本倒退，但不满足跨午夜条件；保留 source 顺序'
             });
         }
-        prev=r;
+
+        prev = r;
     }
 
     mem.timeline=rows.map(({__i,__src,__clock,__oldDate,__explicitDate,...e})=>e);
     mem.source_axis={
-        version:'0.5.8',
+        version:'0.5.9',
         at:new Date().toISOString(),
         changed,
-        islands_fixed:islandsFixed,
+        midnight_rollovers:midnightRollovers,
         explicit_overrides:explicitOverrides,
-        strong_rollovers:strongRollovers,
-        diagnostics:diagnostics.slice(-150)
+        diagnostics:diagnostics.slice(-200)
     };
     return mem.source_axis;
 }
@@ -558,13 +538,13 @@ function calibrateTimeline(mem=M(), {allowCrossMidnight=true}={}) {
     });
 
     mem.timeline_calibration={
-        version:'0.5.8',
+        version:'0.5.9',
         at:new Date().toISOString(),
         duplicate_merged:duplicateMerged,
         date_reassigned:Number(axis.changed||0),
-        date_islands_fixed:Number(axis.islands_fixed||0),
+        date_islands_fixed:0,
         explicit_date_overrides:Number(axis.explicit_overrides||0),
-        confirmed_rollovers:Number(axis.strong_rollovers||0),
+        confirmed_rollovers:Number(axis.midnight_rollovers||0),
         ordering:'source_first_date_axis',
         diagnostics:(axis.diagnostics||[]).slice(-150)
     };
@@ -766,6 +746,8 @@ ${messagesText(start, end)}
 - 日期归属同样服从 source 连续性。禁止仅因为出现“凌晨”“半夜”就自动进入下一天。
 - 只有明确绝对日期、明确“次日/第二天/翌日/隔天”，或正文明确描述跨过午夜/零点，才允许日期推进。
 - 若 #71-#79 位于 #80 之前，即使 #71 摘要写“凌晨”、#80 写“晚间22:00”，也不得仅凭钟点把 #71-#79 推到下一日。
+- 若 source 连续顺序出现“晚间/深夜 → 凌晨/半夜”，视为跨过午夜并推进一天；推进后，后续上午/下午/晚间仍保持该新日期，除非再次出现新的明确跨午夜证据。
+- 同一 source 序列中只允许在真实的“晚间/深夜 → 凌晨/半夜”边界处推进日期，不能因为“凌晨 → 晚间”再次加一天。
 - 若前一事件为深夜/23点后，后续原始消息明确出现“凌晨/半夜/次日/第二天”，必须把日期推进到下一天，不能继续挂在前一天。
 - 如果正文是在回忆过去，timeline 可记录过去日期，但 current_story_date 不得倒退。
 - 如果后文已经完成某事项，必须删除/关闭对应 open_loop，不得重复保留。
@@ -1653,7 +1635,7 @@ function cleanLegacyTasksForThisChat(mem=M()) {
         mem.quarantined = Array.isArray(mem.quarantined) ? mem.quarantined : [];
         mem.quarantined.push(...archived.map(t => ({
             type:'legacy_task_archived',
-            reason:'v0.5.8 严格待办清洗：非用户确认的真实未来待办，移出待办区',
+            reason:'v0.5.9 严格待办清洗：非用户确认的真实未来待办，移出待办区',
             task:t
         })));
     }
@@ -1958,8 +1940,8 @@ function legacyReadableHTML(mem=M()) {
           const c=mem.timeline_calibration||{};
           const ds=Array.isArray(c.diagnostics)?c.diagnostics:[];
           return `<details class="smm2-memory-details smm53-audit" ${ds.length?'open':''}>
-            <summary>日期轴检查｜重复合并 ${Number(c.duplicate_merged||0)}｜日期岛修复 ${Number(c.date_islands_fixed||0)}｜日期变更 ${Number(c.date_reassigned||0)}｜异常 ${ds.length}</summary>
-            <div class="smm2-note">保留原有连续日期段，不再从第一个日期向后强行继承。仅修复被相同前后日期夹住、且没有明确跨日证据的小型“日期岛”。同一天仍以 source 顺序显示。</div>
+            <summary>日期轴检查｜重复合并 ${Number(c.duplicate_merged||0)}｜跨午夜 ${Number(c.confirmed_rollovers||0)}｜日期变更 ${Number(c.date_reassigned||0)}｜异常 ${ds.length}</summary>
+            <div class="smm2-note">按原始聊天 source 顺序运行跨午夜状态机：晚间/深夜 → 凌晨/半夜只跨日一次；凌晨后的白天和晚间仍属于同一天。时间文本只辅助判断，不会打乱 source 顺序。</div>
             ${ds.length?ds.slice(-30).map(d=>`<div class="smm53-warning"><b>${esc(d.reason||d.type)}</b><br>${esc(d.content||'')}${d.source?`<br><small>${esc(d.source)}</small>`:''}</div>`).join(''):'<div class="smm2-empty">当前没有检测到时间倒退异常。</div>'}
           </details>`;
         })()}
@@ -2171,9 +2153,9 @@ async function safeHistoryRun({fresh=false}={}) {
     if (fresh) {
         if (!confirm(`将从第1条原始聊天重新开始安全重建。\\n剧情起点锁定：${anchor}\\n\\n现有记忆会备份，然后重新从0开始。继续吗？`)) return;
         const old=JSON.parse(JSON.stringify(existing));
-        c.chatMetadata[META_KEY+'_backup_v058_'+Date.now()]=old;
+        c.chatMetadata[META_KEY+'_backup_v059_'+Date.now()]=old;
         c.chatMetadata[META_KEY]=safeRebuildFreshMemory(anchor,target);
-        M().rebuild_mode='safe_v058';
+        M().rebuild_mode='safe_v059';
         M().rebuild_state={status:'starting',next_index:0,last_error:null,updated_at:new Date().toISOString()};
         await saveMeta();
     } else {
@@ -2181,7 +2163,7 @@ async function safeHistoryRun({fresh=false}={}) {
         const next=Math.max(0,Number(mem.last_processed_index??-1)+1);
         if (next>=chat.length) return toast('安全重建已经完成全部原始聊天。','success');
         mem.story_start=anchor;
-        mem.rebuild_mode='safe_v058';
+        mem.rebuild_mode='safe_v059';
         mem.rebuild_state=mem.rebuild_state||{};
         mem.rebuild_state.status='resuming';
         mem.rebuild_state.next_index=next;
@@ -2209,7 +2191,7 @@ async function safeHistoryRun({fresh=false}={}) {
             M().story_start=anchor;
             if (beforeDate && after && after < beforeDate) {
                 M().quarantined.push({content:`批次 #${start+1}-#${end} 尝试将当前日期 ${beforeDate} 倒退为 ${after}`,
-                    reason:'v0.5.8 单向时间守卫：当前主线日期禁止倒退',source:`#${start+1}-#${end}`});
+                    reason:'v0.5.9 单向时间守卫：当前主线日期禁止倒退',source:`#${start+1}-#${end}`});
                 M().current_story_date=beforeDate;
             }
             if (M().current_story_date && M().current_story_date < anchor) M().current_story_date=anchor;
@@ -2232,7 +2214,7 @@ async function safeHistoryRun({fresh=false}={}) {
             try { await rebuildV4Data(); } catch(e) { console.warn('[StoryMemory] v4 normalize after safe rebuild',e); }
             M().rebuild_state={...(M().rebuild_state||{}),status:'complete',next_index:chat.length,updated_at:new Date().toISOString()};
             await saveMeta();
-            toast('v0.5.8 安全历史重建完成。已执行时间线排序、去重与跨日检查。','success');
+            toast('v0.5.9 安全历史重建完成。已执行时间线排序、去重与跨日检查。','success');
         }
     } catch(e){
         console.error('[StoryMemory] safe rebuild failed',e);
@@ -2349,7 +2331,7 @@ function nativeManagerHTML() {
         <button id="smm2_native_history" class="menu_button">继续历史重建</button>
         <button id="smm2_native_stop" class="menu_button">暂停历史重建</button>
         <button id="smm51_native_resume" class="menu_button">继续安全重建（断点续跑）</button>
-        <button id="smm53_calibrate" class="menu_button">修复当前日期轴（保留日期段＋修复日期岛）</button>
+        <button id="smm53_calibrate" class="menu_button">重建当前日期轴（source跨午夜状态机）</button>
         <button id="smm2_native_rebuild" class="menu_button">重新安全重建（从第1条）</button>
         <button id="smm50_export_raw" class="menu_button">导出原始聊天 JSON</button>
         <button id="smm2_native_import" class="menu_button">导入记忆 JSON</button>
@@ -2371,7 +2353,7 @@ function nativeManagerHTML() {
       </details>
       <details class="smm2-tool-card" open>
         <summary>
-          <span class="smm2-tool-title">时间基准修复 v0.5.8</span>
+          <span class="smm2-tool-title">时间基准修复 v0.5.9</span>
           <span class="smm2-tool-subtitle">绝对日期用于计算，学期时间用于显示</span>
         </summary>
         <div class="smm2-tool-body">
@@ -2467,7 +2449,7 @@ function bindNativeManager() {
             box.innerHTML=memoryReadableHTML();
             if(M().schema===SMM4_SCHEMA) bindHistoryBrowserV4(); else bindHistoryBrowserLegacy();
         }
-        toast(`日期轴修复完成：合并重复 ${r.duplicate_merged}，修复日期岛 ${r.date_islands_fixed||0}，日期变更 ${r.date_reassigned||0}，异常提示 ${r.diagnostics.length}。`,'success');
+        toast(`日期轴重建完成：合并重复 ${r.duplicate_merged}，跨午夜 ${r.confirmed_rollovers||0}，日期变更 ${r.date_reassigned||0}，异常提示 ${r.diagnostics.length}。`,'success');
     };
     const raw50=q('smm50_export_raw'); if(raw50) raw50.onclick=exportRawChat;
     q('smm2_native_import').onclick = importMemory;
