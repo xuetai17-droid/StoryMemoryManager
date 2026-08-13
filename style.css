@@ -480,3 +480,9 @@
 @media(max-width:480px){
  .smm2-history-tools{grid-template-columns:1fr}
 }
+
+
+/* v0.4.0 normalized data presentation */
+.smm2-v4-section{margin:8px 0}
+.smm2-v4-section>b{display:block;margin-bottom:4px}
+.smm2-v4-section pre{margin:0;white-space:pre-wrap;word-break:break-word}

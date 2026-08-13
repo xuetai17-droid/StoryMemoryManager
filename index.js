@@ -373,6 +373,14 @@ ${JSON.stringify(compact(mem), null, 2)}
 ${messagesText(start, end)}
 
 请只从“新增原始聊天”更新记忆。source 使用 #消息编号。旧记忆只用于对照，不允许把旧记忆中尚未发生的未来内容变成事实。
+【v4数据规范】
+- 时间线必须尽量给出具体 YYYY-MM-DD；“秋季学期/周五/上午”只能作为附加描述，不能替代日期。
+- 人物资料分稳定资料与当前状态。地点、衣着、陪伴者、身体状态属于当前状态，后文更新时覆盖，不要不断堆成数组。
+- 人物别名必须归一；同一人物不得因中英文名/昵称拆成多个实体。
+- 人物关系只有在明确两个人之间存在关系时才记录；多人同场、群体互动不得自动生成多边关系链。
+- open_loops / 未完成事项采用严格模式：只有明确未来承诺、预约、任务且尚未发生的事项才保留。
+- “正在进行”“尚未回答”“等待回应”“关系确认”“已经完成的性行为/课程/会面/讨论”都不能长期留作未来待办。
+- 如果后文已经完成某事项，必须删除/关闭对应 open_loop，不得重复保留。
 特别检查日期连续性：没有新增原始聊天中的明确跨月证据，就必须继承已有可靠月份；禁止仅凭 AI <date> 或自行推算跨月。`;
     let raw;
     try {
@@ -924,115 +932,459 @@ function bindHistoryBrowser() {
     refreshHistoryBrowser();
 }
 
+
+const SMM4_SCHEMA = 'story_memory_manager_v4';
+
+function stableId(prefix, text) {
+    let h = 2166136261;
+    const s = String(text || '');
+    for (let i=0;i<s.length;i++) {
+        h ^= s.charCodeAt(i);
+        h = Math.imul(h, 16777619);
+    }
+    return `${prefix}_${(h>>>0).toString(36)}`;
+}
+
+function personAliasKey(name) {
+    return String(name || '')
+        .trim()
+        .toLowerCase()
+        .replace(/[·•.\s_'’\-]/g,'');
+}
+
+function aliasDictionary() {
+    return new Map([
+        ['xueling','薛伶'],
+        ['薛伶','薛伶'],
+        ['deioncarter','迪恩·卡特'],
+        ['迪恩卡特','迪恩·卡特'],
+        ['迪恩·卡特','迪恩·卡特'],
+        ['colebrady','科尔·布雷迪'],
+        ['科尔布雷迪','科尔·布雷迪'],
+        ['科尔·布雷迪','科尔·布雷迪'],
+        ['nicosolano','尼科·索拉诺'],
+        ['尼科索拉诺','尼科·索拉诺'],
+        ['尼科·索拉诺','尼科·索拉诺'],
+        ['jacksonobrien','杰克森·奥布莱恩'],
+        ['杰克森奥布莱恩','杰克森·奥布莱恩'],
+        ['杰克森·奥布莱恩','杰克森·奥布莱恩'],
+        ['eliasvolkov','伊利亚·沃尔科夫'],
+        ['伊利亚沃尔科夫','伊利亚·沃尔科夫'],
+        ['伊利亚·沃尔科夫','伊利亚·沃尔科夫'],
+        ['olivergrey','奥利弗·格雷'],
+        ['奥利弗格雷','奥利弗·格雷'],
+        ['奥利弗·格雷','奥利弗·格雷'],
+        ['verasong','薇拉·宋'],
+        ['薇拉宋','薇拉·宋'],
+        ['薇拉·宋','薇拉·宋']
+    ]);
+}
+
+function canonicalPersonV4(name) {
+    const raw = String(name || '').trim();
+    if (!raw) return null;
+    const key = personAliasKey(raw);
+    return aliasDictionary().get(key) || raw;
+}
+
+function emptyV4MemoryFromLegacy(mem) {
+    return {
+        schema: SMM4_SCHEMA,
+        version: 4,
+        story_start: mem.story_start || S().storyStart || null,
+        current_story_time: mem.current_story_time || null,
+        current_scene: mem.current_scene || {},
+        last_processed_index: Number(mem.last_processed_index ?? -1),
+
+        days: {},
+        characters_v4: {},
+        relationships_v4: {},
+        tasks_v4: [],
+        unresolved_v4: [],
+        quarantined: Array.isArray(mem.quarantined) ? mem.quarantined : [],
+        conflicts: Array.isArray(mem.conflicts) ? mem.conflicts : [],
+        audit: Array.isArray(mem.audit) ? mem.audit : []
+    };
+}
+
+function mergeScalarState(target, source) {
+    if (!source || typeof source !== 'object') return target;
+    for (const [k,v] of Object.entries(source)) {
+        if (v === undefined || v === null || v === '' || k === 'name') continue;
+        if (k === 'relationship' || k === 'relationships') continue;
+        if (k === 'to_do') continue;
+        target[k] = v;
+    }
+    return target;
+}
+
+function addCharacterStateV4(v4, sourceName, sourceData) {
+    const canon = canonicalPersonV4(sourceName || sourceData?.name);
+    if (!canon) return;
+    const id = stableId('char', canon);
+    if (!v4.characters_v4[id]) {
+        v4.characters_v4[id] = {
+            id,
+            name: canon,
+            aliases: [],
+            profile: {},
+            current_state: {},
+            history: []
+        };
+    }
+    const c = v4.characters_v4[id];
+    const alias = String(sourceName || '').trim();
+    if (alias && alias !== canon && !c.aliases.includes(alias)) c.aliases.push(alias);
+
+    const arr = Array.isArray(sourceData) ? sourceData : [sourceData];
+    for (const st of arr) {
+        if (!st || typeof st !== 'object') continue;
+        const stableFields = ['age','gender','identity','personality'];
+        for (const f of stableFields) {
+            if (st[f] !== undefined && st[f] !== null && st[f] !== '') c.profile[f] = st[f];
+        }
+
+        const transient = {};
+        for (const f of ['location','companion','physiological','clothing','agreement']) {
+            if (st[f] !== undefined && st[f] !== null && st[f] !== '') transient[f] = st[f];
+        }
+        mergeScalarState(c.current_state, transient);
+
+        if (Object.keys(transient).length) {
+            c.history.push({
+                at: M().current_story_time || null,
+                state: transient
+            });
+        }
+        if (c.history.length > 100) c.history = c.history.slice(-100);
+    }
+}
+
+function normalizeRelationshipPeople(raw) {
+    let people = [];
+    if (Array.isArray(raw?.people)) people = raw.people;
+    else if (Array.isArray(raw?.pair)) people = raw.pair;
+    else if (typeof raw?.people === 'string') people = raw.people.split(/[↔、,，/&]+/);
+    return [...new Set(people.map(canonicalPersonV4).filter(Boolean))];
+}
+
+function addRelationshipV4(v4, raw) {
+    const people = normalizeRelationshipPeople(raw);
+    // Critical rule: only explicit two-person relationships are stored here.
+    if (people.length !== 2) {
+        if (people.length > 2) {
+            v4.quarantined.push({
+                type:'relationship_group_ignored',
+                reason:'多人同场/群体文本不能自动转为双人关系',
+                raw
+            });
+        }
+        return;
+    }
+    const [a,b] = [...people].sort((x,y)=>x.localeCompare(y,'zh-CN'));
+    const key = `${a} ↔ ${b}`;
+    const id = stableId('rel', key);
+    if (!v4.relationships_v4[id]) {
+        v4.relationships_v4[id] = {
+            id, people:[a,b], current:null, history:[]
+        };
+    }
+    const r = v4.relationships_v4[id];
+    const state = String(raw?.state || '').trim() || null;
+    const change = String(raw?.change || '').trim() || null;
+    if (state) r.current = state;
+    if (state || change) {
+        r.history.push({
+            at: raw?.date || raw?.time || M().current_story_time || null,
+            state, change
+        });
+    }
+    if (r.history.length > 100) r.history = r.history.slice(-100);
+}
+
+function addTimelineV4(v4, raw) {
+    const p = storyDateParts(raw);
+    if (!p) {
+        v4.quarantined.push({type:'timeline_without_date', raw});
+        return;
+    }
+    if (!v4.days[p.key]) {
+        v4.days[p.key] = {date:p.key, events:[]};
+    }
+    const signature = `${raw?.time||''}|${raw?.event||''}`.trim();
+    if (!v4.days[p.key].events.some(e => `${e.time||''}|${e.event||''}` === signature)) {
+        v4.days[p.key].events.push({
+            time: raw?.time || '',
+            event: raw?.event || '',
+            source: raw?.source || null
+        });
+    }
+    v4.days[p.key].events.sort((x,y)=>parseClockMinutes(x.time)-parseClockMinutes(y.time));
+}
+
+function explicitFutureTask(raw, currentIso) {
+    const desc = String(raw?.description || '').trim();
+    const dueText = String(raw?.due || '').trim();
+    const due = isoDateFromAny(dueText);
+    const futureWords = /明天|明日|后天|下周|约定|预约|会面|面试|课程|上课|截止|需前往|等待.*到来/i.test(`${dueText} ${desc}`);
+    const completionWords = /已完成|完成|已经发生|已结束|已赴约|已上课|已会面|已解决/i.test(desc);
+
+    if (completionWords) return false;
+    if (due && currentIso && due < currentIso) return false;
+    return !!(futureWords || (due && (!currentIso || due >= currentIso)));
+}
+
+function migrateLegacyToV4({force=false}={}) {
+    const mem = M();
+    if (mem.schema === SMM4_SCHEMA && !force) return mem;
+
+    const v4 = emptyV4MemoryFromLegacy(mem);
+
+    for (const x of (mem.timeline || [])) addTimelineV4(v4, x);
+
+    for (const [name,data] of Object.entries(mem.characters || {})) {
+        addCharacterStateV4(v4, name, data);
+    }
+
+    for (const rel of (mem.relationships || [])) addRelationshipV4(v4, rel);
+
+    const currentIso = isoDateFromAny(mem.current_story_time);
+    for (const loop of (mem.open_loops || [])) {
+        // Strict migration: retain only explicit future tasks.
+        if (explicitFutureTask(loop, currentIso)) {
+            const sig = `${loop?.due||''}|${loop?.description||''}`.toLowerCase().replace(/\s+/g,'');
+            if (!v4.tasks_v4.some(t => t.signature === sig)) {
+                v4.tasks_v4.push({
+                    id: stableId('task', sig),
+                    title: cleanLoopTitle(loop),
+                    due: loop?.due || null,
+                    description: loop?.description || '',
+                    status: 'pending',
+                    signature: sig,
+                    source: loop?.source || null
+                });
+            }
+        }
+    }
+
+    v4.audit.push({
+        at:new Date().toISOString(),
+        type:'migration_to_v4',
+        note:'legacy memory normalized into date/person/relationship/task structure'
+    });
+    if (v4.audit.length > 100) v4.audit = v4.audit.slice(-100);
+
+    C().chatMetadata[META_KEY] = v4;
+    return v4;
+}
+
+async function migrateToV4Now() {
+    if (HISTORY_RUNNING || BUSY) {
+        toast('请先暂停历史重建，等待当前请求结束后再进行数据重构。','warning');
+        return;
+    }
+    const before = JSON.parse(JSON.stringify(M()));
+    // Backup in metadata; compact but complete for rollback.
+    C().chatMetadata[`${META_KEY}_legacy_backup`] = before;
+    migrateLegacyToV4({force:true});
+    await saveMeta();
+    refresh();
+    refreshNative();
+
+    const box=document.getElementById('smm2_native_memory_box');
+    if (box?.dataset.open==='1') {
+        box.innerHTML=memoryReadableHTML();
+        bindHistoryBrowserV4();
+    }
+    toast('v4 数据重构完成。旧记忆已备份，可继续检查后再重建。','success');
+}
+
+function v4DaysSorted(mem=M()) {
+    return Object.values(mem.days || {}).sort((a,b)=>String(a.date).localeCompare(String(b.date)));
+}
+
+function v4TimelineHTML(mem=M()) {
+    const days=v4DaysSorted(mem);
+    if (!days.length) return '<div class="smm2-empty">暂无标准化时间线</div>';
+    return days.slice(-60).map(day=>`
+      <details class="smm2-day-card">
+        <summary>${esc(day.date)} <span class="smm2-day-count">${day.events.length} 条</span></summary>
+        <div class="smm2-day-body">
+          ${day.events.map(e=>`<div class="smm2-day-row">${e.time?`<b>${esc(e.time)}</b>　`:''}${esc(e.event||'')}</div>`).join('')}
+        </div>
+      </details>`).join('');
+}
+
+function v4CharactersHTML(mem=M()) {
+    const chars=Object.values(mem.characters_v4 || {}).sort((a,b)=>a.name.localeCompare(b.name,'zh-CN'));
+    if (!chars.length) return '<div class="smm2-empty">暂无人物档案</div>';
+    return chars.map(c=>`
+      <details class="smm2-memory-details smm2-person-card">
+        <summary>${esc(c.name)}</summary>
+        ${c.aliases?.length?`<div class="smm2-alias">别名：${esc(c.aliases.join(' / '))}</div>`:''}
+        <div class="smm2-v4-section"><b>稳定资料</b><pre>${esc(JSON.stringify(c.profile||{},null,2))}</pre></div>
+        <div class="smm2-v4-section"><b>当前状态</b><pre>${esc(JSON.stringify(c.current_state||{},null,2))}</pre></div>
+        ${c.history?.length?`<details><summary>状态历史 ${c.history.length} 条</summary><pre>${esc(JSON.stringify(c.history.slice(-30),null,2))}</pre></details>`:''}
+      </details>`).join('');
+}
+
+function v4RelationshipsHTML(mem=M()) {
+    const rels=Object.values(mem.relationships_v4 || {});
+    if (!rels.length) return '<div class="smm2-empty">暂无明确双人关系</div>';
+    return rels.sort((a,b)=>a.people.join('').localeCompare(b.people.join(''),'zh-CN')).map(r=>`
+      <details class="smm2-memory-details smm2-relation-card">
+        <summary>${esc(r.people.join(' ↔ '))}</summary>
+        <div><b>当前：</b>${esc(r.current || '未确定')}</div>
+        ${r.history?.length?`<details><summary>关系发展 ${r.history.length} 条</summary>
+          ${r.history.map(h=>`<div class="smm2-relation-history">${h.at?esc(h.at)+'｜':''}${esc(h.state||'')}${h.change?'｜'+esc(h.change):''}</div>`).join('')}
+        </details>`:''}
+      </details>`).join('');
+}
+
+function v4TasksHTML(mem=M()) {
+    const tasks=(mem.tasks_v4 || []).filter(t=>t.status==='pending');
+    if (!tasks.length) return '<div class="smm2-empty">当前没有明确待办事项</div>';
+    return tasks.map(t=>`
+      <div class="smm2-memory-item">
+        <b>${esc(t.title || '待办')}</b>${t.due?`｜${esc(t.due)}`:''}<br>
+        ${esc(t.description||'')}
+      </div>`).join('');
+}
+
+function v4DateAudit(mem=M()) {
+    const start=isoDateFromAny(mem.story_start || S().storyStart);
+    const current=isoDateFromAny(mem.current_story_time);
+    if (!start || !current) return {ok:false, message:'当前剧情时间尚未标准化为具体日期，暂不能检查缺失日期。'};
+    const present=new Set(Object.keys(mem.days||{}));
+    const a=new Date(`${start}T00:00:00Z`), b=new Date(`${current}T00:00:00Z`);
+    if (b<a) return {ok:false,message:'当前剧情时间早于剧情起点，需要人工检查。'};
+    const missing=[], all=[];
+    for(let d=new Date(a);d<=b && all.length<3700;d.setUTCDate(d.getUTCDate()+1)){
+        const k=d.toISOString().slice(0,10);
+        all.push(k);
+        if(!present.has(k)) missing.push(k);
+    }
+    return {ok:true,start,current,all,missing};
+}
+
+function historyRecordsV4() {
+    const m=M(), out=[];
+    for(const day of v4DaysSorted(m)){
+        for(const e of day.events||[]) out.push({type:'timeline',label:`${day.date} ${e.time||''}`,text:e.event||''});
+    }
+    for(const c of Object.values(m.characters_v4||{})){
+        out.push({type:'character',label:c.name,text:JSON.stringify({profile:c.profile,current_state:c.current_state})});
+    }
+    for(const r of Object.values(m.relationships_v4||{})){
+        out.push({type:'relationship',label:r.people.join(' ↔ '),text:JSON.stringify({current:r.current,history:r.history})});
+    }
+    for(const t of (m.tasks_v4||[])){
+        out.push({type:'task',label:t.title||'待办',text:`${t.due||''} ${t.description||''}`});
+    }
+    return out;
+}
+
+function bindHistoryBrowserV4() {
+    const s=document.getElementById('smm4_history_search');
+    const t=document.getElementById('smm4_history_type');
+    const host=document.getElementById('smm4_history_results');
+    const render=()=>{
+        if(!host) return;
+        const q=String(s?.value||'').trim().toLowerCase();
+        const ty=t?.value||'all';
+        const rows=historyRecordsV4().filter(r=>(ty==='all'||r.type===ty)&&(!q||`${r.label} ${r.text}`.toLowerCase().includes(q)));
+        host.innerHTML=rows.length?rows.slice(-600).map(r=>`<div class="smm2-history-row"><b>${esc(r.label)}</b><br>${esc(r.text)}</div>`).join(''):'<div class="smm2-empty">没有匹配的历史记忆</div>';
+    };
+    if(s) s.oninput=render;
+    if(t) t.onchange=render;
+    render();
+}
 function memoryReadableHTML() {
-    const m = M();
-    const backtrackCount = countStoredTimeBacktracks(m.timeline || []);
-    const timeline = dailyTimelineHTML(m.timeline || []);
-    const audit = dateRangeAudit();
+    const mem = M();
 
-    const missing = audit.days.length
-        ? `<div class="smm2-date-audit">
-             <b>日期完整性：</b>${audit.start} → ${audit.end}　
-             有记录 ${audit.days.length-audit.missing.length} 天 / 共 ${audit.days.length} 天
-             ${audit.missing.length
-                ? `<details><summary>⚠ ${audit.missing.length} 个无记录日期（仅提示，不自动编造剧情）</summary>
-                    <div class="smm2-missing-days">${audit.missing.map(x=>`<span>${esc(x.key)}</span>`).join('')}</div>
-                   </details>`
-                : `<span>✓ 未发现缺失日期</span>`}
-           </div>`
-        : `<div class="smm2-date-audit">日期完整性：需要有效的剧情起点和当前剧情日期后才能检查。</div>`;
+    if (mem.schema !== SMM4_SCHEMA) {
+        return `
+          <div class="smm2-memory-view">
+            <div class="smm2-memory-top">
+              <div><b>检测到旧版记忆结构。</b></div>
+              <div>建议先执行一次“数据重构”，会在当前聊天元数据中保留旧记忆备份。</div>
+            </div>
+            <button id="smm4_migrate_now" class="menu_button smm2-primary-tool">执行 v4 数据重构</button>
+            <details class="smm2-memory-details">
+              <summary>旧版记忆预览</summary>
+              <pre>${esc(JSON.stringify(mem,null,2))}</pre>
+            </details>
+          </div>`;
+    }
 
-    const characters = mergedCharactersView().map(g => {
-        const aliases = [...g.aliases];
-        const merged = Object.assign({}, ...g.states.filter(x=>x && typeof x==='object'));
-        return `<details class="smm2-memory-details smm2-person-card">
-            <summary>${esc(g.name)}</summary>
-            ${aliases.length ? `<div class="smm2-alias">别名：${esc(aliases.join(' / '))}</div>` : ''}
-            <pre>${esc(JSON.stringify(merged, null, 2))}</pre>
-         </details>`;
-    }).join('') || '<div class="smm2-empty">暂无人物档案</div>';
-
-    const relationships = mergedRelationshipsView().map(g => {
-        const latest = g.history[g.history.length-1] || {};
-        const history = g.history.map(x =>
-            `<div class="smm2-relation-history">${esc(x.state || '')}${x.change ? '｜'+esc(x.change) : ''}</div>`
-        ).join('');
-        return `<details class="smm2-memory-details smm2-relation-card">
-          <summary>${esc(g.key)}</summary>
-          <div><b>当前：</b>${esc(latest.state || '未确定')}</div>
-          ${g.history.length > 1 ? `<details><summary>关系发展 ${g.history.length} 条</summary>${history}</details>` : history}
-        </details>`;
-    }).join('') || '<div class="smm2-empty">暂无关系记录</div>';
-
-    const loopGroups=mergedOpenLoopsView();
-    const loopBlock=(title, arr) => arr.length ? `
-        <details class="smm2-loop-group" open>
-          <summary>${title} <span>${arr.length}</span></summary>
-          ${arr.map(x=>`<div class="smm2-memory-item">
-              <b>${esc(cleanLoopTitle(x))}</b>${x.due ? `｜${esc(x.due)}` : ''}<br>
-              ${esc(x.description || '')}
-          </div>`).join('')}
-        </details>` : '';
-    const loops = [
-        loopBlock('待办 / 未来事件',loopGroups.future),
-        loopBlock('当前进行中的剧情',loopGroups.active),
-        loopBlock('悬而未决',loopGroups.unresolved),
-        loopBlock('过期 / 待确认',loopGroups.overdue)
-    ].join('') || '<div class="smm2-empty">暂无未完成事项</div>';
-
-    const conflicts = [
-        ...(m.conflicts || []).map(x => ({title:'冲突', body: JSON.stringify(x)})),
-        ...(m.quarantined || []).map(x => ({title:'隔离', body: JSON.stringify(x)}))
-    ].map(x =>
-        `<div class="smm2-memory-item smm2-memory-warning"><b>${esc(x.title)}</b><br>${esc(x.body)}</div>`
-    ).join('') || '<div class="smm2-empty">暂无冲突/隔离记忆</div>';
+    const audit=v4DateAudit(mem);
+    const auditHtml=audit.ok
+      ? `<div class="smm2-date-audit"><b>日期完整性：</b>${esc(audit.start)} → ${esc(audit.current)}
+          ${audit.missing.length
+            ? `<details><summary>⚠ ${audit.missing.length} 个无记录日期（只提示，不补写）</summary>
+                 <div class="smm2-missing-days">${audit.missing.map(x=>`<span>${esc(x)}</span>`).join('')}</div>
+               </details>`
+            : `<span>✓ 未发现缺失日期</span>`}
+         </div>`
+      : `<div class="smm2-date-audit">${esc(audit.message)}</div>`;
 
     return `
       <div class="smm2-memory-view">
         <div class="smm2-memory-top">
-          <div><b>剧情起点：</b>${esc(m.story_start || S().storyStart || '未建立')} <span class="smm2-lock">🔒 锁定</span></div>
-          <div><b>当前剧情时间：</b>${esc(m.current_story_time || '未建立')}</div>
-          <div><b>已处理到：</b>${Math.max(0, Number(m.last_processed_index ?? -1) + 1)} 条</div>
-          <div><b>时间线显示：</b>同一天合并显示，日期与时间自动排序</div>
-          ${backtrackCount ? `<div class="smm2-memory-warning-text"><b>原始写入顺序存在 ${backtrackCount} 处时间倒退</b>；查看时已自动整理，不会改动原事件。</div>` : ''}
-          ${missing}
+          <div><b>数据结构：</b>v4 标准化</div>
+          <div><b>剧情起点：</b>${esc(mem.story_start || '未建立')} <span class="smm2-lock">🔒</span></div>
+          <div><b>当前剧情时间：</b>${esc(mem.current_story_time || '未建立')}</div>
+          <div><b>已处理到：</b>${Math.max(0, Number(mem.last_processed_index ?? -1)+1)} 条</div>
+          ${auditHtml}
         </div>
 
-        ${historyBrowserHTML()}
+        <details class="smm2-memory-details smm2-history-browser">
+          <summary>历史记忆浏览器</summary>
+          <div class="smm2-history-tools">
+            <input id="smm4_history_search" type="search" placeholder="搜索日期、人物、事件、关键词">
+            <select id="smm4_history_type">
+              <option value="all">全部类型</option>
+              <option value="timeline">时间线</option>
+              <option value="character">人物</option>
+              <option value="relationship">人物关系</option>
+              <option value="task">待办</option>
+            </select>
+          </div>
+          <div id="smm4_history_results"></div>
+        </details>
 
         <details open class="smm2-memory-details">
           <summary>当前场景</summary>
-          <pre>${esc(JSON.stringify(m.current_scene || {}, null, 2))}</pre>
+          <pre>${esc(JSON.stringify(mem.current_scene||{},null,2))}</pre>
         </details>
 
         <details open class="smm2-memory-details">
           <summary>时间线</summary>
-          ${timeline}
+          ${v4TimelineHTML(mem)}
         </details>
 
         <details class="smm2-memory-details">
-          <summary>人物（${mergedCharactersView().length}）</summary>
-          ${characters}
+          <summary>人物（${Object.keys(mem.characters_v4||{}).length}）</summary>
+          ${v4CharactersHTML(mem)}
         </details>
 
         <details class="smm2-memory-details">
-          <summary>人物关系（${mergedRelationshipsView().length}）</summary>
-          ${relationships}
+          <summary>人物关系（${Object.keys(mem.relationships_v4||{}).length}）</summary>
+          ${v4RelationshipsHTML(mem)}
         </details>
 
         <details open class="smm2-memory-details">
-          <summary>未完成事项</summary>
-          ${loops}
+          <summary>待办事项（严格模式）</summary>
+          ${v4TasksHTML(mem)}
         </details>
 
-        <details open class="smm2-memory-details">
-          <summary>冲突 / 隔离</summary>
-          ${conflicts}
+        <details class="smm2-memory-details">
+          <summary>隔离 / 待人工检查（${(mem.quarantined||[]).length}）</summary>
+          <pre>${esc(JSON.stringify((mem.quarantined||[]).slice(-100),null,2))}</pre>
         </details>
 
         <button id="smm2_raw_json" class="menu_button">查看原始 JSON</button>
-      </div>
-    `;
+      </div>`;
 }
 
 function toggleReadableMemory() {
@@ -1047,7 +1399,10 @@ function toggleReadableMemory() {
 
     box.innerHTML = memoryReadableHTML();
     box.dataset.open = '1';
-    bindHistoryBrowser();
+
+    const migrateBtn=document.getElementById('smm4_migrate_now');
+    if(migrateBtn) migrateBtn.onclick=migrateToV4Now;
+    if(M().schema===SMM4_SCHEMA) bindHistoryBrowserV4();
 
     const raw = document.getElementById('smm2_raw_json');
     if (raw) {
@@ -1169,6 +1524,17 @@ function nativeManagerHTML() {
       </div>
 
       <div id="smm2_native_memory_box" data-open="0"></div>
+      <details class="smm2-tool-card">
+        <summary>
+          <span class="smm2-tool-title">数据重构</span>
+          <span class="smm2-tool-subtitle">升级旧记忆为 v4 标准结构</span>
+        </summary>
+        <div class="smm2-tool-body">
+          <div class="smm2-note">会先备份当前旧记忆，再转换时间线、人物、双人关系和严格待办。不会修改原聊天。</div>
+          <button id="smm4_native_migrate" class="menu_button smm2-primary-tool">执行数据重构</button>
+        </div>
+      </details>
+
 
       <details class="smm2-tool-card smm2-time-fix">
         <summary>
@@ -1239,6 +1605,9 @@ function bindNativeManager() {
     q('smm2_native_clear').onclick = clearMemory;
 
     q('smm2_native_view').onclick = toggleReadableMemory;
+    const migrateNative = document.getElementById('smm4_native_migrate');
+    if (migrateNative) migrateNative.onclick = migrateToV4Now;
+
     q('smm2_native_fix_time').onclick = correctMemoryDate;
 
     const s = S();
