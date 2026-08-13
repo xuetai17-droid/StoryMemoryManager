@@ -348,11 +348,40 @@ function repairNightOwnership(rows) {
 
 
 function explicitDateFromEvent(e) {
-    const blob=`${e?.date||''} ${e?.time||''} ${e?.event||''}`;
+    // v0.5.7: IMPORTANT: e.date is generated memory metadata, not evidence.
+    // Only literal dates written in the event/time text may become hard anchors.
+    const blob=`${e?.time||''} ${e?.event||''}`;
     const m=blob.match(/(20\d{2})[年\-\/.](\d{1,2})[月\-\/.](\d{1,2})日?/);
     if(!m) return null;
     const iso=`${m[1]}-${String(Number(m[2])).padStart(2,'0')}-${String(Number(m[3])).padStart(2,'0')}`;
     return normalizeDateInput(iso)?.iso || null;
+}
+
+function repairDateIslandsBySource(mem=M()) {
+    // Fix a short/medium date "island" such as:
+    //   09-11 (#67,#69) -> 09-12 (#71..#79) -> 09-11 (#80..)
+    // Source chronology proves the middle block cannot be a real calendar advance
+    // unless it contains an explicit absolute-date/cross-day cue.
+    const rows=(mem.timeline||[]).map((e,i)=>({e,i,src:sourceFirst(e.source),d:isoDateFromAny(e.date)}))
+        .sort((a,b)=>(a.src-b.src)||(a.i-b.i));
+    let fixed=0;
+    const notes=[];
+    let a=0;
+    while(a<rows.length){
+        const d=rows[a].d; let b=a+1;
+        while(b<rows.length && rows[b].d===d) b++;
+        const left=a>0?rows[a-1].d:null, right=b<rows.length?rows[b].d:null;
+        if(d && left && right && left===right && d!==left){
+            const block=rows.slice(a,b);
+            const hard=block.some(x=>explicitDateFromEvent(x.e) || hasStrongNextDayCue(x.e) || /跨过(?:午夜|零点)|过了(?:午夜|零点)|午夜之后|零点之后/.test(`${x.e?.time||''} ${x.e?.event||''}`));
+            if(!hard){
+                for(const x of block){ x.e.date=left; fixed++; }
+                notes.push({type:'source_date_island_repaired',source:`${block[0].e.source||''} → ${block.at(-1).e.source||''}`,content:`${d} → ${left}`,reason:'source 前后均属于同一日期；中间日期块无明确跨日证据，判定为旧摘要日期漂移'});
+            }
+        }
+        a=b;
+    }
+    return {fixed,notes};
 }
 function hasStrongNextDayCue(e) {
     return /次日|第二天|翌日|隔天|第二日/.test(`${e?.time||''} ${e?.event||''}`);
@@ -426,7 +455,7 @@ function rebuildDatesBySourceAxis(mem=M()) {
 
     mem.timeline=rows.map(({__i,__src,__clock,__explicitDate,...e})=>e);
     mem.source_axis={
-        version:'0.5.6',at:new Date().toISOString(),changed,anchors,rollovers,
+        version:'0.5.7',at:new Date().toISOString(),changed,anchors,rollovers,
         diagnostics:diagnostics.slice(-150)
     };
     return mem.source_axis;
@@ -460,9 +489,12 @@ function calibrateTimeline(mem=M(), {allowCrossMidnight=true}={}) {
     }
     mem.timeline=merged.map(({__i,__src,__last,__clock,...e})=>e);
 
-    // 2) Reconstruct calendar ownership from source chronology.
+    // 2) Repair impossible date islands first, then reconstruct calendar ownership.
     // "凌晨/半夜" alone NEVER increments the date.
+    const island=repairDateIslandsBySource(mem);
     const axis=rebuildDatesBySourceAxis(mem);
+    axis.changed=Number(axis.changed||0)+Number(island.fixed||0);
+    axis.diagnostics=[...(island.notes||[]),...(axis.diagnostics||[])];
 
     // 3) Preserve source order inside each date. Time text is diagnostic only.
     mem.timeline=(mem.timeline||[]).sort((a,b)=>{
@@ -476,7 +508,7 @@ function calibrateTimeline(mem=M(), {allowCrossMidnight=true}={}) {
     });
 
     mem.timeline_calibration={
-        version:'0.5.6',
+        version:'0.5.7',
         at:new Date().toISOString(),
         duplicate_merged:duplicateMerged,
         date_reassigned:Number(axis.changed||0),
@@ -1570,7 +1602,7 @@ function cleanLegacyTasksForThisChat(mem=M()) {
         mem.quarantined = Array.isArray(mem.quarantined) ? mem.quarantined : [];
         mem.quarantined.push(...archived.map(t => ({
             type:'legacy_task_archived',
-            reason:'v0.5.6 严格待办清洗：非用户确认的真实未来待办，移出待办区',
+            reason:'v0.5.7 严格待办清洗：非用户确认的真实未来待办，移出待办区',
             task:t
         })));
     }
@@ -2288,7 +2320,7 @@ function nativeManagerHTML() {
       </details>
       <details class="smm2-tool-card" open>
         <summary>
-          <span class="smm2-tool-title">时间基准修复 v0.5.6</span>
+          <span class="smm2-tool-title">时间基准修复 v0.5.7</span>
           <span class="smm2-tool-subtitle">绝对日期用于计算，学期时间用于显示</span>
         </summary>
         <div class="smm2-tool-body">
