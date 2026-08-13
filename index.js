@@ -699,7 +699,10 @@ async function correctMemoryDate() {
     refreshNative();
 
     const box = document.getElementById('smm2_native_memory_box');
-    if (box?.dataset.open === '1') box.innerHTML = memoryReadableHTML();
+    if (box?.dataset.open === '1') {
+        box.innerHTML = memoryReadableHTML();
+        if (M().schema===SMM4_SCHEMA) bindHistoryBrowserV4(); else bindHistoryBrowserLegacy();
+    }
 
     toast(`时间修正完成：${from.iso} → ${to.iso}。聊天原文未修改。`, 'success');
 }
@@ -1226,7 +1229,7 @@ async function migrateToV4Now() {
     const box=document.getElementById('smm2_native_memory_box');
     if (box?.dataset.open==='1') {
         box.innerHTML=memoryReadableHTML();
-        bindHistoryBrowserV4();
+        if (M().schema===SMM4_SCHEMA) bindHistoryBrowserV4(); else bindHistoryBrowserLegacy();
     }
     toast('v4 数据重构完成。旧记忆已备份，可继续检查后再重建。','success');
 }
@@ -1292,7 +1295,7 @@ function cleanLegacyTasksForThisChat(mem=M()) {
         mem.quarantined = Array.isArray(mem.quarantined) ? mem.quarantined : [];
         mem.quarantined.push(...archived.map(t => ({
             type:'legacy_task_archived',
-            reason:'v0.5.1 严格待办清洗：非用户确认的真实未来待办，移出待办区',
+            reason:'v0.5.2 严格待办清洗：非用户确认的真实未来待办，移出待办区',
             task:t
         })));
     }
@@ -1347,7 +1350,7 @@ async function repairTimeBaselineV041() {
     const box=document.getElementById('smm2_native_memory_box');
     if (box?.dataset.open==='1') {
         box.innerHTML=memoryReadableHTML();
-        bindHistoryBrowserV4();
+        if (M().schema===SMM4_SCHEMA) bindHistoryBrowserV4(); else bindHistoryBrowserLegacy();
     }
     toast(`时间基准已修复：起点 ${start.iso}，当前日期 ${cur.iso}；待办保留 ${taskResult.kept} 条。`,'success');
 }
@@ -1452,22 +1455,187 @@ function bindHistoryBrowserV4() {
     if(t) t.onchange=render;
     render();
 }
+
+function legacyDaysGrouped(mem=M()) {
+    const groups = new Map();
+    for (const e of (mem.timeline || [])) {
+        const d = isoDateFromAny(e.date) || isoDateFromAny(`${e.date||''} ${e.time||''}`) || '日期未定';
+        if (!groups.has(d)) groups.set(d, []);
+        groups.get(d).push(e);
+    }
+    const keys=[...groups.keys()].sort((a,b)=>{
+        if(a==='日期未定') return 1;
+        if(b==='日期未定') return -1;
+        return a.localeCompare(b);
+    });
+    return keys.map(date=>({date,events:groups.get(date)}));
+}
+
+function legacyHistoryRecords() {
+    const m=M(), out=[];
+    for(const day of legacyDaysGrouped(m)){
+        for(const e of day.events||[]) out.push({
+            type:'timeline',
+            label:`${day.date} ${e.time||''}`.trim(),
+            text:e.event||''
+        });
+    }
+    for(const [name,c] of Object.entries(m.characters||{})){
+        out.push({type:'character',label:name,text:JSON.stringify(c||{})});
+    }
+    for(const r of (m.relationships||[])){
+        const people=Array.isArray(r.people)?r.people.join(' ↔ '):'人物关系';
+        out.push({type:'relationship',label:people,text:`${r.state||''} ${r.change||''}`.trim()});
+    }
+    for(const t of (m.open_loops||[])){
+        out.push({type:'task',label:t.description||t.id||'待办',text:`${t.due||''} ${t.status||''}`.trim()});
+    }
+    for(const q of (m.quarantined||[])){
+        out.push({type:'quarantine',label:'隔离项',text:`${q.content||''} ${q.reason||''}`.trim()});
+    }
+    return out;
+}
+
+function bindHistoryBrowserLegacy() {
+    const s=document.getElementById('smm52_history_search');
+    const t=document.getElementById('smm52_history_type');
+    const host=document.getElementById('smm52_history_results');
+    const render=()=>{
+        if(!host) return;
+        const q=String(s?.value||'').trim().toLowerCase();
+        const ty=t?.value||'all';
+        const rows=legacyHistoryRecords().filter(r=>(ty==='all'||r.type===ty)&&(!q||`${r.label} ${r.text}`.toLowerCase().includes(q)));
+        host.innerHTML=rows.length
+          ? rows.slice(-800).map(r=>`<div class="smm2-history-row"><b>${esc(r.label)}</b><br>${esc(r.text)}</div>`).join('')
+          : '<div class="smm2-empty">当前已重建部分没有匹配的记忆</div>';
+    };
+    if(s) s.oninput=render;
+    if(t) t.onchange=render;
+    render();
+}
+
+function legacyTimelineHTML(mem=M()) {
+    const days=legacyDaysGrouped(mem);
+    if(!days.length) return '<div class="smm2-empty">当前安全重建尚未生成时间线。</div>';
+    return days.map(day=>`
+      <details class="smm2-day">
+        <summary>${esc(day.date)} <span class="smm2-count">${day.events.length} 条</span></summary>
+        <div class="smm2-day-body">
+          ${day.events.map(e=>`
+            <div class="smm2-event">
+              <b>${esc(e.time||'时间未定')}</b>
+              <span>${esc(e.event||'')}</span>
+              ${e.source?`<small>${esc(e.source)}</small>`:''}
+            </div>`).join('')}
+        </div>
+      </details>`).join('');
+}
+
+function legacyCharactersHTML(mem=M()) {
+    const rows=Object.entries(mem.characters||{});
+    if(!rows.length) return '<div class="smm2-empty">当前已重建部分尚未识别人物资料。</div>';
+    return rows.sort((a,b)=>a[0].localeCompare(b[0])).map(([name,data])=>`
+      <details class="smm2-person">
+        <summary>${esc(name)}</summary>
+        <pre>${esc(JSON.stringify(data||{},null,2))}</pre>
+      </details>`).join('');
+}
+
+function legacyRelationshipsHTML(mem=M()) {
+    const rows=(mem.relationships||[]);
+    if(!rows.length) return '<div class="smm2-empty">当前已重建部分尚未识别人物关系。</div>';
+    return rows.map(r=>{
+        const people=Array.isArray(r.people)?r.people.join(' ↔ '):'人物关系';
+        return `<details class="smm2-person">
+          <summary>${esc(people)}</summary>
+          <div class="smm52-rel"><b>状态：</b>${esc(r.state||'')}<br><b>变化：</b>${esc(r.change||'')}${r.source?`<br><small>${esc(r.source)}</small>`:''}</div>
+        </details>`;
+    }).join('');
+}
+
+function legacyTasksHTML(mem=M()) {
+    const rows=(mem.open_loops||[]);
+    if(!rows.length) return '<div class="smm2-empty">当前已重建部分没有待办/未完成事项。</div>';
+    return rows.map(t=>`
+      <div class="smm52-task">
+        <b>${esc(t.description||t.id||'待办')}</b>
+        ${t.due?`<div>时间：${esc(t.due)}</div>`:''}
+        ${t.status?`<div>状态：${esc(t.status)}</div>`:''}
+      </div>`).join('');
+}
+
+function legacyReadableHTML(mem=M()) {
+    const processed=Math.max(0,Number(mem.last_processed_index??-1)+1);
+    const total=(C().chat||[]).length;
+    const state=mem.rebuild_state||{};
+    const date=mem.current_story_date || isoDateFromAny(mem.current_story_time) || '尚未建立';
+    return `
+      <div class="smm2-memory-view">
+        <div class="smm2-memory-top smm52-live-view">
+          <div><b>查看模式：</b>安全重建中的临时记忆</div>
+          <div><b>已重建：</b>${processed}/${total} 条</div>
+          <div><b>剧情起点：</b>${esc(mem.story_start||S().storyStart||'未建立')}</div>
+          <div><b>当前绝对日期：</b>${esc(date)}</div>
+          <div><b>显示时间：</b>${esc(mem.current_story_time||'未建立')}</div>
+          <div><b>安全断点：</b>${esc(state.status||'未建立')}｜下一条 ${Number(state.next_index??processed)+1}</div>
+          <div class="smm2-note">这是安全重建正在使用的数据本体，可直接检查；不需要先执行 v4 数据重构。</div>
+        </div>
+
+        <details open class="smm2-memory-details smm2-history-browser">
+          <summary>历史记忆浏览器（当前已重建部分）</summary>
+          <div class="smm2-history-tools">
+            <input id="smm52_history_search" type="search" placeholder="搜索日期、人物、事件、关键词">
+            <select id="smm52_history_type">
+              <option value="all">全部类型</option>
+              <option value="timeline">时间线</option>
+              <option value="character">人物</option>
+              <option value="relationship">人物关系</option>
+              <option value="task">待办</option>
+              <option value="quarantine">隔离</option>
+            </select>
+          </div>
+          <div id="smm52_history_results"></div>
+        </details>
+
+        <details open class="smm2-memory-details">
+          <summary>时间线（${(mem.timeline||[]).length}）</summary>
+          ${legacyTimelineHTML(mem)}
+        </details>
+
+        <details class="smm2-memory-details">
+          <summary>人物（${Object.keys(mem.characters||{}).length}）</summary>
+          ${legacyCharactersHTML(mem)}
+        </details>
+
+        <details class="smm2-memory-details">
+          <summary>人物关系（${(mem.relationships||[]).length}）</summary>
+          ${legacyRelationshipsHTML(mem)}
+        </details>
+
+        <details open class="smm2-memory-details">
+          <summary>待办 / 未完成（${(mem.open_loops||[]).length}）</summary>
+          ${legacyTasksHTML(mem)}
+        </details>
+
+        <details class="smm2-memory-details">
+          <summary>隔离 / 待人工检查（${(mem.quarantined||[]).length}）</summary>
+          <pre>${esc(JSON.stringify((mem.quarantined||[]).slice(-100),null,2))}</pre>
+        </details>
+
+        <details class="smm2-memory-details">
+          <summary>当前场景</summary>
+          <pre>${esc(JSON.stringify(mem.current_scene||{},null,2))}</pre>
+        </details>
+
+        <button id="smm2_raw_json" class="menu_button">查看当前重建 JSON</button>
+      </div>`;
+}
+
 function memoryReadableHTML() {
     const mem = M();
 
     if (mem.schema !== SMM4_SCHEMA) {
-        return `
-          <div class="smm2-memory-view">
-            <div class="smm2-memory-top">
-              <div><b>检测到旧版记忆结构。</b></div>
-              <div>建议先执行一次“数据重构”，会在当前聊天元数据中保留旧记忆备份。</div>
-            </div>
-            <button id="smm4_migrate_now" class="menu_button smm2-primary-tool">执行 v4 数据重构</button>
-            <details class="smm2-memory-details">
-              <summary>旧版记忆预览</summary>
-              <pre>${esc(JSON.stringify(mem,null,2))}</pre>
-            </details>
-          </div>`;
+        return legacyReadableHTML(mem);
     }
 
     const audit=v4DateAudit(mem);
@@ -1558,6 +1726,7 @@ function toggleReadableMemory() {
     const migrateBtn=document.getElementById('smm4_migrate_now');
     if(migrateBtn) migrateBtn.onclick=migrateToV4Now;
     if(M().schema===SMM4_SCHEMA) bindHistoryBrowserV4();
+    else bindHistoryBrowserLegacy();
 
     const raw = document.getElementById('smm2_raw_json');
     if (raw) {
@@ -1657,7 +1826,7 @@ async function safeHistoryRun({fresh=false}={}) {
             M().story_start=anchor;
             if (beforeDate && after && after < beforeDate) {
                 M().quarantined.push({content:`批次 #${start+1}-#${end} 尝试将当前日期 ${beforeDate} 倒退为 ${after}`,
-                    reason:'v0.5.1 单向时间守卫：当前主线日期禁止倒退',source:`#${start+1}-#${end}`});
+                    reason:'v0.5.2 单向时间守卫：当前主线日期禁止倒退',source:`#${start+1}-#${end}`});
                 M().current_story_date=beforeDate;
             }
             if (M().current_story_date && M().current_story_date < anchor) M().current_story_date=anchor;
@@ -1679,7 +1848,7 @@ async function safeHistoryRun({fresh=false}={}) {
             try { await rebuildV4Data(); } catch(e) { console.warn('[StoryMemory] v4 normalize after safe rebuild',e); }
             M().rebuild_state={...(M().rebuild_state||{}),status:'complete',next_index:chat.length,updated_at:new Date().toISOString()};
             await saveMeta();
-            toast('v0.5.1 安全历史重建完成。请检查日期、时间线和待办。','success');
+            toast('v0.5.2 安全历史重建完成。请检查日期、时间线和待办。','success');
         }
     } catch(e){
         console.error('[StoryMemory] safe rebuild failed',e);
@@ -1817,7 +1986,7 @@ function nativeManagerHTML() {
       </details>
       <details class="smm2-tool-card" open>
         <summary>
-          <span class="smm2-tool-title">时间基准修复 v0.5.1</span>
+          <span class="smm2-tool-title">时间基准修复 v0.5.2</span>
           <span class="smm2-tool-subtitle">绝对日期用于计算，学期时间用于显示</span>
         </summary>
         <div class="smm2-tool-body">
