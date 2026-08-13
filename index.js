@@ -223,6 +223,168 @@ function filterConflictsForStoryContinuity(items) {
     return { keep, evolved };
 }
 
+
+function sourceIndexes(source) {
+    const s=String(source||'');
+    const nums=[...s.matchAll(/#(\d+)/g)].map(m=>Number(m[1])).filter(Number.isFinite);
+    if (!nums.length) return [];
+    if (nums.length===2 && /#\d+\s*[-–—]\s*#?\d+/.test(s)) {
+        const a=Math.min(nums[0],nums[1]), b=Math.max(nums[0],nums[1]);
+        const out=[]; for(let i=a;i<=b && out.length<500;i++) out.push(i); return out;
+    }
+    return [...new Set(nums)].sort((a,b)=>a-b);
+}
+function sourceFirst(source) {
+    const x=sourceIndexes(source); return x.length?x[0]:Number.MAX_SAFE_INTEGER;
+}
+function sourceLast(source) {
+    const x=sourceIndexes(source); return x.length?x[x.length-1]:-1;
+}
+function mergeSources(a,b) {
+    const x=[...new Set([...sourceIndexes(a),...sourceIndexes(b)])].sort((m,n)=>m-n);
+    return x.length ? x.map(n=>`#${n}`).join(',') : (a||b||null);
+}
+function parseStoryClock(time) {
+    const s=String(time||'').trim();
+    if(!s) return null;
+    let m=s.match(/(\d{1,2})\s*[:：]\s*(\d{2})/);
+    if(m){
+        const h=Number(m[1]), min=Number(m[2]);
+        if(h>=0&&h<24&&min>=0&&min<60) return h*60+min;
+    }
+    m=s.match(/(?:凌晨|半夜)\s*(\d{1,2})(?:点|时)/);
+    if(m){const h=Number(m[1]); if(h>=0&&h<=11)return h*60;}
+    m=s.match(/(?:早晨|早上|上午)\s*(\d{1,2})(?:点|时)?/);
+    if(m){const h=Number(m[1]); if(h>=0&&h<=12)return h*60;}
+    m=s.match(/(?:中午)\s*(\d{1,2})(?:点|时)?/);
+    if(m){let h=Number(m[1]); if(h<11)h+=12; if(h<24)return h*60;}
+    m=s.match(/(?:下午)\s*(\d{1,2})(?:点|时)?/);
+    if(m){let h=Number(m[1]); if(h<12)h+=12; if(h<24)return h*60;}
+    m=s.match(/(?:傍晚|晚上|晚间)\s*(\d{1,2})(?:点|时)?/);
+    if(m){let h=Number(m[1]); if(h<12)h+=12; if(h<24)return h*60;}
+    if(/凌晨|半夜/.test(s)) return 120;
+    if(/清晨|早晨|早上/.test(s)) return 420;
+    if(/上午/.test(s)) return 600;
+    if(/中午/.test(s)) return 720;
+    if(/下午/.test(s)) return 900;
+    if(/傍晚/.test(s)) return 1080;
+    if(/晚上|晚间|深夜/.test(s)) return 1260;
+    return null;
+}
+function normalizeEventText(text) {
+    return String(text||'')
+      .toLowerCase()
+      .replace(/[\s，。！？、；："'“”‘’（）()\[\]【】<>《》·…—-]+/g,'')
+      .replace(/\d{4}年\d{1,2}月\d{1,2}日/g,'')
+      .replace(/\d{1,2}[:：]\d{2}/g,'');
+}
+function charBigrams(s) {
+    s=normalizeEventText(s);
+    const set=new Set();
+    if(s.length<2){ if(s)set.add(s); return set; }
+    for(let i=0;i<s.length-1;i++) set.add(s.slice(i,i+2));
+    return set;
+}
+function textSimilarity(a,b) {
+    const A=charBigrams(a), B=charBigrams(b);
+    if(!A.size||!B.size) return 0;
+    let inter=0; for(const x of A) if(B.has(x)) inter++;
+    return inter/(A.size+B.size-inter);
+}
+function addDaysISO(date, days=1) {
+    const d=normalizeDateInput(date); if(!d)return null;
+    const x=new Date(`${d.iso}T00:00:00Z`);
+    x.setUTCDate(x.getUTCDate()+days);
+    return x.toISOString().slice(0,10);
+}
+function calibrateTimeline(mem=M(), {allowCrossMidnight=true}={}) {
+    const input=Array.isArray(mem.timeline)?mem.timeline:[];
+    const rows=input.map((e,i)=>({...e,__i:i,__src:sourceFirst(e.source),__last:sourceLast(e.source),__clock:parseStoryClock(e.time)}));
+
+    // 1) Safe duplicate merge: same date + strong textual overlap and overlapping/nearby sources.
+    const merged=[];
+    let duplicateMerged=0;
+    for(const row of rows.sort((a,b)=>(a.__src-b.__src)||(a.__i-b.__i))){
+        let hit=null;
+        for(let j=merged.length-1;j>=Math.max(0,merged.length-12);j--){
+            const prev=merged[j];
+            if(String(prev.date||'')!==String(row.date||'')) continue;
+            const nearSource = row.__src!==Number.MAX_SAFE_INTEGER && prev.__src!==Number.MAX_SAFE_INTEGER &&
+                               Math.abs(row.__src-prev.__src)<=8;
+            const overlap = sourceIndexes(row.source).some(x=>sourceIndexes(prev.source).includes(x));
+            const sim=textSimilarity(prev.event,row.event);
+            if((overlap && sim>=0.48) || (nearSource && sim>=0.70)){
+                hit=prev; break;
+            }
+        }
+        if(hit){
+            if(String(row.event||'').length > String(hit.event||'').length) hit.event=row.event;
+            hit.source=mergeSources(hit.source,row.source);
+            if(!hit.time && row.time) hit.time=row.time;
+            hit.__src=Math.min(hit.__src,row.__src);
+            hit.__last=Math.max(hit.__last,row.__last);
+            hit.__clock=hit.__clock ?? row.__clock;
+            duplicateMerged++;
+        }else merged.push(row);
+    }
+
+    // 2) Conservative cross-midnight correction. Only when source order advances,
+    // same explicit date remains, late-night -> early-morning, and later item is marked 凌晨/半夜/次日.
+    let crossMidnightFixed=0;
+    if(allowCrossMidnight){
+        let prev=null;
+        for(const row of merged.sort((a,b)=>(a.__src-b.__src)||(a.__i-b.__i))){
+            if(prev && row.date && prev.date && row.date===prev.date &&
+               Number.isFinite(prev.__clock) && Number.isFinite(row.__clock) &&
+               prev.__clock>=21*60 && row.__clock<=5*60 &&
+               row.__src>=prev.__src &&
+               /凌晨|半夜|次日|第二天|翌日/.test(`${row.time||''} ${row.event||''}`)){
+                const shifted=addDaysISO(row.date,1);
+                if(shifted){ row.date=shifted; crossMidnightFixed++; }
+            }
+            if(row.__clock!=null) prev=row;
+        }
+    }
+
+    // 3) Diagnostics by source chronology.
+    const diagnostics=[];
+    const seq=[...merged].sort((a,b)=>(a.__src-b.__src)||(a.__i-b.__i));
+    let prev=null;
+    for(const row of seq){
+        if(prev && row.date && prev.date){
+            if(row.date < prev.date && row.__src>=prev.__src){
+                diagnostics.push({type:'date_regression',source:row.source,content:`${prev.date} → ${row.date}`,reason:'原始消息顺序中日期倒退'});
+            }
+            if(row.date===prev.date && prev.__clock!=null && row.__clock!=null &&
+               prev.__clock-row.__clock>6*60 && !/回忆|此前|之前|早些时候/.test(`${row.event||''}`)){
+                diagnostics.push({type:'clock_regression',source:row.source,content:`${prev.time||''} → ${row.time||''}`,reason:'同日原始消息顺序出现大幅时间倒退，建议人工核对是否跨日或回忆'});
+            }
+        }
+        if(row.__clock!=null) prev=row;
+    }
+
+    // 4) Canonical display ordering: date first, then parsed clock, then source.
+    const cleaned=merged.map(({__i,__src,__last,__clock,...e})=>e).sort((a,b)=>{
+        const da=isoDateFromAny(a.date)||'9999-99-99', db=isoDateFromAny(b.date)||'9999-99-99';
+        if(da!==db) return da.localeCompare(db);
+        const ca=parseStoryClock(a.time), cb=parseStoryClock(b.time);
+        if(ca!=null && cb!=null && ca!==cb) return ca-cb;
+        if(ca!=null && cb==null) return -1;
+        if(ca==null && cb!=null) return 1;
+        return sourceFirst(a.source)-sourceFirst(b.source);
+    });
+    mem.timeline=cleaned;
+
+    mem.timeline_calibration={
+        version:'0.5.3',
+        at:new Date().toISOString(),
+        duplicate_merged:duplicateMerged,
+        cross_midnight_fixed:crossMidnightFixed,
+        diagnostics:diagnostics.slice(-100)
+    };
+    return mem.timeline_calibration;
+}
+
 function mergeResult(mem, r, endIndex) {
     // A chronological state change is not a contradiction.
     // Only keep conflicts that survive the continuity filter.
@@ -268,6 +430,8 @@ function mergeResult(mem, r, endIndex) {
         if (d) mem.current_story_date = d.iso;
     }
     if (typeof r.current_story_time === 'string' && r.current_story_time.trim()) mem.current_story_time = r.current_story_time.trim();
+
+    calibrateTimeline(mem, {allowCrossMidnight:true});
 
     mem.last_processed_index = endIndex - 1;
     mem.audit.push({ at: new Date().toISOString(), processed_to: mem.last_processed_index });
@@ -410,6 +574,10 @@ ${messagesText(start, end)}
 - 人物关系只有在明确两个人之间存在关系时才记录；多人同场、群体互动不得自动生成多边关系链。
 - open_loops / 未完成事项采用严格模式：只有明确未来承诺、预约、任务且尚未发生的事项才保留。
 - “正在进行”“尚未回答”“等待回应”“关系确认”“已经完成的性行为/课程/会面/讨论”都不能长期留作未来待办。
+- timeline 中同一段剧情只能保留一条主事件；如果多条消息只是补充同一事件，请合并为一条并合并 source，不要重复写近义事件。
+- source 对应原始聊天顺序。判断剧情先后时优先服从 source 顺序；同一天的显示时间必须与事件先后相容。
+- 若前一事件为深夜/23点后，后续原始消息明确出现“凌晨/半夜/次日/第二天”，必须把日期推进到下一天，不能继续挂在前一天。
+- 如果正文是在回忆过去，timeline 可记录过去日期，但 current_story_date 不得倒退。
 - 如果后文已经完成某事项，必须删除/关闭对应 open_loop，不得重复保留。
 特别检查日期连续性：没有新增原始聊天中的明确跨月证据，就必须继承已有可靠月份；禁止仅凭 AI <date> 或自行推算跨月。`;
     let raw;
@@ -1295,7 +1463,7 @@ function cleanLegacyTasksForThisChat(mem=M()) {
         mem.quarantined = Array.isArray(mem.quarantined) ? mem.quarantined : [];
         mem.quarantined.push(...archived.map(t => ({
             type:'legacy_task_archived',
-            reason:'v0.5.2 严格待办清洗：非用户确认的真实未来待办，移出待办区',
+            reason:'v0.5.3 严格待办清洗：非用户确认的真实未来待办，移出待办区',
             task:t
         })));
     }
@@ -1457,6 +1625,7 @@ function bindHistoryBrowserV4() {
 }
 
 function legacyDaysGrouped(mem=M()) {
+    calibrateTimeline(mem, {allowCrossMidnight:false});
     const groups = new Map();
     for (const e of (mem.timeline || [])) {
         const d = isoDateFromAny(e.date) || isoDateFromAny(`${e.date||''} ${e.time||''}`) || '日期未定';
@@ -1468,7 +1637,16 @@ function legacyDaysGrouped(mem=M()) {
         if(b==='日期未定') return -1;
         return a.localeCompare(b);
     });
-    return keys.map(date=>({date,events:groups.get(date)}));
+    return keys.map(date=>{
+        const events=groups.get(date).sort((a,b)=>{
+            const ca=parseStoryClock(a.time), cb=parseStoryClock(b.time);
+            if(ca!=null && cb!=null && ca!==cb) return ca-cb;
+            if(ca!=null && cb==null) return -1;
+            if(ca==null && cb!=null) return 1;
+            return sourceFirst(a.source)-sourceFirst(b.source);
+        });
+        return {date,events};
+    });
 }
 
 function legacyHistoryRecords() {
@@ -1580,6 +1758,15 @@ function legacyReadableHTML(mem=M()) {
           <div><b>安全断点：</b>${esc(state.status||'未建立')}｜下一条 ${Number(state.next_index??processed)+1}</div>
           <div class="smm2-note">这是安全重建正在使用的数据本体，可直接检查；不需要先执行 v4 数据重构。</div>
         </div>
+        ${(()=>{
+          const c=mem.timeline_calibration||{};
+          const ds=Array.isArray(c.diagnostics)?c.diagnostics:[];
+          return `<details class="smm2-memory-details smm53-audit" ${ds.length?'open':''}>
+            <summary>时间线校准检查｜重复合并 ${Number(c.duplicate_merged||0)}｜跨日修正 ${Number(c.cross_midnight_fixed||0)}｜异常 ${ds.length}</summary>
+            <div class="smm2-note">排序与重复合并会自动执行；只有“深夜→明确凌晨/次日”的高置信情况才自动换日。其余可疑倒退只提示，不擅自改剧情。</div>
+            ${ds.length?ds.slice(-30).map(d=>`<div class="smm53-warning"><b>${esc(d.reason||d.type)}</b><br>${esc(d.content||'')}${d.source?`<br><small>${esc(d.source)}</small>`:''}</div>`).join(''):'<div class="smm2-empty">当前没有检测到时间倒退异常。</div>'}
+          </details>`;
+        })()}
 
         <details open class="smm2-memory-details smm2-history-browser">
           <summary>历史记忆浏览器（当前已重建部分）</summary>
@@ -1788,9 +1975,9 @@ async function safeHistoryRun({fresh=false}={}) {
     if (fresh) {
         if (!confirm(`将从第1条原始聊天重新开始安全重建。\\n剧情起点锁定：${anchor}\\n\\n现有记忆会备份，然后重新从0开始。继续吗？`)) return;
         const old=JSON.parse(JSON.stringify(existing));
-        c.chatMetadata[META_KEY+'_backup_v051_'+Date.now()]=old;
+        c.chatMetadata[META_KEY+'_backup_v053_'+Date.now()]=old;
         c.chatMetadata[META_KEY]=safeRebuildFreshMemory(anchor,target);
-        M().rebuild_mode='safe_v051';
+        M().rebuild_mode='safe_v053';
         M().rebuild_state={status:'starting',next_index:0,last_error:null,updated_at:new Date().toISOString()};
         await saveMeta();
     } else {
@@ -1798,7 +1985,7 @@ async function safeHistoryRun({fresh=false}={}) {
         const next=Math.max(0,Number(mem.last_processed_index??-1)+1);
         if (next>=chat.length) return toast('安全重建已经完成全部原始聊天。','success');
         mem.story_start=anchor;
-        mem.rebuild_mode='safe_v051';
+        mem.rebuild_mode='safe_v053';
         mem.rebuild_state=mem.rebuild_state||{};
         mem.rebuild_state.status='resuming';
         mem.rebuild_state.next_index=next;
@@ -1826,11 +2013,12 @@ async function safeHistoryRun({fresh=false}={}) {
             M().story_start=anchor;
             if (beforeDate && after && after < beforeDate) {
                 M().quarantined.push({content:`批次 #${start+1}-#${end} 尝试将当前日期 ${beforeDate} 倒退为 ${after}`,
-                    reason:'v0.5.2 单向时间守卫：当前主线日期禁止倒退',source:`#${start+1}-#${end}`});
+                    reason:'v0.5.3 单向时间守卫：当前主线日期禁止倒退',source:`#${start+1}-#${end}`});
                 M().current_story_date=beforeDate;
             }
             if (M().current_story_date && M().current_story_date < anchor) M().current_story_date=anchor;
 
+            calibrateTimeline(M(), {allowCrossMidnight:true});
             start=Math.max(end,Number(M().last_processed_index??end-1)+1);
             M().rebuild_state={status:'checkpoint',next_index:start,last_success_range:[end-batch+1,end],last_error:null,updated_at:new Date().toISOString()};
             await saveMeta();
@@ -1848,7 +2036,7 @@ async function safeHistoryRun({fresh=false}={}) {
             try { await rebuildV4Data(); } catch(e) { console.warn('[StoryMemory] v4 normalize after safe rebuild',e); }
             M().rebuild_state={...(M().rebuild_state||{}),status:'complete',next_index:chat.length,updated_at:new Date().toISOString()};
             await saveMeta();
-            toast('v0.5.2 安全历史重建完成。请检查日期、时间线和待办。','success');
+            toast('v0.5.3 安全历史重建完成。已执行时间线排序、去重与跨日检查。','success');
         }
     } catch(e){
         console.error('[StoryMemory] safe rebuild failed',e);
@@ -1965,6 +2153,7 @@ function nativeManagerHTML() {
         <button id="smm2_native_history" class="menu_button">继续历史重建</button>
         <button id="smm2_native_stop" class="menu_button">暂停历史重建</button>
         <button id="smm51_native_resume" class="menu_button">继续安全重建（断点续跑）</button>
+        <button id="smm53_calibrate" class="menu_button">校准当前时间线（排序/去重/跨日检查）</button>
         <button id="smm2_native_rebuild" class="menu_button">重新安全重建（从第1条）</button>
         <button id="smm50_export_raw" class="menu_button">导出原始聊天 JSON</button>
         <button id="smm2_native_import" class="menu_button">导入记忆 JSON</button>
@@ -1986,7 +2175,7 @@ function nativeManagerHTML() {
       </details>
       <details class="smm2-tool-card" open>
         <summary>
-          <span class="smm2-tool-title">时间基准修复 v0.5.2</span>
+          <span class="smm2-tool-title">时间基准修复 v0.5.3</span>
           <span class="smm2-tool-subtitle">绝对日期用于计算，学期时间用于显示</span>
         </summary>
         <div class="smm2-tool-body">
@@ -2069,6 +2258,21 @@ function bindNativeManager() {
     q('smm2_native_stop').onclick = stopHistoryRebuild;
     q('smm2_native_rebuild').onclick = safeHistoryRebuild;
     q('smm51_native_resume').onclick = resumeSafeHistoryRebuild;
+    q('smm53_calibrate').onclick = async () => {
+        const r=calibrateTimeline(M(),{allowCrossMidnight:true});
+        M().audit=Array.isArray(M().audit)?M().audit:[];
+        M().audit.push({at:new Date().toISOString(),type:'timeline_calibration_v053',
+            duplicate_merged:r.duplicate_merged,cross_midnight_fixed:r.cross_midnight_fixed,
+            diagnostics_count:r.diagnostics.length});
+        await saveMeta();
+        refresh(); refreshNative();
+        const box=document.getElementById('smm2_native_memory_box');
+        if(box?.dataset.open==='1'){
+            box.innerHTML=memoryReadableHTML();
+            if(M().schema===SMM4_SCHEMA) bindHistoryBrowserV4(); else bindHistoryBrowserLegacy();
+        }
+        toast(`时间线校准完成：合并重复 ${r.duplicate_merged}，跨日修正 ${r.cross_midnight_fixed}，异常提示 ${r.diagnostics.length}。`,'success');
+    };
     const raw50=q('smm50_export_raw'); if(raw50) raw50.onclick=exportRawChat;
     q('smm2_native_import').onclick = importMemory;
     q('smm2_native_export').onclick = exportMemory;

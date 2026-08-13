@@ -504,3 +504,7 @@
   .smm2-event{grid-template-columns:1fr}
   .smm2-event small{grid-column:1}
 }
+
+.smm53-audit summary{font-weight:700}
+.smm53-warning{padding:9px 10px;margin:6px 0;border-left:3px solid var(--SmartThemeQuoteColor,currentColor);background:rgba(127,127,127,.08);line-height:1.55}
+.smm53-warning small{opacity:.68}
