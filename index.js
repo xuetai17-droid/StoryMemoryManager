@@ -370,6 +370,27 @@ function compact(mem) {
     };
 }
 
+const SMM_GENERATE_TIMEOUT_MS = 120000;
+
+function smmTimeoutError(label='模型请求') {
+    const e = new Error(`${label}超过120秒仍未返回`);
+    e.name = 'StoryMemoryTimeoutError';
+    e.isStoryMemoryTimeout = true;
+    return e;
+}
+
+function withSmmTimeout(promise, ms=SMM_GENERATE_TIMEOUT_MS, label='模型请求') {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(smmTimeoutError(label)), ms);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+function isSmmTimeout(e) {
+    return !!(e && (e.isStoryMemoryTimeout || e.name === 'StoryMemoryTimeoutError'));
+}
+
 async function summarizeRange(start, end) {
     const c = C();
     const mem = M();
@@ -393,15 +414,16 @@ ${messagesText(start, end)}
 特别检查日期连续性：没有新增原始聊天中的明确跨月证据，就必须继承已有可靠月份；禁止仅凭 AI <date> 或自行推算跨月。`;
     let raw;
     try {
-        raw = await c.generateRaw({ systemPrompt:SYSTEM_PROMPT, prompt, jsonSchema:schema() });
+        raw = await withSmmTimeout(c.generateRaw({ systemPrompt:SYSTEM_PROMPT, prompt, jsonSchema:schema() }), SMM_GENERATE_TIMEOUT_MS, `结构化总结 #${start+1}-#${end}`);
         let r = filterMetaSignals(parseJSON(raw));
         mergeResult(mem, r, end);
     } catch (e) {
+        if (isSmmTimeout(e)) throw e;
         // Fallback for models/backends without structured output.
-        raw = await c.generateRaw({
+        raw = await withSmmTimeout(c.generateRaw({
             systemPrompt:SYSTEM_PROMPT,
             prompt: prompt + '\n\n请严格返回合法 JSON，字段必须包含 story_start,current_story_date,current_story_time,current_scene,timeline,facts,events,characters,relationships,open_loops,locations,items,conflicts,quarantined。'
-        });
+        }), SMM_GENERATE_TIMEOUT_MS, `兼容总结 #${start+1}-#${end}`);
         let r = filterMetaSignals(parseJSON(raw));
         mergeResult(mem, r, end);
     }
@@ -1270,7 +1292,7 @@ function cleanLegacyTasksForThisChat(mem=M()) {
         mem.quarantined = Array.isArray(mem.quarantined) ? mem.quarantined : [];
         mem.quarantined.push(...archived.map(t => ({
             type:'legacy_task_archived',
-            reason:'v0.5.0 严格待办清洗：非用户确认的真实未来待办，移出待办区',
+            reason:'v0.5.1 严格待办清洗：非用户确认的真实未来待办，移出待办区',
             task:t
         })));
     }
@@ -1585,52 +1607,97 @@ function safeRebuildFreshMemory(anchor, currentDate) {
     return m;
 }
 
-async function safeHistoryRebuild() {
-    if (HISTORY_RUNNING || BUSY) return toast('当前有任务正在运行，请先暂停或等待完成。','warning');
+async function safeHistoryRun({fresh=false}={}) {
+    if (HISTORY_RUNNING || BUSY) return toast('当前有任务正在运行。若页面曾卡死，请刷新页面后再点“继续安全重建”。','warning');
     const c=C(), chat=c.chat||[];
     if (!chat.length) return toast('当前聊天为空。','warning');
-    const anchor=(M().story_start || S().storyStart || '2025-09-10').trim();
-    const target=M().current_story_date || detectCurrentDateFromRecentChat()?.date || null;
-    if (!confirm(`将从第1条原始聊天安全重建临时记忆。\n剧情起点锁定：${anchor}\n当前日期参考：${target||'未设置'}\n\n不会修改原聊天；旧记忆会完整备份。继续吗？`)) return;
 
-    const old=JSON.parse(JSON.stringify(M()));
-    c.chatMetadata[META_KEY+'_backup_v050_'+Date.now()]=old;
-    c.chatMetadata[META_KEY]=safeRebuildFreshMemory(anchor,target);
-    await saveMeta();
+    const existing=M();
+    const anchor=(existing.story_start || S().storyStart || '2025-09-10').trim();
+    const target=existing.current_story_date || detectCurrentDateFromRecentChat()?.date || null;
+
+    if (fresh) {
+        if (!confirm(`将从第1条原始聊天重新开始安全重建。\\n剧情起点锁定：${anchor}\\n\\n现有记忆会备份，然后重新从0开始。继续吗？`)) return;
+        const old=JSON.parse(JSON.stringify(existing));
+        c.chatMetadata[META_KEY+'_backup_v051_'+Date.now()]=old;
+        c.chatMetadata[META_KEY]=safeRebuildFreshMemory(anchor,target);
+        M().rebuild_mode='safe_v051';
+        M().rebuild_state={status:'starting',next_index:0,last_error:null,updated_at:new Date().toISOString()};
+        await saveMeta();
+    } else {
+        const mem=M();
+        const next=Math.max(0,Number(mem.last_processed_index??-1)+1);
+        if (next>=chat.length) return toast('安全重建已经完成全部原始聊天。','success');
+        mem.story_start=anchor;
+        mem.rebuild_mode='safe_v051';
+        mem.rebuild_state=mem.rebuild_state||{};
+        mem.rebuild_state.status='resuming';
+        mem.rebuild_state.next_index=next;
+        mem.rebuild_state.last_error=null;
+        mem.rebuild_state.updated_at=new Date().toISOString();
+        await saveMeta();
+    }
 
     HISTORY_RUNNING=true; HISTORY_STOP_REQUESTED=false; BUSY=true; refreshNative();
-    toast('v0.5.0 安全历史重建已启动。旧记忆已备份。','success');
+    let start=Math.max(0,Number(M().last_processed_index??-1)+1);
+    toast(`${fresh?'安全重建已从头启动':'安全重建已从断点继续'}：下一批第 ${start+1} 条。`,'success');
+
     try {
-        let start=0;
         while(start<chat.length && !HISTORY_STOP_REQUESTED){
             const batch=Math.max(4,Number(S().batchMessages)||20);
             const end=Math.min(chat.length,start+batch);
+            const mem=M();
+            mem.rebuild_state={status:'running',next_index:start,current_range:[start+1,end],last_error:null,updated_at:new Date().toISOString()};
+            await saveMeta();
+            refresh(); refreshNative();
+
             const beforeDate=M().current_story_date;
             await summarizeRange(start,end);
             const after=M().current_story_date;
-            // Hard anchor and monotonic-date guard.
             M().story_start=anchor;
             if (beforeDate && after && after < beforeDate) {
                 M().quarantined.push({content:`批次 #${start+1}-#${end} 尝试将当前日期 ${beforeDate} 倒退为 ${after}`,
-                    reason:'v0.5.0 单向时间守卫：当前主线日期禁止倒退',source:`#${start+1}-#${end}`});
+                    reason:'v0.5.1 单向时间守卫：当前主线日期禁止倒退',source:`#${start+1}-#${end}`});
                 M().current_story_date=beforeDate;
             }
-            // Never allow a current date before the locked story anchor.
             if (M().current_story_date && M().current_story_date < anchor) M().current_story_date=anchor;
+
+            start=Math.max(end,Number(M().last_processed_index??end-1)+1);
+            M().rebuild_state={status:'checkpoint',next_index:start,last_success_range:[end-batch+1,end],last_error:null,updated_at:new Date().toISOString()};
             await saveMeta();
-            start=end; refresh(); refreshNative();
-            await new Promise(r=>setTimeout(r,250));
+            refresh(); refreshNative();
+            await new Promise(r=>setTimeout(r,500));
         }
-        if (!HISTORY_STOP_REQUESTED) {
-            // Normalize into v4 view only after the full source scan.
+
+        if (HISTORY_STOP_REQUESTED) {
+            M().rebuild_state={...(M().rebuild_state||{}),status:'paused',next_index:start,updated_at:new Date().toISOString()};
+            await saveMeta();
+            toast(`安全重建已暂停。断点保存在第 ${start} 条之后。`,'info');
+        } else if (start>=chat.length) {
+            M().rebuild_state={...(M().rebuild_state||{}),status:'normalizing',next_index:start,updated_at:new Date().toISOString()};
+            await saveMeta();
             try { await rebuildV4Data(); } catch(e) { console.warn('[StoryMemory] v4 normalize after safe rebuild',e); }
-            toast('v0.5.0 安全历史重建完成。请先检查日期、时间线和待办，再继续聊天。','success');
+            M().rebuild_state={...(M().rebuild_state||{}),status:'complete',next_index:chat.length,updated_at:new Date().toISOString()};
+            await saveMeta();
+            toast('v0.5.1 安全历史重建完成。请检查日期、时间线和待办。','success');
         }
     } catch(e){
         console.error('[StoryMemory] safe rebuild failed',e);
-        toast(`安全历史重建失败：${e.message||e}`,'error');
-    } finally { HISTORY_RUNNING=false; BUSY=false; refreshNative(); refresh(); }
+        const at=Math.max(0,Number(M().last_processed_index??-1)+1);
+        M().rebuild_state={status:'error',next_index:at,last_error:String(e?.message||e),updated_at:new Date().toISOString()};
+        await saveMeta();
+        if (isSmmTimeout(e)) {
+            toast(`第 ${at+1} 条附近的模型请求超时，已安全暂停。已完成数据不会丢失；请稍后点“继续安全重建”。`,'warning');
+        } else {
+            toast(`安全历史重建已在断点处暂停：${e.message||e}`,'error');
+        }
+    } finally {
+        HISTORY_RUNNING=false; BUSY=false; refreshNative(); refresh();
+    }
 }
+
+async function safeHistoryRebuild() { return safeHistoryRun({fresh:true}); }
+async function resumeSafeHistoryRebuild() { return safeHistoryRun({fresh:false}); }
 
 async function continueHistoryRebuild() {
     if (HISTORY_RUNNING) {
@@ -1728,7 +1795,8 @@ function nativeManagerHTML() {
         <button id="smm2_native_new" class="menu_button">总结新增</button>
         <button id="smm2_native_history" class="menu_button">继续历史重建</button>
         <button id="smm2_native_stop" class="menu_button">暂停历史重建</button>
-        <button id="smm2_native_rebuild" class="menu_button">安全重建 1～全部原始聊天</button>
+        <button id="smm51_native_resume" class="menu_button">继续安全重建（断点续跑）</button>
+        <button id="smm2_native_rebuild" class="menu_button">重新安全重建（从第1条）</button>
         <button id="smm50_export_raw" class="menu_button">导出原始聊天 JSON</button>
         <button id="smm2_native_import" class="menu_button">导入记忆 JSON</button>
         <button id="smm2_native_export" class="menu_button">导出记忆 JSON</button>
@@ -1749,7 +1817,7 @@ function nativeManagerHTML() {
       </details>
       <details class="smm2-tool-card" open>
         <summary>
-          <span class="smm2-tool-title">时间基准修复 v0.5.0</span>
+          <span class="smm2-tool-title">时间基准修复 v0.5.1</span>
           <span class="smm2-tool-subtitle">绝对日期用于计算，学期时间用于显示</span>
         </summary>
         <div class="smm2-tool-body">
@@ -1828,9 +1896,10 @@ function bindNativeManager() {
     if (!q('smm2_native_new')) return;
 
     q('smm2_native_new').onclick = () => summarizeNew(true);
-    q('smm2_native_history').onclick = () => toast('v0.5.0 已停用旧版“继续历史重建”。请使用“安全重建 1～全部原始聊天”。','warning');
+    q('smm2_native_history').onclick = () => toast('这是旧版入口。请使用“继续安全重建（断点续跑）”。','warning');
     q('smm2_native_stop').onclick = stopHistoryRebuild;
     q('smm2_native_rebuild').onclick = safeHistoryRebuild;
+    q('smm51_native_resume').onclick = resumeSafeHistoryRebuild;
     const raw50=q('smm50_export_raw'); if(raw50) raw50.onclick=exportRawChat;
     q('smm2_native_import').onclick = importMemory;
     q('smm2_native_export').onclick = exportMemory;
@@ -1909,7 +1978,8 @@ function refreshNative() {
         `剧情时间：<b>${esc(st.time)}</b><br>` +
         `已处理：${st.done}/${st.total}　待总结：${st.pending}<br>` +
         `事件：${st.events}　未完成：${st.loops}　冲突/隔离：${st.conflicts}<br>` +
-        `历史重建：<b>${HISTORY_RUNNING ? '运行中' : '已暂停/未运行'}</b>`;
+        `历史重建：<b>${HISTORY_RUNNING ? '运行中' : '已暂停/未运行'}</b>` +
+            (M().rebuild_state ? `<br>安全断点：${esc(M().rebuild_state.status||'')}｜下一条 ${Number(M().rebuild_state.next_index||0)+1}${M().rebuild_state.last_error?`<br>上次错误：${esc(M().rebuild_state.last_error)}`:''}` : '');
 
     const setChecked = (id, val) => {
         const el = document.getElementById(id);
