@@ -301,7 +301,7 @@ function addDaysISO(date, days=1) {
 function previousDayISO(date) { return addDaysISO(date,-1); }
 
 /*
- * v0.5.9 夜间归属修正：
+ * v0.6.0 夜间归属修正：
  * 旧摘要常把“前一日晚间 -> 次日凌晨”整段贴到次日。
  * 当同一日期桶同时出现“凌晨/半夜”和“21:00以后晚间”时，
  * 且该日期前一天已经存在于时间线，允许把晚间段回拨到前一天。
@@ -348,7 +348,10 @@ function repairNightOwnership(rows) {
 
 
 function explicitDateFromEvent(e) {
-    const blob=`${e?.date||''} ${e?.time||''} ${e?.event||''}`;
+    // IMPORTANT: e.date is the OLD memory bucket produced by earlier rebuilds.
+    // It is not evidence from the original chat and must never be treated as
+    // an explicit date. Only time/event text may anchor an absolute date.
+    const blob=`${e?.time||''} ${e?.event||''}`;
     const m=blob.match(/(20\d{2})[年\-\/.](\d{1,2})[月\-\/.](\d{1,2})日?/);
     if(!m) return null;
     const iso=`${m[1]}-${String(Number(m[2])).padStart(2,'0')}-${String(Number(m[3])).padStart(2,'0')}`;
@@ -485,7 +488,7 @@ function rebuildDatesBySourceAxis(mem=M()) {
 
     mem.timeline=rows.map(({__i,__src,__clock,__oldDate,__explicitDate,...e})=>e);
     mem.source_axis={
-        version:'0.5.9',
+        version:'0.6.0',
         at:new Date().toISOString(),
         changed,
         midnight_rollovers:midnightRollovers,
@@ -538,7 +541,7 @@ function calibrateTimeline(mem=M(), {allowCrossMidnight=true}={}) {
     });
 
     mem.timeline_calibration={
-        version:'0.5.9',
+        version:'0.6.0',
         at:new Date().toISOString(),
         duplicate_merged:duplicateMerged,
         date_reassigned:Number(axis.changed||0),
@@ -1635,7 +1638,7 @@ function cleanLegacyTasksForThisChat(mem=M()) {
         mem.quarantined = Array.isArray(mem.quarantined) ? mem.quarantined : [];
         mem.quarantined.push(...archived.map(t => ({
             type:'legacy_task_archived',
-            reason:'v0.5.9 严格待办清洗：非用户确认的真实未来待办，移出待办区',
+            reason:'v0.6.0 严格待办清洗：非用户确认的真实未来待办，移出待办区',
             task:t
         })));
     }
@@ -1941,7 +1944,7 @@ function legacyReadableHTML(mem=M()) {
           const ds=Array.isArray(c.diagnostics)?c.diagnostics:[];
           return `<details class="smm2-memory-details smm53-audit" ${ds.length?'open':''}>
             <summary>日期轴检查｜重复合并 ${Number(c.duplicate_merged||0)}｜跨午夜 ${Number(c.confirmed_rollovers||0)}｜日期变更 ${Number(c.date_reassigned||0)}｜异常 ${ds.length}</summary>
-            <div class="smm2-note">按原始聊天 source 顺序运行跨午夜状态机：晚间/深夜 → 凌晨/半夜只跨日一次；凌晨后的白天和晚间仍属于同一天。时间文本只辅助判断，不会打乱 source 顺序。</div>
+            <div class="smm2-note">按原始聊天 source 顺序运行跨午夜状态机：旧记忆 date 字段不再被当成“明确日期”。只有原始事件/时间文本中的绝对日期才可锁定日期；晚间/深夜 → 凌晨/半夜跨日一次。</div>
             ${ds.length?ds.slice(-30).map(d=>`<div class="smm53-warning"><b>${esc(d.reason||d.type)}</b><br>${esc(d.content||'')}${d.source?`<br><small>${esc(d.source)}</small>`:''}</div>`).join(''):'<div class="smm2-empty">当前没有检测到时间倒退异常。</div>'}
           </details>`;
         })()}
@@ -2153,9 +2156,9 @@ async function safeHistoryRun({fresh=false}={}) {
     if (fresh) {
         if (!confirm(`将从第1条原始聊天重新开始安全重建。\\n剧情起点锁定：${anchor}\\n\\n现有记忆会备份，然后重新从0开始。继续吗？`)) return;
         const old=JSON.parse(JSON.stringify(existing));
-        c.chatMetadata[META_KEY+'_backup_v059_'+Date.now()]=old;
+        c.chatMetadata[META_KEY+'_backup_v060_'+Date.now()]=old;
         c.chatMetadata[META_KEY]=safeRebuildFreshMemory(anchor,target);
-        M().rebuild_mode='safe_v059';
+        M().rebuild_mode='safe_v060';
         M().rebuild_state={status:'starting',next_index:0,last_error:null,updated_at:new Date().toISOString()};
         await saveMeta();
     } else {
@@ -2163,7 +2166,7 @@ async function safeHistoryRun({fresh=false}={}) {
         const next=Math.max(0,Number(mem.last_processed_index??-1)+1);
         if (next>=chat.length) return toast('安全重建已经完成全部原始聊天。','success');
         mem.story_start=anchor;
-        mem.rebuild_mode='safe_v059';
+        mem.rebuild_mode='safe_v060';
         mem.rebuild_state=mem.rebuild_state||{};
         mem.rebuild_state.status='resuming';
         mem.rebuild_state.next_index=next;
@@ -2191,7 +2194,7 @@ async function safeHistoryRun({fresh=false}={}) {
             M().story_start=anchor;
             if (beforeDate && after && after < beforeDate) {
                 M().quarantined.push({content:`批次 #${start+1}-#${end} 尝试将当前日期 ${beforeDate} 倒退为 ${after}`,
-                    reason:'v0.5.9 单向时间守卫：当前主线日期禁止倒退',source:`#${start+1}-#${end}`});
+                    reason:'v0.6.0 单向时间守卫：当前主线日期禁止倒退',source:`#${start+1}-#${end}`});
                 M().current_story_date=beforeDate;
             }
             if (M().current_story_date && M().current_story_date < anchor) M().current_story_date=anchor;
@@ -2214,7 +2217,7 @@ async function safeHistoryRun({fresh=false}={}) {
             try { await rebuildV4Data(); } catch(e) { console.warn('[StoryMemory] v4 normalize after safe rebuild',e); }
             M().rebuild_state={...(M().rebuild_state||{}),status:'complete',next_index:chat.length,updated_at:new Date().toISOString()};
             await saveMeta();
-            toast('v0.5.9 安全历史重建完成。已执行时间线排序、去重与跨日检查。','success');
+            toast('v0.6.0 安全历史重建完成。已执行时间线排序、去重与跨日检查。','success');
         }
     } catch(e){
         console.error('[StoryMemory] safe rebuild failed',e);
@@ -2353,7 +2356,7 @@ function nativeManagerHTML() {
       </details>
       <details class="smm2-tool-card" open>
         <summary>
-          <span class="smm2-tool-title">时间基准修复 v0.5.9</span>
+          <span class="smm2-tool-title">时间基准修复 v0.6.0</span>
           <span class="smm2-tool-subtitle">绝对日期用于计算，学期时间用于显示</span>
         </summary>
         <div class="smm2-tool-body">
