@@ -522,3 +522,256 @@
 .smm-time-explicit{font-weight:600;}
 .smm-time-inferred{font-style:italic; opacity:.62;}
 .smm-time-none,.smm-time-uncertain{opacity:.55;}
+
+/* 时间来源可信度 */
+.smm-time-badge{
+  display:inline-block;
+  margin-left:6px;
+  padding:1px 6px;
+  border:1px solid currentColor;
+  border-radius:999px;
+  font-size:11px;
+  font-weight:400;
+  line-height:1.5;
+  opacity:.78;
+  vertical-align:middle;
+}
+
+.smm-time-explicit{
+  font-weight:600;
+  opacity:.95;
+}
+
+.smm-time-fuzzy{
+  opacity:.8;
+}
+
+.smm-time-inferred{
+  font-style:italic;
+  opacity:.58;
+}
+
+.smm-time-unverified,
+.smm-time-none{
+  opacity:.5;
+}
+
+
+/* v0.10.0 mobile polish */
+#smm2_native_stats{
+  line-height:1.55;
+  padding:12px 14px;
+  border-radius:12px;
+  margin-bottom:10px;
+}
+
+.smm100-auto-card{
+  margin-top:12px;
+  padding:12px;
+  border:1px solid rgba(255,255,255,.12);
+  border-radius:12px;
+  background:rgba(255,255,255,.035);
+}
+
+.smm100-auto-title{
+  font-weight:700;
+  margin-bottom:8px;
+}
+
+.smm100-switch-row,
+.smm100-keep-row{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  margin:9px 0;
+}
+
+.smm100-keep-row input{
+  width:72px;
+  min-width:72px;
+}
+
+.smm2-main-actions{
+  grid-template-columns:1fr 1fr;
+  gap:8px;
+}
+
+.smm2-primary-tool{
+  font-weight:700;
+}
+
+@media (max-width:700px){
+  .smm2-main-actions{
+    grid-template-columns:1fr;
+  }
+
+  #smm2_native_stats{
+    font-size:13px;
+  }
+
+  .smm100-auto-card{
+    padding:10px;
+  }
+
+  .smm100-switch-row,
+  .smm100-keep-row{
+    font-size:13px;
+  }
+}
+
+
+/* v0.10.1 auto-hide UI */
+#smm100_unhide_all{
+  width:100%;
+  min-width:0;
+  display:block;
+  margin-top:10px;
+  white-space:normal;
+  line-height:1.35;
+}
+
+.smm100-auto-card .menu_button{
+  max-width:none;
+}
+
+.smm100-auto-card input[type="checkbox"]{
+  flex:0 0 auto;
+}
+
+.smm100-keep-row{
+  flex-wrap:wrap;
+}
+
+.smm100-keep-row input[type="number"]{
+  flex:0 0 76px;
+  width:76px;
+  min-width:76px;
+  text-align:center;
+}
+
+@media (max-width:700px){
+  .smm100-auto-card{
+    width:100%;
+    box-sizing:border-box;
+  }
+
+  .smm100-switch-row{
+    display:grid;
+    grid-template-columns:22px minmax(0,1fr);
+    width:100%;
+  }
+
+  .smm100-keep-row{
+    display:grid;
+    grid-template-columns:minmax(0,1fr) 76px auto;
+    align-items:center;
+    width:100%;
+  }
+
+  #smm100_unhide_all{
+    width:100% !important;
+    writing-mode:horizontal-tb !important;
+    word-break:normal;
+    overflow-wrap:anywhere;
+  }
+}
+
+
+/* v0.10.5 FINAL: compact, stable mobile status layout */
+.smm105-stat-line{
+  display:block;
+  margin:2px 0;
+  line-height:1.55;
+  overflow-wrap:anywhere;
+}
+
+@media (max-width:700px){
+  #smm2_native_stats,
+  #smm2_panel .smm2-stats{
+    font-size:13px;
+    line-height:1.5;
+  }
+
+  .smm105-stat-line{
+    margin:3px 0;
+  }
+}
+
+/* v0.10.6 public UI: version badge + mobile tool button geometry */
+.smm105-title-wrap{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  min-width:0;
+  flex-wrap:wrap;
+}
+
+.smm105-version-badge{
+  display:inline-flex;
+  align-items:center;
+  width:auto;
+  max-width:100%;
+  padding:2px 7px;
+  border:1px solid rgba(127,127,127,.28);
+  border-radius:999px;
+  font-size:.72em;
+  font-weight:600;
+  line-height:1.25;
+  opacity:.72;
+  white-space:nowrap;
+  writing-mode:horizontal-tb !important;
+}
+
+/* Legacy inject inputs are compatibility state only; never render a stray checkbox. */
+#smm2_inject,
+#smm2_native_inject{
+  display:none !important;
+  visibility:hidden !important;
+  width:0 !important;
+  height:0 !important;
+  margin:0 !important;
+  padding:0 !important;
+  border:0 !important;
+}
+
+/* SillyTavern's generic .menu_button can shrink to text width on mobile.
+   Tool cards must use full-width horizontal controls. */
+#smm2_native_entry .smm2-tool-body > .menu_button{
+  display:block !important;
+  width:100% !important;
+  max-width:none !important;
+  min-width:0 !important;
+  min-height:42px;
+  box-sizing:border-box;
+  margin:8px 0 0 !important;
+  padding:9px 12px !important;
+  line-height:1.35 !important;
+  white-space:normal !important;
+  word-break:normal !important;
+  overflow-wrap:anywhere !important;
+  writing-mode:horizontal-tb !important;
+  text-orientation:mixed !important;
+}
+
+#smm2_native_entry .smm2-tool-body > label,
+#smm2_native_entry .smm2-tool-body > select,
+#smm2_native_entry .smm2-tool-body label > select{
+  max-width:100%;
+  box-sizing:border-box;
+}
+
+#smm2_native_entry .smm2-tool-body label > select{
+  width:100%;
+}
+
+@media (max-width:700px){
+  .smm105-version-badge{
+    font-size:11px;
+    padding:2px 6px;
+  }
+
+  #smm2_native_entry .smm2-tool-body > .menu_button{
+    font-size:15px !important;
+  }
+}
+
