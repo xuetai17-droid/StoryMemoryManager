@@ -3445,7 +3445,7 @@ function stat() {
 function panelHTML() {
     return `<div id="${PANEL_ID}" class="smm2-hidden">
       <div class="smm2-card">
-        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.10.6</span></div><button id="smm2_close">×</button></div>
+        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.10.7</span></div><button id="smm2_close">×</button></div>
         <div id="smm2_stats" class="smm2-stats"></div>
         <div class="smm2-grid">
           <button id="smm2_new">总结新增</button>
@@ -4820,45 +4820,62 @@ function nativeManagerHTML() {
         </div>
       </details>
 
-      <div class="smm2-native-settings">
-        <label><input id="smm2_native_enabled" type="checkbox"> 启用插件</label>
-        <input id="smm2_native_inject" type="checkbox" hidden aria-hidden="true">
-        <label><input id="smm2_native_auto" type="checkbox"> 自动增量总结</label>
+      <div class="smm2-native-settings smm107-settings-stack">
+        <section class="smm107-settings-card smm107-core-card">
+          <div class="smm107-card-head">
+            <div>
+              <div class="smm107-card-title">自动管理</div>
+              <div class="smm107-card-subtitle">日常使用只需要这里</div>
+            </div>
+          </div>
 
-        <div class="smm100-auto-card">
-          <div class="smm100-auto-title">自动管理</div>
+          <label class="smm107-switch-row">
+            <input id="smm2_native_enabled" type="checkbox">
+            <span><b>启用插件</b><small>SMM 总开关</small></span>
+          </label>
 
-          <label class="smm100-switch-row">
+          <input id="smm2_native_inject" type="checkbox" hidden aria-hidden="true">
+
+          <label class="smm107-switch-row">
+            <input id="smm2_native_auto" type="checkbox">
+            <span><b>自动增量总结</b><small>达到阈值后自动处理新增剧情</small></span>
+          </label>
+
+          <label class="smm107-switch-row">
             <input id="smm100_safe_inject" type="checkbox">
-            <span>生成时注入剧情记忆</span>
+            <span><b>生成时注入剧情记忆</b><small>把可靠长期记忆提供给主聊天模型</small></span>
           </label>
 
-          <label class="smm100-switch-row">
+          <label class="smm107-switch-row">
             <input id="smm100_auto_hide" type="checkbox">
-            <span>总结后自动隐藏旧楼层</span>
+            <span><b>总结后自动隐藏旧楼层</b><small>仅在安全记忆注入开启时生效</small></span>
           </label>
 
-          <label class="smm100-keep-row">
-            <span>保留最近原文</span>
-            <input id="smm100_keep_recent" type="number" min="10" max="200" step="5">
-            <span>楼</span>
-          </label>
+          <div class="smm107-inline-setting">
+            <label for="smm100_keep_recent">保留最近原文</label>
+            <div class="smm107-number-unit">
+              <input id="smm100_keep_recent" type="number" min="10" max="200" step="5">
+              <span>楼</span>
+            </div>
+          </div>
 
-          <div id="smm100_hide_status" class="smm2-note">
+          <div id="smm100_hide_status" class="smm2-note smm107-status-note">
             自动隐藏默认关闭。建议先启用安全记忆注入并验证后再开启。
           </div>
 
-          <button id="smm100_unhide_all" class="menu_button">恢复全部隐藏楼层</button>
-        </div>
+          <details class="smm107-inline-details">
+            <summary>隐藏楼层管理</summary>
+            <button id="smm100_unhide_all" class="menu_button">恢复全部隐藏楼层</button>
+          </details>
+        </section>
 
-        <details class="smm2-tool-card">
+        <details class="smm2-tool-card smm107-settings-card">
           <summary>
             <span class="smm2-tool-title">总结模型</span>
-            <span class="smm2-tool-subtitle">可与主聊天模型分离</span>
+            <span class="smm2-tool-subtitle">独立 Profile、失败策略与 Token</span>
           </summary>
 
           <div class="smm2-tool-body">
-
             <label>
               总结通道
               <select id="smm93_summary_provider">
@@ -4894,31 +4911,35 @@ function nativeManagerHTML() {
             </label>
 
             <div id="smm93_summary_status" class="smm2-note"></div>
-
           </div>
         </details>
 
-        <label>
-          每
-          <input id="smm2_native_trigger" type="number" min="1" max="50">
-          条新消息总结一次
-        </label>
+        <details class="smm2-tool-card smm107-settings-card">
+          <summary>
+            <span class="smm2-tool-title">总结节奏与剧情起点</span>
+            <span class="smm2-tool-subtitle">一般无需频繁调整</span>
+          </summary>
+          <div class="smm2-tool-body smm107-advanced-grid">
+            <label>
+              每多少条新消息总结一次
+              <input id="smm2_native_trigger" type="number" min="1" max="50">
+            </label>
 
-        <label>
-          每批最多
-          <input id="smm2_native_batch" type="number" min="4" max="60">
-          条消息
-        </label>
+            <label>
+              每批最多消息数
+              <input id="smm2_native_batch" type="number" min="4" max="60">
+            </label>
 
-        <label>
-          剧情起点（建立记忆后自动锁定）
-          <input id="smm2_native_start" type="text" placeholder="如 2026-01-01">
-        </label>
+            <label class="smm107-span-all">
+              剧情起点（建立记忆后自动锁定）
+              <input id="smm2_native_start" type="text" placeholder="如 2026-01-01">
+            </label>
 
-        <div class="smm2-note">
-          记忆按“聊天”隔离。同一角色开新聊天，也会得到另一套记忆。
-          酒馆楼层发送时间不作为剧情时间。
-        </div>
+            <div class="smm2-note smm107-span-all">
+              记忆按“聊天”隔离。同一角色开新聊天，也会得到另一套记忆。酒馆楼层发送时间不作为剧情时间。
+            </div>
+          </div>
+        </details>
       </div>
     `;
 }
@@ -5418,7 +5439,7 @@ function installNativeExtensionEntry() {
 
         wrap.innerHTML = `
           <div class="inline-drawer-toggle inline-drawer-header">
-            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.10.6</span></div>
+            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.10.7</span></div>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
           </div>
           <div class="inline-drawer-content">
@@ -5436,7 +5457,71 @@ function installNativeExtensionEntry() {
     refreshNative();
 }
 
+// v0.10.7: non-invasive broken-image fallback for images inside chat message text.
+// This does not proxy, refetch, rewrite or persist message HTML. It only hides a failed
+// <img> element in the live DOM and shows a compact placeholder so broken remote URLs
+// do not leave the browser's broken-image icon in RP cards.
+let SMM107_IMAGE_FALLBACK_INSTALLED = false;
+
+function smm107BrokenImageLabel(img) {
+    const alt = String(img?.getAttribute?.('alt') || '').trim();
+    if (alt && alt.length <= 80) return alt;
+    return '图片暂时无法加载';
+}
+
+function smm107MarkBrokenImage(img) {
+    if (!(img instanceof HTMLImageElement)) return;
+    if (!img.closest('.mes_text')) return;
+    if (img.dataset.smm107BrokenImage === '1') return;
+
+    img.dataset.smm107BrokenImage = '1';
+    img.classList.add('smm107-broken-image-source');
+
+    const placeholder = document.createElement('span');
+    placeholder.className = 'smm107-broken-image-fallback';
+    placeholder.dataset.smm107For = 'broken-image';
+    placeholder.textContent = '🖼 ' + smm107BrokenImageLabel(img);
+    img.insertAdjacentElement('afterend', placeholder);
+}
+
+function smm107RestoreImage(img) {
+    if (!(img instanceof HTMLImageElement)) return;
+    if (img.dataset.smm107BrokenImage !== '1') return;
+
+    img.dataset.smm107BrokenImage = '0';
+    img.classList.remove('smm107-broken-image-source');
+
+    const next = img.nextElementSibling;
+    if (next?.classList?.contains('smm107-broken-image-fallback')) next.remove();
+}
+
+function installBrokenImageFallbackV0107() {
+    if (SMM107_IMAGE_FALLBACK_INSTALLED) return;
+    SMM107_IMAGE_FALLBACK_INSTALLED = true;
+
+    document.addEventListener('error', event => {
+        const target = event.target;
+        if (target instanceof HTMLImageElement) smm107MarkBrokenImage(target);
+    }, true);
+
+    document.addEventListener('load', event => {
+        const target = event.target;
+        if (target instanceof HTMLImageElement) smm107RestoreImage(target);
+    }, true);
+
+    const scan = () => {
+        document.querySelectorAll('.mes_text img').forEach(img => {
+            if (img.complete && img.naturalWidth === 0) smm107MarkBrokenImage(img);
+        });
+    };
+
+    scan();
+    setTimeout(scan, 800);
+}
+
 function installUI() {
+    installBrokenImageFallbackV0107();
+
     // Keep floating button for desktop, but the native Extensions entry is the primary mobile path.
     if (!document.getElementById(BUTTON_ID)) {
         const b=document.createElement('button');

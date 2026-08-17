@@ -1,50 +1,80 @@
-# v0.10.6 Release Audit
+# Story Memory Manager v0.10.7 Release Audit
 
-本文件记录发布前静态审计范围。
+Audit target: GitHub upload package for SillyTavern.
 
-## 已通过
+## Scope
 
-- `index.js`：`node --check` 通过。
-- `manifest.json`：JSON 可解析，版本为 `0.10.6`。
-- 新安装默认 `enabled=false`、`autoSummarize=false`，不会安装后自动处理聊天。
-- 未发现 API Key、Bearer Token、本机绝对路径或聊天文件路径硬编码。
-- 未发现开发用特定剧情人物、地点或事件名称硬编码。
-- `current_story_date` 与 `semantic_anchors` 仍为结构化输出 required 字段。
-- 安全记忆注入仍包含 semantic anchor 优先规则。
-- 增加历史事实防补写规则。
-- `open_loops` 终止项会从活动池移除。
-- `pending` / `at_risk` 过期项会清理；跨日仍残留的 `in_progress` 会清理；同日 `in_progress` 不会仅因开始时间已过而误删。
-- 旧 `closed_loops` 会迁移为最多 80 条的轻量 `loop_tombstones`。
-- tombstone 不保存完整事项描述，且不进入 `compact()` / safe memory injection。
-- 记忆 UI 不再展示待办、隔离、冲突、当前场景原始 JSON。
-- 记忆 UI 保留时间线、人物、人物关系和关键连续性锚点，便于人工核对。
-- 公开版安全重建不再使用任何特定剧情日期作为默认起点。
-- 自动隐藏与聊天正文逻辑未改；升级不会主动重写聊天 JSONL。
+v0.10.7 is intentionally limited to:
 
-## 自动测试
+- mobile-first settings UI polish;
+- compact grouping of common automatic-management controls;
+- folding low-frequency summary-model / cadence settings;
+- non-invasive broken-image fallback for images inside chat message text;
+- version and documentation updates.
 
-已对实际 v0.10.6 源码中的生命周期函数执行测试：
+No memory-core redesign is included in this release.
 
-- 中文 `上午10点` / `下午3点30分` / `凌晨12点` 时间解析。
-- 过期 pending / at_risk 清理。
-- 同日 in_progress 保留。
-- 跨日 in_progress 清理。
-- terminal 状态直接移出活动事项。
-- tombstone 防止同一旧事项复活。
-- 相同稳定 ID、不同 due 的新安排仍可进入。
-- v0.10.5 `closed_loops` 迁移为 tombstone。
-- `waiting_condition -> pending` 兼容迁移。
+## Static validation completed
 
-全部通过。
+- `node --check index.js`: PASS.
+- `manifest.json` JSON parse: PASS.
+- manifest version: `0.10.7`.
+- required native UI element IDs are present exactly once.
+- public-package privacy scan for known private story names / locations / story-start date: PASS.
+- package contains no chat JSONL, exported memory, API credentials, Connection Profile data, or `.bak` files.
 
-## 仍需真实 UI / 生成链验证
+## Core invariance check
 
-静态与函数级测试不能替代 SillyTavern 实际运行。正式打 GitHub Release tag 前建议在真实聊天中再确认一次：
+SHA-256 comparison of the following `index.js` sections against the audited v0.10.6 GitHub baseline shows them unchanged:
 
-1. 扩展面板显示 v0.10.6。
-2. “查看 / 收起记忆”只显示面向人工核对的内容。
-3. 自动增量总结正常触发。
-4. 总结后活动事项按新规则清理。
-5. 安全记忆注入与自动隐藏正常。
-6. 重启 SillyTavern 后 metadata 与隐藏状态保持正常。
+- automatic hiding;
+- JSON schema;
+- open-loop normalization;
+- open-loop merge / lifecycle;
+- memory merge;
+- summary execution (`summarizeRange`);
+- safe memory injection.
 
+Therefore v0.10.7 does not intentionally alter summary semantics, date continuity, semantic anchors, open-loop lifecycle, safe injection, or hiding behavior.
+
+## UI checks
+
+The following runtime element IDs remain unique and unchanged, preserving existing event bindings:
+
+- `smm2_native_enabled`
+- `smm2_native_auto`
+- `smm100_safe_inject`
+- `smm100_auto_hide`
+- `smm100_keep_recent`
+- `smm100_unhide_all`
+- `smm93_summary_provider`
+- `smm93_summary_profile`
+- `smm93_summary_fallback`
+- `smm93_summary_tokens`
+- `smm2_native_trigger`
+- `smm2_native_batch`
+- `smm2_native_start`
+
+## Broken-image fallback safety
+
+The v0.10.7 fallback is scoped to `<img>` elements inside `.mes_text` only.
+
+When an image fails to load it:
+
+1. hides the browser's broken-image glyph in the current DOM;
+2. inserts a small textual placeholder after the failed image;
+3. removes the placeholder again if the same image later loads successfully.
+
+It does **not**:
+
+- modify the message JSON / JSONL;
+- modify or replace the original `src` URL;
+- fetch through a proxy;
+- download or cache the remote resource;
+- touch avatars or images outside message text.
+
+Accordingly, v0.10.7 improves presentation of failed resources but cannot restore an image whose remote URL is actually dead, blocked, expired, or protected against hotlinking.
+
+## Release caveat
+
+Static and source-level checks passed. The final UI appearance and SillyTavern DOM integration should still be smoke-tested once after updating from GitHub, because browser/theme CSS and third-party message-card HTML can vary between installations.

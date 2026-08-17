@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.10.7
+
+UI-only polish and safe broken-image fallback.
+
+- 移动端自动管理区改为紧凑卡片，常用开关集中展示。
+- 总结模型、总结节奏与剧情起点改为折叠式低频设置。
+- 继续保留记忆查看入口，不改变长期记忆结构或总结算法。
+- 聊天正文中的图片加载失败时隐藏裂图图标并显示轻量占位提示。
+- 图片容错只操作当前 DOM，不修改消息正文、聊天 JSONL 或远程图片 URL。
+- 未修改日期连续性、semantic anchors、open loop 生命周期、安全记忆注入或自动隐藏核心逻辑。
+
 ## v0.10.6
 
 Public-release cleanup and continuity hardening.
