@@ -5457,71 +5457,7 @@ function installNativeExtensionEntry() {
     refreshNative();
 }
 
-// v0.10.7: non-invasive broken-image fallback for images inside chat message text.
-// This does not proxy, refetch, rewrite or persist message HTML. It only hides a failed
-// <img> element in the live DOM and shows a compact placeholder so broken remote URLs
-// do not leave the browser's broken-image icon in RP cards.
-let SMM107_IMAGE_FALLBACK_INSTALLED = false;
-
-function smm107BrokenImageLabel(img) {
-    const alt = String(img?.getAttribute?.('alt') || '').trim();
-    if (alt && alt.length <= 80) return alt;
-    return '图片暂时无法加载';
-}
-
-function smm107MarkBrokenImage(img) {
-    if (!(img instanceof HTMLImageElement)) return;
-    if (!img.closest('.mes_text')) return;
-    if (img.dataset.smm107BrokenImage === '1') return;
-
-    img.dataset.smm107BrokenImage = '1';
-    img.classList.add('smm107-broken-image-source');
-
-    const placeholder = document.createElement('span');
-    placeholder.className = 'smm107-broken-image-fallback';
-    placeholder.dataset.smm107For = 'broken-image';
-    placeholder.textContent = '🖼 ' + smm107BrokenImageLabel(img);
-    img.insertAdjacentElement('afterend', placeholder);
-}
-
-function smm107RestoreImage(img) {
-    if (!(img instanceof HTMLImageElement)) return;
-    if (img.dataset.smm107BrokenImage !== '1') return;
-
-    img.dataset.smm107BrokenImage = '0';
-    img.classList.remove('smm107-broken-image-source');
-
-    const next = img.nextElementSibling;
-    if (next?.classList?.contains('smm107-broken-image-fallback')) next.remove();
-}
-
-function installBrokenImageFallbackV0107() {
-    if (SMM107_IMAGE_FALLBACK_INSTALLED) return;
-    SMM107_IMAGE_FALLBACK_INSTALLED = true;
-
-    document.addEventListener('error', event => {
-        const target = event.target;
-        if (target instanceof HTMLImageElement) smm107MarkBrokenImage(target);
-    }, true);
-
-    document.addEventListener('load', event => {
-        const target = event.target;
-        if (target instanceof HTMLImageElement) smm107RestoreImage(target);
-    }, true);
-
-    const scan = () => {
-        document.querySelectorAll('.mes_text img').forEach(img => {
-            if (img.complete && img.naturalWidth === 0) smm107MarkBrokenImage(img);
-        });
-    };
-
-    scan();
-    setTimeout(scan, 800);
-}
-
 function installUI() {
-    installBrokenImageFallbackV0107();
-
     // Keep floating button for desktop, but the native Extensions entry is the primary mobile path.
     if (!document.getElementById(BUTTON_ID)) {
         const b=document.createElement('button');
@@ -5730,7 +5666,7 @@ function initializeExtension() {
     try {
         installUI();
         refresh();
-        console.log('[StoryMemory] v0.10.6 loaded successfully');
+        console.log('[StoryMemory] v0.10.8 loaded successfully');
     } catch (e) {
         console.error('[StoryMemory] UI initialization failed', e);
     }

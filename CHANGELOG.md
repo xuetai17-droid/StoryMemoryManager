@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.10.8
+
+- Removed the v0.10.7 chat-image error/load fallback because repeated chat-card rerenders can cause visible flicker on mobile.
+- SMM no longer observes, hides, restores, replaces, or inserts placeholders for images inside chat messages.
+- Keeps all v0.10.7 mobile UI polish.
+- No changes to summarization, memory injection, date continuity, semantic anchors, open-loop lifecycle, or automatic hiding.
+
 ## v0.10.7
 
 UI-only polish and safe broken-image fallback.

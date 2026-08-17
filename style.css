@@ -917,30 +917,6 @@
   font-weight:750;
 }
 
-/* Broken remote images in chat cards: hide the browser's broken-image glyph only.
-   The original message HTML and img src remain untouched. */
-.mes_text img.smm107-broken-image-source{
-  display:none !important;
-}
-
-.smm107-broken-image-fallback{
-  display:inline-flex;
-  align-items:center;
-  justify-content:center;
-  min-height:34px;
-  max-width:100%;
-  box-sizing:border-box;
-  padding:6px 10px;
-  margin:4px 0;
-  border:1px dashed rgba(127,127,127,.35);
-  border-radius:9px;
-  background:rgba(127,127,127,.06);
-  opacity:.7;
-  font-size:.88em;
-  line-height:1.35;
-  overflow-wrap:anywhere;
-}
-
 @media (max-width:700px){
   #smm2_native_entry .inline-drawer-content{
     padding:9px 10px 14px !important;
