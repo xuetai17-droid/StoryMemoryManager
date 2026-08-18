@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.11.1
+
+- 修正 v0.11.0 两处 UI 版本徽标仍显示 `v0.10.7` 的问题。
+- 修正启动日志仍显示 `v0.10.8 loaded successfully` 的问题。
+- 不修改 v0.11.0 的总结、正文净化、人物锚点、主线、物品所有权、日期、语义锚点、隐藏楼层或注入逻辑。
+
 ## 0.11.0
 
 - 总结输入净化：优先 `<content>`，过滤 thinking / HTML 草稿注释 / 故事考据 / campus_gossip / UpdateVariable / Analysis / JSONPatch 等非 canonical 剧情块。
