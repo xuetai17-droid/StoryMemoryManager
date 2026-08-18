@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.11.0
+
+- 总结输入净化：优先 `<content>`，过滤 thinking / HTML 草稿注释 / 故事考据 / campus_gossip / UpdateVariable / Analysis / JSONPatch 等非 canonical 剧情块。
+- 新增 `character_anchors` 与 `active_arcs`。
+- 主聊天与总结模型改用 trusted-core 记忆视图，降低旧污染反馈循环。
+- 角色卡/世界书明确高于 SMM 压缩人物摘要。
+- current_scene 改为快照覆盖。
+- items 拆分所有权/持有/使用/位置并保护 owner。
+- 记忆查看新增“当前主线”和“核心人物锚点”。
+
 ## v0.10.8
 
 - Removed the v0.10.7 chat-image error/load fallback because repeated chat-card rerenders can cause visible flicker on mobile.

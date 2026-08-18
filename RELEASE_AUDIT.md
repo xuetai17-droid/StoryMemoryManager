@@ -1,38 +1,26 @@
-# Story Memory Manager v0.10.8 Release Audit
-
-Audit target: GitHub upload package for SillyTavern.
+# Story Memory Manager v0.11.0 Release Audit
 
 ## Scope
 
-v0.10.8 is a corrective UI release. It removes the v0.10.7 broken-image DOM fallback after real-device testing showed that repeated message/card rerenders can cause visible flicker.
+This release is a continuity-structure experiment based on v0.10.8. It does not rewrite chat JSONL.
 
-## Changes
+## Main changes
 
-- Removed document-level `error` / `load` listeners for chat `<img>` elements.
-- Removed failed-image hide/restore state and placeholder insertion.
-- Removed related CSS classes.
-- Preserved the v0.10.7 mobile SMM UI polish.
-- Updated manifest version and visible load log to v0.10.8.
+- Canonical story-body extraction before summarization.
+- Auxiliary block exclusion.
+- character_anchors / active_arcs.
+- trusted-core summary and injection payloads.
+- Stable item ownership semantics.
+- current_scene snapshot semantics.
 
-## Explicitly unchanged core behavior
+## Safety boundaries
 
-- summarization pipeline and retry logic;
-- schema and structured memory fields;
-- canonical story-date continuity rules;
-- semantic anchors;
-- open-loop lifecycle;
-- safe memory injection;
-- automatic hiding and restore-hidden-floor behavior;
-- chat JSONL content.
+Unchanged core mechanisms: source-based timeline firewall, date continuity calibration, semantic_anchors, open_loop lifecycle, safe hidden-floor mechanism.
 
-## Verification performed
+## Recommended test
 
-- `node --check index.js`: passed.
-- `manifest.json`: parses as JSON and reports `0.10.8`.
-- No `SMM107_IMAGE_FALLBACK`, `installBrokenImageFallbackV0107`, `smm107-broken-image-*`, or document image load/error handlers remain.
-- Core function bodies were compared against v0.10.7 and remain byte-identical for schema, summary range, open-loop normalize/merge, result merge, safe injection, and auto-hide functions.
-- Package contains no local backup files or chat JSONL.
-
-## Image behavior
-
-SMM deliberately does not attempt to fix broken images in v0.10.8. A broken image must be diagnosed at its actual source URL / HTML provider. This avoids masking or destabilizing unrelated chat rendering.
+1. Upgrade.
+2. Keep auto-hide off for the first summary batch.
+3. Manually summarize 8-20 new messages.
+4. Inspect Current Arcs / Character Anchors / Timeline.
+5. If correct, re-enable auto summary, memory injection, then auto-hide.

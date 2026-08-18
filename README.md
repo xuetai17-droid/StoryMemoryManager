@@ -2,7 +2,7 @@
 
 面向 SillyTavern 长篇 RP / 连续剧情的结构化长期记忆扩展。
 
-当前版本：**v0.10.8**
+当前版本：**v0.11.0（核心连续性实验版）**
 
 ## 核心功能
 
@@ -25,6 +25,19 @@
 - 旧 `closed_loops` 会迁移为最多 80 条的轻量 tombstone，仅用于防止同一旧事项被总结模型重复“复活”。
 - tombstone 不保存完整事项描述，不显示在 UI，也不会注入主聊天模型。
 - 已发生且重要的剧情结果应由 `timeline` / `events` / `relationships` / `semantic_anchors` 保存，而不是靠历史待办列表保存。
+
+## v0.11.0：核心连续性恢复
+
+本版本针对长篇 RP 中“剧情越来越像流水账、人物说话变味、辅助小剧场污染长期记忆”的问题做结构修复：
+
+- 总结前只把真正剧情正文送入 SMM；优先提取 `<content>`，并排除 thinking、HTML 草稿注释、故事考据、campus_gossip、UpdateVariable、Analysis、JSONPatch 等辅助块。
+- 新增 `character_anchors`，保护核心人物的说话方式、决策模式、情绪表达、边界与关系互动方式。角色卡/世界书仍是基础人设最高优先级。
+- 新增 `active_arcs`，只保留 3-6 条真正仍在发展的宏观主线，避免长期记忆把“吃饭/洗澡/睡觉/通勤/上药”等日常微动作误当成剧情主轴。
+- 总结与主聊天注入改用“trusted-core”记忆视图，不再把旧 `facts`、隔离项、冲突、物品和完整 current_scene note 反复喂回模型，降低已有污染自我强化。
+- `current_scene` 改为当前快照覆盖，不再把旧 note 永久叠加。
+- 物品拆分 `owner / holder / user / location / source_owner`；没有明确赠予/转让证据时，普通使用或持有不会改变 owner。
+
+这是一次面向长篇连续性的结构调整。建议升级后先关闭自动隐藏，手动总结一批新消息并检查“当前主线 / 核心人物锚点”，确认正确后再恢复全自动。
 
 ## 历史事实防补写
 
@@ -130,6 +143,8 @@ items
 conflicts
 quarantined
 semantic_anchors
+character_anchors
+active_arcs
 audit
 ```
 

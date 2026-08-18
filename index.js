@@ -1,5 +1,5 @@
-// Story Memory Manager v0.10.6
-// public-release cleanup / active-loop simplification / continuity hardening
+// Story Memory Manager v0.11.0
+// canonical-input purification / character-core preservation / story-arc continuity
 // does not rewrite original chat JSONL
 // does not rewrite original chat JSONL
 
@@ -67,6 +67,8 @@ function freshMemory() {
         quarantined: [],
         current_scene: {},
         semantic_anchors: [],
+        character_anchors: [],
+        active_arcs: [],
         audit: []
     };
 }
@@ -74,7 +76,10 @@ function freshMemory() {
 function M() {
     const c = C();
     if (!c.chatMetadata[META_KEY]) c.chatMetadata[META_KEY] = freshMemory();
-    return c.chatMetadata[META_KEY];
+    const mem = c.chatMetadata[META_KEY];
+    if (!Array.isArray(mem.character_anchors)) mem.character_anchors = [];
+    if (!Array.isArray(mem.active_arcs)) mem.active_arcs = [];
+    return mem;
 }
 
 async function saveMeta() { await C().saveMetadata(); }
@@ -90,59 +95,63 @@ function esc(s='') {
 }
 
 
+function stableCharactersForPromptV0110(mem) {
+    const out = {};
+    const src = mem?.characters && typeof mem.characters === 'object'
+        ? mem.characters
+        : {};
+    const stable = new Set(['age','gender','identity','personality']);
+    for (const [name, row] of Object.entries(src)) {
+        if (!row || typeof row !== 'object' || Array.isArray(row)) continue;
+        const next = {};
+        for (const key of stable) {
+            if (row[key] !== undefined && row[key] !== null && String(row[key]).trim() !== '') {
+                next[key] = row[key];
+            }
+        }
+        out[name] = next;
+    }
+    return out;
+}
+
+function currentSceneCoreV0110(scene) {
+    if (!scene || typeof scene !== 'object' || Array.isArray(scene)) return {};
+    const out = {};
+    for (const key of ['location','time','date','participants','people','activity','situation']) {
+        if (Object.prototype.hasOwnProperty.call(scene, key)) out[key] = scene[key];
+    }
+    return out;
+}
+
 function buildSafeMemoryPromptV0100() {
     const mem = M();
-
-    const recentTimeline = Array.isArray(mem.timeline)
-        ? mem.timeline.slice(-12)
-        : [];
-
-    const relationships = Array.isArray(mem.relationships)
-        ? mem.relationships.slice(-12)
-        : [];
-
-    const openLoops = Array.isArray(mem.open_loops)
-        ? mem.open_loops.slice(-12)
-        : [];
-
-    const facts = Array.isArray(mem.facts)
-        ? mem.facts.slice(-12)
-        : [];
-
-    const semanticAnchors = Array.isArray(mem.semantic_anchors)
-        ? mem.semantic_anchors.slice(-20)
-        : [];
-
-    const characters =
-        mem.characters && typeof mem.characters === 'object'
-            ? Object.fromEntries(Object.entries(mem.characters).slice(-12))
-            : {};
 
     const payload = {
         current_story_date: mem.current_story_date || null,
         current_story_time: mem.current_story_time || null,
-        current_scene: mem.current_scene || {},
-        semantic_anchors: semanticAnchors,
-        recent_timeline: recentTimeline,
-        characters,
-        relationships,
-        open_loops: openLoops,
-        key_facts: facts,
+        current_scene_core: currentSceneCoreV0110(mem.current_scene),
+        character_anchors: (mem.character_anchors || []).slice(-20),
+        active_arcs: (mem.active_arcs || []).slice(0, 6),
+        semantic_anchors: (mem.semantic_anchors || []).slice(-20),
+        recent_timeline: (mem.timeline || []).slice(-10),
+        characters: stableCharactersForPromptV0110(mem),
+        relationships: (mem.relationships || []).slice(-12),
+        open_loops: (mem.open_loops || []).slice(-8)
     };
 
     return [
-        '【Story Memory｜已确认长期记忆】',
-        '以下内容来自剧情记忆数据库，用于维持长期连续性。',
-        '不得把记忆摘要中的旧状态覆盖最新正文已经发生的变化。',
-        'semantic_anchors 中的事件性质、因果关系、主动/被动关系和明确意愿状态属于连续性硬事实。',
-        '后续关系变化、顺从、停止反抗、继续互动或态度变化，不得反向改写历史事件当时的性质。',
-        '如果 semantic_anchors 与普通压缩摘要在事件性质上冲突，优先采用 semantic_anchors。',
-        '禁止把长期记忆和近期正文都未支持的过去细节补写成既定历史事实。过去对话、约定、物品来源、动机、关系历史、主动/被动与同意/拒绝状态都必须有可靠依据；不确定时保持模糊。',
-        '当前回复可以有不改变连续性的文学性描写，但不得把这些新描写反向包装成“过去早已发生”的事实。',
-        'open_loops 仅表示仍然有效的未来连续性事项，不是必须立即执行的任务列表。',
-        '不得为了完成 open_loops 而强行推进时间、地点或角色行为；只有当前剧情自然满足触发条件时才参考。',
+        '【Story Memory｜已确认长期连续性】',
+        '这是一份压缩连续性记忆，不是角色卡，也不是写作模板。',
+        '角色的基础人格、语言风格、价值观与原始设定，以角色卡/世界书为最高优先级；SMM 的压缩人物摘要不得覆盖或重写角色卡。',
+        'character_anchors 只保存由剧情长期验证出的稳定行为/语言锚点；若与角色卡冲突，以角色卡为准。',
+        'semantic_anchors 中事件性质、因果、主动/被动和明确意愿状态属于连续性硬事实。',
+        'active_arcs 是仍在发展的主线方向，不是任务清单；不得为了推进主线而强行让角色做不符合人设的行为。',
+        '如果一个局部生活片段已经自然结束，不要用反复吃饭、洗澡、睡觉、通勤、上药或重复解释同一问题来替代剧情发展；应在符合人设和当前因果的前提下，自然进入下一个有意义的剧情节点。',
+        '近期原始聊天优先于长期摘要中的瞬时状态。',
+        '禁止把长期记忆和近期正文都未支持的过去细节补成既定历史。',
+        'open_loops 仅表示仍有效的连续性事项，不是必须执行的任务。',
         JSON.stringify(payload, null, 2),
-    ].join('\n');
+    ].join('\\n');
 }
 
 function refreshSafeMemoryInjectionV0100() {
@@ -364,12 +373,60 @@ function cleanMes(m) {
     return t.trim();
 }
 
+function stripAuxiliaryBlocksV0110(text) {
+    let t = String(text || '');
+
+    // Writing/debug annotations are never canonical story facts.
+    t = t.replace(/<!--[\s\S]*?-->/g, '');
+
+    const tags = [
+        'campus_gossip', 'UpdateVariable', 'JSONPatch', 'Analysis',
+        'StatusPlaceHolderImpl', 'thinking', 'think'
+    ];
+    for (const tag of tags) {
+        const paired = new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}>`, 'gi');
+        t = t.replace(paired, '');
+        const selfClosing = new RegExp(`<${tag}\\b[^>]*/\\s*>`, 'gi');
+        t = t.replace(selfClosing, '');
+    }
+
+    // Remove known meta-only <details> blocks even if they were nested inside <content>.
+    t = t.replace(/<details\b[^>]*>[\s\S]*?<\/details>/gi, block => {
+        const m = block.match(/<summary\b[^>]*>([\s\S]*?)<\/summary>/i);
+        const title = String(m?.[1] || '').replace(/<[^>]+>/g, '').trim();
+        return /(故事考据|淫语|写作|思考|分析|草稿|行动建议|CHOIR|创作说明|作者注)/i.test(title)
+            ? ''
+            : block;
+    });
+
+    // Orphan wrappers left by malformed templates.
+    t = t.replace(/<\/?(?:campus_gossip|UpdateVariable|JSONPatch|Analysis|StatusPlaceHolderImpl)\b[^>]*>/gi, '');
+    return t.replace(/^\s*###\s*正文\s*/i, '').trim();
+}
+
+function cleanMesForSummaryV0110(m) {
+    let t = cleanMes(m);
+    if (!t) return '';
+
+    // USER prose is preserved; USER meta-instructions are filtered by the memory auditor.
+    if (m?.is_user) return stripAuxiliaryBlocksV0110(t);
+
+    // If the reply provides an explicit canonical story body, only that body may enter SMM.
+    const bodies = [];
+    const re = /<content\b[^>]*>([\s\S]*?)<\/content>/gi;
+    let match;
+    while ((match = re.exec(t))) bodies.push(match[1]);
+    if (bodies.length) t = bodies.join('\n\n');
+
+    return stripAuxiliaryBlocksV0110(t);
+}
+
 function messagesText(start, end) {
     const chat = C().chat || [];
     return chat.slice(start, end).map((m, j) => {
         const idx = start + j;
         const who = m.is_user ? 'USER' : (m.name || 'CHARACTER');
-        return `[#${idx} ${who}]\n${cleanMes(m)}`;
+        return `[#${idx} ${who}]\n${cleanMesForSummaryV0110(m)}`;
     }).join('\n\n');
 }
 
@@ -432,7 +489,9 @@ function filterMetaSignals(r) {
         'items',
         'conflicts',
         'quarantined',
-        'semantic_anchors'
+        'semantic_anchors',
+        'character_anchors',
+        'active_arcs'
     ];
 
     for (const field of arrayFields) {
@@ -2556,6 +2615,99 @@ function mergeOpenLoopsV086(mem, incoming) {
     };
 }
 
+function mergeCharacterAnchorsV0110(mem, incoming) {
+    mem.character_anchors = Array.isArray(mem.character_anchors) ? mem.character_anchors : [];
+    const map = new Map();
+    for (const row of mem.character_anchors) {
+        const name = canonicalPersonName(row?.name || '');
+        if (name) map.set(name, {...row, name});
+    }
+
+    for (const raw of (Array.isArray(incoming) ? incoming : [])) {
+        const name = canonicalPersonName(raw?.name || '');
+        if (!name) continue;
+        const old = map.get(name) || {name};
+        const next = {...old, name};
+
+        // Core identity fields are sticky: summaries may fill blanks, not casually rewrite them.
+        for (const field of ['core_personality','speech_style','decision_style','emotional_style','hard_boundaries']) {
+            if ((!next[field] || !String(next[field]).trim()) && raw?.[field] != null && String(raw[field]).trim()) {
+                next[field] = raw[field];
+            }
+        }
+
+        // Relationship dynamics can evolve with story evidence.
+        if (raw?.relationship_dynamic != null && String(raw.relationship_dynamic).trim()) {
+            next.relationship_dynamic = raw.relationship_dynamic;
+        }
+
+        for (const field of ['signature_behaviors','do_not_drift']) {
+            const vals = [
+                ...(Array.isArray(old?.[field]) ? old[field] : []),
+                ...(Array.isArray(raw?.[field]) ? raw[field] : [])
+            ].map(x => String(x || '').trim()).filter(Boolean);
+            next[field] = [...new Set(vals)].slice(-16);
+        }
+
+        if (raw?.source) next.source = raw.source;
+        map.set(name, next);
+    }
+
+    mem.character_anchors = [...map.values()].slice(-30);
+}
+
+function mergeActiveArcsV0110(mem, incoming) {
+    if (!Array.isArray(incoming)) return;
+    const seen = new Set();
+    const out = [];
+    for (const raw of incoming) {
+        if (!raw || typeof raw !== 'object') continue;
+        const title = String(raw.title || '').trim();
+        const summary = String(raw.summary || '').trim();
+        if (!title || !summary) continue;
+        const id = String(raw.id || title).trim().toLowerCase();
+        if (seen.has(id)) continue;
+        seen.add(id);
+        out.push({...raw, id: String(raw.id || title).trim()});
+        if (out.length >= 6) break;
+    }
+    mem.active_arcs = out;
+}
+
+function mergeItemsV0110(mem, incoming) {
+    const oldRows = Array.isArray(mem.items) ? mem.items : [];
+    const map = new Map();
+    const keyOf = x => String(x?.name || '').trim().toLowerCase().replace(/\s+/g,'');
+    for (const row of oldRows) {
+        const key = keyOf(row);
+        if (key) map.set(key, {...row});
+    }
+    for (const raw of (Array.isArray(incoming) ? incoming : [])) {
+        const key = keyOf(raw);
+        if (!key) continue;
+        const old = map.get(key) || {};
+        const next = {...old, ...raw};
+        const oldOwner = String(old.owner || '').trim();
+        const newOwner = String(raw.owner || '').trim();
+        const transfer = String(raw.transfer_evidence || '').trim();
+
+        if (oldOwner && newOwner && oldOwner !== newOwner && !transfer) {
+            next.owner = old.owner; // use/holding/location never implies ownership transfer
+        } else if (oldOwner && newOwner && oldOwner !== newOwner && transfer) {
+            next.source_owner = next.source_owner || old.owner;
+        }
+
+        // Empty transient fields should not erase a known value unless the model explicitly says "none".
+        for (const field of ['holder','user','location','source_owner']) {
+            if (raw[field] == null || String(raw[field]).trim() === '') {
+                if (old[field] !== undefined) next[field] = old[field];
+            }
+        }
+        map.set(key, next);
+    }
+    mem.items = [...map.values()];
+}
+
 function mergeResult(mem, r, endIndex) {
     // A chronological state change is not a contradiction.
     // Only keep conflicts that survive the continuity filter.
@@ -2670,6 +2822,9 @@ function mergeResult(mem, r, endIndex) {
         }
     }
 
+    mergeCharacterAnchorsV0110(mem, r.character_anchors);
+    mergeActiveArcsV0110(mem, r.active_arcs);
+
     mem.facts = uniqMerge(mem.facts, r.facts, x => JSON.stringify([x.fact, x.source]));
     mem.events = uniqMerge(mem.events, r.events, x => JSON.stringify([x.date, x.title, x.source]));
     // v0.8.5：relationships 是“当前关系状态”，不是历史流水。
@@ -2682,7 +2837,7 @@ function mergeResult(mem, r, endIndex) {
     // v0.8.6：待办使用生命周期合并。
     const loopLifecycleV086 = mergeOpenLoopsV086(mem, r.open_loops);
     mem.locations = uniqMerge(mem.locations, r.locations, x => JSON.stringify([x.name, x.fact]));
-    mem.items = uniqMerge(mem.items, r.items, x => JSON.stringify([x.name, x.owner, x.status]));
+    mergeItemsV0110(mem, r.items);
     mem.conflicts = uniqMerge(mem.conflicts, r.conflicts, x => JSON.stringify([x.topic, x.old_value, x.new_value, x.source]));
     mem.quarantined = uniqMerge(mem.quarantined, r.quarantined, x => JSON.stringify([x.content, x.reason, x.source]));
 
@@ -2805,7 +2960,8 @@ function mergeResult(mem, r, endIndex) {
         normalizeCharactersV085(mem);
     }
     if (r.current_scene && typeof r.current_scene === 'object') {
-        mem.current_scene = { ...mem.current_scene, ...r.current_scene };
+        // current_scene is a snapshot, not an accumulating history object.
+        mem.current_scene = { ...r.current_scene };
     }
     // story_start is a user-controlled hard anchor. Once established it must not drift
     // because of model summaries. Model output may only fill an empty anchor.
@@ -2883,12 +3039,20 @@ const SYSTEM_PROMPT = `你是长线角色扮演的“剧情记忆审计器”。
 9. 只记录对后续连续性有价值的信息。闲聊、重复描写、纯修辞可省略。
 9A. 任何被写成“过去已经发生”的具体事实，都必须由本批新增原始聊天的真实 source，或【已有可靠记忆】中的明确事实/semantic_anchors 支持。禁止为了叙事连贯自行补写过去的对话、约定、物品来源、动机、关系历史、接触、主动/被动或同意/拒绝状态。
 9B. 当前回复中的无害文学性细节若不影响连续性，可以不记录；不得把没有可靠依据的新装饰性细节升级成 timeline/facts/events/semantic_anchors 中的既定历史。证据不足时保持模糊。
+9C. <thinking>/<think>、HTML 草稿注释、故事考据、campus_gossip、小剧场、UpdateVariable、Analysis、JSONPatch、状态占位符、写作规划等辅助/元数据块不是 canonical 剧情正文，即使其中出现人物、地点、日期或行为，也不得进入长期记忆；只有真正正文 <content> 或无标签的剧情正文可作为事实来源。
 10. relationships 只记录文本已经支持的关系状态，不擅自把暧昧升级成恋爱/伴侣。
 10A. characters 只保存人物自身资料与当前即时状态。
 10B. characters 中只允许稳定字段 age/gender/identity/personality，以及当前状态字段 location/companion/physiology/outfit。
 10C. 禁止在 characters 中输出 relationship/relationships/todo/to_do/agreement/agreements；人物关系必须写入顶层 relationships，未来事项必须写入 open_loops。
 10D. 当前状态必须基于本批新增原始聊天；不要把旧人物卡里的 location/companion/physiology/outfit 原样复制成“当前状态”。
 10E. 若本批没有足够证据确认某个瞬时字段，不得猜测。
+10F. character_anchors 保存“角色在长篇剧情中不能被压缩掉的行为身份”：核心人格、说话节奏/语言习惯、决策方式、情绪表达、硬边界、关系互动模式、标志性行为、明确禁止漂移的 OOC 模式。
+10G. 角色卡/世界书是基础人设的最高优先级；character_anchors 只补充剧情长期验证出的表现，不得改写角色卡。单次场景、单次情绪或单次性行为不能定义整个人格。
+10H. 如果已有 character_anchor，除非新增正文出现长期、明确、反复验证的发展证据，否则不要改写其核心人格/语言/决策/边界。
+10I. active_arcs 最多保留 3-6 条真正仍在发展的“主线”：外部冲突、长期目标、关系转折、谜团、权力/身份压力或尚未解决的重要后果。吃饭、洗澡、睡觉、上药、通勤、普通课程等日常动作不能单独成为 active_arc。
+10J. active_arcs 只描述“正在发展的剧情压力/方向”，不是强制任务。局部场景自然结束后应允许剧情进入下一有意义节点，避免连续多轮用重复日常行为替代主线发展。
+10K. items 必须严格区分：owner=真正所有者；holder=当前持有者；user=当前使用者；location=当前位置；source_owner=赠予/转移前所有者。角色拿过、使用过、保管过某物绝不等于 owner 改变。
+10L. owner 默认稳定；只有正文明确出现赠予、转让、归还、所有权变化时才允许修改 owner，并在 transfer_evidence 写明证据。地点绝不能写入 owner。
 11. open_loops 保存“已经由正文明确成立、但尚未确认结束的连续性事项”，不是普通任务清单，也不是所有叙事悬念。
 11A. 允许的 type：
      appointment = 明确约定/会面
@@ -2957,6 +3121,21 @@ function schema() {
                 relationships:{type:'array',items:{type:'object',properties:{
                     people:{type:'array',items:{type:'string'}}, state:{type:'string'}, change:{type:'string'}, source:nullable()
                 },required:['people','state','change','source']}},
+                character_anchors:{type:'array',items:{type:'object',properties:{
+                    name:{type:'string'},
+                    core_personality:{type:'string'},
+                    speech_style:{type:'string'},
+                    decision_style:{type:'string'},
+                    emotional_style:{type:'string'},
+                    hard_boundaries:{type:'string'},
+                    relationship_dynamic:{type:'string'},
+                    signature_behaviors:{type:'array',items:{type:'string'}},
+                    do_not_drift:{type:'array',items:{type:'string'}},
+                    source:nullable()
+                },required:['name','core_personality','speech_style','decision_style','emotional_style','hard_boundaries','relationship_dynamic','signature_behaviors','do_not_drift','source']}},
+                active_arcs:{type:'array',items:{type:'object',properties:{
+                    id:{type:'string'}, title:{type:'string'}, summary:{type:'string'}, stakes:{type:'string'}, source:nullable()
+                },required:['id','title','summary','stakes','source']}},
                 open_loops:{type:'array',items:{type:'object',properties:{
                     id:{type:'string'},
                     type:{
@@ -2988,8 +3167,9 @@ function schema() {
                     name:{type:'string'}, fact:{type:'string'}
                 },required:['name','fact']}},
                 items:{type:'array',items:{type:'object',properties:{
-                    name:{type:'string'}, owner:nullable(), status:{type:'string'}
-                },required:['name','owner','status']}},
+                    name:{type:'string'}, owner:nullable(), holder:nullable(), user:nullable(),
+                    location:nullable(), source_owner:nullable(), status:{type:'string'}, source:nullable(), transfer_evidence:nullable()
+                },required:['name','owner','holder','user','location','source_owner','status','source','transfer_evidence']}},
                 conflicts:{type:'array',items:{type:'object',properties:{
                     topic:{type:'string'}, old_value:{type:'string'}, new_value:{type:'string'}, source:nullable()
                 },required:['topic','old_value','new_value','source']}},
@@ -3026,6 +3206,8 @@ function schema() {
                 'events',
                 'characters',
                 'relationships',
+                'character_anchors',
+                'active_arcs',
                 'open_loops',
                 'locations',
                 'items',
@@ -3038,21 +3220,20 @@ function schema() {
 }
 
 function compact(mem) {
-    const s = S();
+    // v0.11.0 trusted-core profile: old low-confidence facts/current-scene notes are
+    // deliberately not fed back into the summarizer. This breaks contamination loops.
     return {
         story_start: mem.story_start,
         current_story_date: mem.current_story_date || isoDateFromAny(mem.current_story_time),
         current_story_time: mem.current_story_time,
-        current_scene: mem.current_scene,
-        semantic_anchors: (mem.semantic_anchors||[]).slice(-30),
-        timeline: mem.timeline.slice(-Math.min(30, Number(s.maxTimeline)||50)),
-        facts: mem.facts.slice(-40),
-        events: mem.events.slice(-25),
-        characters: mem.characters,
-        relationships: mem.relationships.slice(-25),
-        open_loops: mem.open_loops.slice(-25),
-        conflicts: mem.conflicts.slice(-15),
-        quarantined: mem.quarantined.slice(-10)
+        current_scene_core: currentSceneCoreV0110(mem.current_scene),
+        character_anchors: (mem.character_anchors || []).slice(-20),
+        active_arcs: (mem.active_arcs || []).slice(0, 6),
+        semantic_anchors: (mem.semantic_anchors || []).slice(-24),
+        timeline: (mem.timeline || []).slice(-16),
+        characters: stableCharactersForPromptV0110(mem),
+        relationships: (mem.relationships || []).slice(-16),
+        open_loops: (mem.open_loops || []).slice(-12)
     };
 }
 
@@ -3236,6 +3417,10 @@ ${messagesText(start, end)}
 - 普通日期漂移由插件日期轴审计处理，不要重复写入 quarantined。
 - 只有真正可能污染长期记忆的未确认/超前/错误事实才进入 quarantined。
 - 禁止把新增原始聊天和已有可靠记忆都没有支持的“过去细节”补写成既定事实；无来源的叙事性补全不得进入 timeline/facts/events/relationships/semantic_anchors。
+- character_anchors 只保存稳定的人物声音与行为身份；不要用本轮临时情绪覆盖。若旧 anchor 已存在，默认继承。
+- active_arcs 只保留 3-6 条真正推动后续故事的宏观主线；已经解决的主线直接移除，不保留“完成历史”。
+- 若近期剧情连续多轮停留在重复日常微动作，active_arcs 应指出尚未展开的真实主线压力，但不得虚构新事件。
+- items 的 owner/holder/user/location 必须严格分离；没有明确所有权转移证据时 owner 不得改变。
 特别检查日期连续性：没有新增原始聊天中的明确跨月证据，就必须继承已有可靠月份；禁止仅凭 AI <date> 或自行推算跨月。`;
     let raw;
     let parsed = null;
@@ -3260,7 +3445,7 @@ ${messagesText(start, end)}
         try {
             raw = await withSmmTimeout(smmGenerateV093({
                 systemPrompt:SYSTEM_PROMPT,
-                prompt: prompt + '\n\n只返回一个合法 JSON 对象，不要解释、不要 Markdown、不要代码围栏。字段必须包含 story_start,current_story_date,current_story_time,current_scene,timeline,facts,events,characters,relationships,open_loops,locations,items,conflicts,quarantined,semantic_anchors。'
+                prompt: prompt + '\n\n只返回一个合法 JSON 对象，不要解释、不要 Markdown、不要代码围栏。字段必须包含 story_start,current_story_date,current_story_time,current_scene,timeline,facts,events,characters,relationships,character_anchors,active_arcs,open_loops,locations,items,conflicts,quarantined,semantic_anchors。'
             }), SMM_GENERATE_TIMEOUT_MS, `兼容总结 #${start+1}-#${end}`);
             parsed = filterMetaSignals(parseJSON(raw));
         } catch (e) {
@@ -3277,7 +3462,7 @@ ${messagesText(start, end)}
 只返回一个合法 JSON 对象，不要 Markdown、不要代码围栏。
 
 必须保留/补齐这些字段：
-story_start,current_story_date,current_story_time,current_scene,timeline,facts,events,characters,relationships,open_loops,locations,items,conflicts,quarantined,semantic_anchors
+story_start,current_story_date,current_story_time,current_scene,timeline,facts,events,characters,relationships,character_anchors,active_arcs,open_loops,locations,items,conflicts,quarantined,semantic_anchors
 
 原始响应：
 ${bad}`;
@@ -4454,6 +4639,16 @@ function legacyReadableHTML(mem=M()) {
         <details class="smm2-memory-details">
           <summary>人物关系（${(mem.relationships||[]).length}）</summary>
           ${legacyRelationshipsHTML(mem)}
+        </details>
+
+        <details open class="smm2-memory-details">
+          <summary>当前主线（${(mem.active_arcs||[]).length}）</summary>
+          ${(mem.active_arcs||[]).length ? (mem.active_arcs||[]).map(a => `<div class="smm53-warning"><b>${esc(a.title||a.id||'主线')}</b><br>${esc(a.summary||'')}${a.stakes?`<br><small>压力：${esc(a.stakes)}</small>`:''}</div>`).join('') : '<div class="smm2-empty">尚未建立主线锚点；下一次干净总结后会逐步建立。</div>'}
+        </details>
+
+        <details class="smm2-memory-details">
+          <summary>核心人物锚点（${(mem.character_anchors||[]).length}）</summary>
+          ${(mem.character_anchors||[]).length ? (mem.character_anchors||[]).map(a => `<details class="smm2-memory-details smm2-person-card"><summary>${esc(a.name||'人物')}</summary><div><b>核心：</b>${esc(a.core_personality||'')}</div><div><b>说话：</b>${esc(a.speech_style||'')}</div><div><b>决策：</b>${esc(a.decision_style||'')}</div><div><b>情绪：</b>${esc(a.emotional_style||'')}</div><div><b>关系动态：</b>${esc(a.relationship_dynamic||'')}</div>${a.do_not_drift?.length?`<div><b>禁止漂移：</b>${esc(a.do_not_drift.join('；'))}</div>`:''}</details>`).join('') : '<div class="smm2-empty">尚未建立人物锚点；角色卡/世界书仍为基础人设最高优先级。</div>'}
         </details>
 
         <details class="smm2-memory-details">
