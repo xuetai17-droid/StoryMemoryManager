@@ -1,6 +1,5 @@
-// Story Memory Manager v0.11.1
+// Story Memory Manager v0.11.2
 // canonical-input purification / character-core preservation / story-arc continuity
-// does not rewrite original chat JSONL
 // does not rewrite original chat JSONL
 
 const MODULE = 'story_memory_manager_v2';
@@ -167,6 +166,15 @@ function refreshSafeMemoryInjectionV0100() {
         return true;
     }
 
+    // v0.11.2: a large timeline coverage gap means long-term memory is incomplete.
+    // Do not inject incomplete memory into the roleplay model until the gap is repaired.
+    const gapsV0112=timelineCoverageGapsV0112(M());
+    if (gapsV0112.length) {
+        ctx.setExtensionPrompt(tag, '', 0, 4, false, 0);
+        console.warn('[StoryMemory] 安全记忆注入已阻止：检测到时间线断档', gapsV0112[0]);
+        return false;
+    }
+
     ctx.setExtensionPrompt(
         tag,
         buildSafeMemoryPromptV0100(),
@@ -242,7 +250,15 @@ async function autoHideSummarizedV0101() {
     );
 
     const keepStart = Math.max(0, chat.length - keep);
-    const hideEnd = Math.min(processed, keepStart - 1);
+    let hideEnd = Math.min(processed, keepStart - 1);
+
+    // v0.11.2: never auto-hide across a large source-coverage gap.
+    // Keep the raw messages from the first suspicious gap onward until that range is repaired.
+    const gaps = timelineCoverageGapsV0112(mem);
+    if (gaps.length) {
+        hideEnd = Math.min(hideEnd, gaps[0].start - 1);
+        console.warn('[StoryMemory] 自动隐藏已受保护性断点限制', gaps[0]);
+    }
 
     if (hideEnd < 0) return false;
 
@@ -421,12 +437,178 @@ function cleanMesForSummaryV0110(m) {
     return stripAuxiliaryBlocksV0110(t);
 }
 
+// v0.11.2: structured world-state metadata bridge.
+// UpdateVariable / JSONPatch remains excluded from canonical story prose. We only
+// read three exact world-state paths as non-canonical end-of-message metadata.
+const WORLD_STATE_PATHS_V0112 = Object.freeze({
+    '/世界/当前日期':'date',
+    '/世界/当前时间':'time',
+    '/世界/当前地点':'location'
+});
+
+function sanitizeWorldMetaValueV0112(value, maxLen=180) {
+    if (value === undefined || value === null) return null;
+    const s = String(value)
+        .replace(/[\u0000-\u001F\u007F]/g, ' ')
+        .replace(/<[^>]*>/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+    return s ? s.slice(0, maxLen) : null;
+}
+
+function extractWorldStateMetadataV0112(m) {
+    // Only assistant/model replies may contribute UpdateVariable metadata.
+    if (!m || m.is_user) return null;
+    const raw = String(m?.mes ?? '');
+    if (!raw) return null;
+
+    const out = {date:null, time:null, location:null};
+    const blocks = [];
+    const re = /<JSONPatch\b[^>]*>([\s\S]*?)<\/JSONPatch>/gi;
+    let match;
+    while ((match = re.exec(raw))) blocks.push(match[1]);
+    if (!blocks.length) return null;
+
+    const acceptOperation = (op) => {
+        if (!op || typeof op !== 'object' || Array.isArray(op)) return;
+        const kind = String(op.op || '').trim().toLowerCase();
+        if (!['replace','insert'].includes(kind)) return;
+        const field = WORLD_STATE_PATHS_V0112[String(op.path || '').trim()];
+        if (!field) return;
+        let value = sanitizeWorldMetaValueV0112(op.value, field === 'location' ? 180 : 100);
+        if (!value) return;
+        if (field === 'date') {
+            const d = normalizeDateInput(value);
+            if (!d) return;
+            value = d.iso;
+        }
+        out[field] = value;
+    };
+
+    for (const blockRaw of blocks) {
+        const block = String(blockRaw || '')
+            .replace(/^```(?:json)?\s*/i, '')
+            .replace(/\s*```$/i, '')
+            .trim();
+        if (!block) continue;
+
+        let parsed = null;
+        try {
+            parsed = JSON.parse(block);
+        } catch (_) {
+            const a = block.indexOf('['), b = block.lastIndexOf(']');
+            if (a >= 0 && b > a) {
+                try { parsed = JSON.parse(block.slice(a,b+1)); } catch (_) {}
+            }
+        }
+        if (Array.isArray(parsed)) {
+            for (const op of parsed) acceptOperation(op);
+            continue;
+        }
+
+        // Conservative fallback for a partially malformed array: only parse
+        // individual JSON objects; never regex arbitrary prose into metadata.
+        for (const objText of (block.match(/\{[^{}]{1,2000}\}/g) || [])) {
+            try { acceptOperation(JSON.parse(objText)); } catch (_) {}
+        }
+    }
+
+    return (out.date || out.time || out.location) ? out : null;
+}
+
+function worldStateMetaForSourceV0112(source) {
+    const chat = C().chat || [];
+    const rows = [];
+    for (const i of sourceIndexes(source)) {
+        const meta = extractWorldStateMetadataV0112(chat[i]);
+        if (meta) rows.push({index:i, ...meta});
+    }
+    return rows;
+}
+
+function latestWorldStateMetaForSourceV0112(source) {
+    const rows = worldStateMetaForSourceV0112(source);
+    return rows.length ? rows[rows.length-1] : null;
+}
+
+function latestWorldStateMetaInRangeV0112(start, endExclusive) {
+    const chat = C().chat || [];
+    for (let i=Math.min(endExclusive,chat.length)-1; i>=Math.max(0,start); i--) {
+        const meta = extractWorldStateMetadataV0112(chat[i]);
+        if (meta) return {index:i, ...meta};
+    }
+    return null;
+}
+
+function worldStateMetaPromptLineV0112(m, idx) {
+    const meta = extractWorldStateMetadataV0112(m);
+    if (!meta) return '';
+    const parts=[];
+    if (meta.date) parts.push(`/世界/当前日期=${meta.date}`);
+    if (meta.time) parts.push(`/世界/当前时间=${meta.time}`);
+    if (meta.location) parts.push(`/世界/当前地点=${meta.location}`);
+    return parts.length
+        ? `[SMM_WORLD_STATE_META #${idx} | assistant reply end-state only | ${parts.join(' | ')}]`
+        : '';
+}
+
+function isMissingStoryValueV0112(value) {
+    const s=String(value ?? '').trim();
+    return !s || /^(?:null|undefined|unknown|未知|未明确|无法验证|未建立)(?:[（(].*[）)])?$/i.test(s);
+}
+
+function isUnresolvedStoryTimeV0112(value) {
+    const s=String(value ?? '').trim();
+    if (isMissingStoryValueV0112(s)) return true;
+    // A fuzzy display such as “下午（具体时间未明确）” may be safely upgraded
+    // by same-source structured HH:MM metadata; a real existing clock is kept.
+    return parseStoryClock(s)==null && /(?:具体)?时间[^。；]*?(?:未明确|无法验证|未知)/.test(s);
+}
+
+function applyWorldStateMetadataFallbackV0112(parsed, start, endExclusive) {
+    if (!parsed || typeof parsed !== 'object') return parsed;
+    const chat = C().chat || [];
+
+    // Fill timeline date/time only when the summarizer left it blank/unknown.
+    // The metadata belongs to the END of the referenced assistant reply, so use
+    // the latest metadata-bearing source in that event, never an unrelated row.
+    if (Array.isArray(parsed.timeline)) {
+        for (const e of parsed.timeline) {
+            const idx = [...sourceIndexes(e?.source)].sort((a,b)=>b-a)
+                .find(i => i>=start && i<endExclusive && extractWorldStateMetadataV0112(chat[i]));
+            if (!Number.isInteger(idx)) continue;
+            const meta = extractWorldStateMetadataV0112(chat[idx]);
+            if (!meta) continue;
+            if (isMissingStoryValueV0112(e?.date) && meta.date) e.date=meta.date;
+            if ((isMissingStoryValueV0112(e?.time) || (isUnresolvedStoryTimeV0112(e?.time) && parseStoryClock(meta.time)!=null)) && meta.time) e.time=meta.time;
+        }
+    }
+
+    // Top-level current story state may use the latest batch metadata as a
+    // fallback only. It never overwrites a non-empty summarizer conclusion.
+    const latest = latestWorldStateMetaInRangeV0112(start,endExclusive);
+    if (latest) {
+        if (isMissingStoryValueV0112(parsed.current_story_date) && latest.date)
+            parsed.current_story_date=latest.date;
+        if (latest.time && (isMissingStoryValueV0112(parsed.current_story_time) ||
+            (isUnresolvedStoryTimeV0112(parsed.current_story_time) && parseStoryClock(latest.time)!=null)))
+            parsed.current_story_time=latest.time;
+        if (latest.location && parsed.current_scene && typeof parsed.current_scene==='object' &&
+            isMissingStoryValueV0112(parsed.current_scene.location)) {
+            parsed.current_scene.location=latest.location;
+        }
+    }
+    return parsed;
+}
+
 function messagesText(start, end) {
     const chat = C().chat || [];
     return chat.slice(start, end).map((m, j) => {
         const idx = start + j;
         const who = m.is_user ? 'USER' : (m.name || 'CHARACTER');
-        return `[#${idx} ${who}]\n${cleanMesForSummaryV0110(m)}`;
+        const body = cleanMesForSummaryV0110(m);
+        const meta = worldStateMetaPromptLineV0112(m, idx);
+        return `[#${idx} ${who}]\n${body}${meta ? `\n${meta}` : ''}`;
     }).join('\n\n');
 }
 
@@ -584,6 +766,239 @@ function sourceFirst(source) {
 function sourceLast(source) {
     const x=sourceIndexes(source); return x.length?x[x.length-1]:-1;
 }
+
+// =========================================================
+// v0.11.2 batch commit guard / source coverage / gap repair
+// =========================================================
+
+function validRealSourceV0112(source) {
+    const src = String(source || '').trim();
+    if (!src) return false;
+    if (/主线总结|剧情总结|历史总结|summary/i.test(src)) return false;
+    return sourceIndexes(src).length > 0;
+}
+
+function sourceWithinBatchV0112(source, start, endExclusive) {
+    if (!validRealSourceV0112(source)) return false;
+    const idx = sourceIndexes(source);
+    return idx.length > 0 && idx.every(i => i >= start && i < endExclusive);
+}
+
+function canonicalBatchStatsV0112(start, endExclusive) {
+    const chat = C().chat || [];
+    const indexes = [];
+    let chars = 0;
+    for (let i = start; i < endExclusive && i < chat.length; i++) {
+        const text = cleanMesForSummaryV0110(chat[i]);
+        if (!text) continue;
+        indexes.push(i);
+        chars += text.length;
+    }
+    return { message_count:indexes.length, chars, indexes };
+}
+
+function validateBatchCommitV0112(delta, start, endExclusive) {
+    const incoming = Array.isArray(delta?.timeline) ? delta.timeline : [];
+    const accepted = incoming.filter(e => sourceWithinBatchV0112(e?.source, start, endExclusive));
+    const rejected = incoming.filter(e => !sourceWithinBatchV0112(e?.source, start, endExclusive));
+    const canonical = canonicalBatchStatsV0112(start, endExclusive);
+
+    // A real RP batch must leave at least one traceable timeline node.
+    // Otherwise the cursor must not advance: this is the silent-drop bug fixed in v0.11.2.
+    if (canonical.message_count > 0 && accepted.length === 0) {
+        const err = new Error(
+            `批次 #${start}-#${Math.max(start,endExclusive-1)} 没有任何可追溯到本批原文的 timeline，已拒绝提交，游标未推进。`
+        );
+        err.smmBatchCommitFailure = {
+            start,
+            end: Math.max(start,endExclusive-1),
+            canonical_messages: canonical.message_count,
+            canonical_chars: canonical.chars,
+            timeline_incoming: incoming.length,
+            timeline_accepted: 0,
+            timeline_rejected: rejected.length,
+            rejected_sources: rejected.slice(0,8).map(x=>String(x?.source||''))
+        };
+        throw err;
+    }
+
+    return {
+        canonical,
+        timeline_incoming: incoming.length,
+        timeline_accepted: accepted.length,
+        timeline_rejected: rejected.length
+    };
+}
+
+function cloneJSONV0112(x) {
+    return JSON.parse(JSON.stringify(x));
+}
+
+function restoreObjectInPlaceV0112(target, snapshot) {
+    for (const key of Object.keys(target || {})) delete target[key];
+    Object.assign(target, cloneJSONV0112(snapshot));
+    return target;
+}
+
+function timelineCoverageGapsV0112(mem=M()) {
+    const processed = Math.max(-1, Number(mem?.last_processed_index ?? -1));
+    if (processed < 0) return [];
+
+    const covered = new Set();
+    for (const e of (Array.isArray(mem?.timeline) ? mem.timeline : [])) {
+        for (const i of sourceIndexes(e?.source)) {
+            if (i >= 0 && i <= processed) covered.add(i);
+        }
+    }
+
+    const sorted = [...covered].sort((a,b)=>a-b);
+    if (!sorted.length) return [];
+
+    const threshold = Math.max(60, (Number(S().batchMessages)||20) * 3);
+    const gaps = [];
+
+    for (let k=1; k<sorted.length; k++) {
+        const a = sorted[k-1], b = sorted[k];
+        const missing = b-a-1;
+        if (missing >= threshold) {
+            gaps.push({start:a+1,end:b-1,count:missing,before:a,after:b});
+        }
+    }
+
+    const tail = processed - sorted[sorted.length-1];
+    if (tail >= threshold) {
+        gaps.push({
+            start: sorted[sorted.length-1]+1,
+            end: processed,
+            count: tail,
+            before: sorted[sorted.length-1],
+            after: null
+        });
+    }
+
+    return gaps;
+}
+
+function filterRowsBeforeIndexV0112(rows, start) {
+    return (Array.isArray(rows) ? rows : []).filter(row => {
+        const last = sourceLast(row?.source);
+        return last >= 0 && last < start;
+    });
+}
+
+function historicalWorkingMemoryV0112(original, start) {
+    const w = cloneJSONV0112(original);
+    w.timeline = filterRowsBeforeIndexV0112(original.timeline, start);
+    w.facts = filterRowsBeforeIndexV0112(original.facts, start);
+    w.events = filterRowsBeforeIndexV0112(original.events, start);
+    w.relationships = filterRowsBeforeIndexV0112(original.relationships, start);
+    w.semantic_anchors = filterRowsBeforeIndexV0112(original.semantic_anchors, start);
+    w.character_anchors = filterRowsBeforeIndexV0112(original.character_anchors, start);
+    w.items = filterRowsBeforeIndexV0112(original.items, start);
+    w.conflicts = filterRowsBeforeIndexV0112(original.conflicts, start);
+    w.quarantined = filterRowsBeforeIndexV0112(original.quarantined, start);
+
+    // Current/future lifecycle state must never leak backward into a historical repair.
+    w.current_scene = {};
+    w.active_arcs = [];
+    w.open_loops = [];
+    w.closed_loops = [];
+    w.loop_tombstones = [];
+    w.audit = [];
+    delete w.rebuild_state;
+
+    const prior = [...w.timeline]
+        .filter(e => sourceLast(e?.source) >= 0)
+        .sort((a,b)=>sourceLast(a?.source)-sourceLast(b?.source))
+        .at(-1);
+
+    const priorDate = normalizeDateInput(prior?.date);
+    w.current_story_date = priorDate?.iso || original.story_start || null;
+    w.current_story_time = prior?.time || null;
+    w.last_processed_index = start - 1;
+    return w;
+}
+
+function rowTouchesRangeV0112(row, start, endInclusive) {
+    const idx = sourceIndexes(row?.source);
+    return idx.some(i => i >= start && i <= endInclusive);
+}
+
+function mergeHistoricalBackfillV0112(target, repaired, start, endInclusive) {
+    const counts = {};
+    const select = (field) => (Array.isArray(repaired?.[field]) ? repaired[field] : [])
+        .filter(row => rowTouchesRangeV0112(row,start,endInclusive));
+
+    const tl = select('timeline');
+    const facts = select('facts');
+    const events = select('events');
+    const rel = select('relationships');
+    const anchors = select('semantic_anchors');
+    const charAnchors = select('character_anchors');
+    const conflicts = select('conflicts');
+    const quarantined = select('quarantined');
+
+    const before = {
+        timeline:(target.timeline||[]).length,
+        facts:(target.facts||[]).length,
+        events:(target.events||[]).length,
+        relationships:(target.relationships||[]).length,
+        semantic_anchors:(target.semantic_anchors||[]).length,
+        character_anchors:(target.character_anchors||[]).length
+    };
+
+    target.timeline = uniqMerge(target.timeline, tl, x=>JSON.stringify([x.date,x.time,x.event,x.source]));
+    target.facts = uniqMerge(target.facts, facts, x=>JSON.stringify([x.fact,x.source]));
+    target.events = uniqMerge(target.events, events, x=>JSON.stringify([x.date,x.title,x.source]));
+    target.relationships = uniqMerge(target.relationships, rel, x=>JSON.stringify([x.people,x.state,x.change,x.source]));
+    target.semantic_anchors = uniqMerge(target.semantic_anchors, anchors, x=>String(x?.id||JSON.stringify([x?.event,x?.source])));
+    mergeCharacterAnchorsV0110(target, charAnchors);
+    target.conflicts = uniqMerge(target.conflicts, conflicts, x=>JSON.stringify([x.topic,x.old_value,x.new_value,x.source]));
+    target.quarantined = uniqMerge(target.quarantined, quarantined, x=>JSON.stringify([x.content,x.reason,x.source]));
+
+    // Stable character identity may be filled, but historical repair must not rewind current transient state.
+    target.characters = target.characters && typeof target.characters==='object' ? target.characters : {};
+    for (const [name,row] of Object.entries(repaired?.characters||{})) {
+        if (!row || typeof row!=='object' || Array.isArray(row)) continue;
+        const canon = canonicalPersonName(name);
+        const old = target.characters[canon] && typeof target.characters[canon]==='object'
+            ? target.characters[canon] : {};
+        const next = {...old};
+        for (const key of ['age','gender','identity','personality']) {
+            if ((next[key]===undefined || next[key]===null || String(next[key]).trim()==='') &&
+                row[key]!==undefined && row[key]!==null && String(row[key]).trim()!=='') {
+                next[key]=row[key];
+            }
+        }
+        target.characters[canon]=next;
+    }
+
+    // New historical world locations are additive.
+    target.locations = uniqMerge(target.locations, repaired?.locations, x=>JSON.stringify([x.name,x.fact]));
+
+    // Items are source-ordered. Older repaired snapshots may add missing items, but never overwrite a newer snapshot.
+    const itemMap = new Map((Array.isArray(target.items)?target.items:[]).map(x=>[String(x?.name||'').trim().toLowerCase(),x]));
+    for (const item of select('items')) {
+        const key=String(item?.name||'').trim().toLowerCase();
+        if(!key) continue;
+        const old=itemMap.get(key);
+        if(!old || sourceLast(item?.source) > sourceLast(old?.source)) itemMap.set(key,item);
+    }
+    target.items=[...itemMap.values()];
+
+    // Relationship snapshots are source-ordered, so a repaired older row cannot replace a newer row.
+    normalizeRelationshipsV085(target);
+    normalizeCharactersV085(target);
+    cleanQuarantineV085(target);
+
+    counts.timeline=(target.timeline||[]).length-before.timeline;
+    counts.facts=(target.facts||[]).length-before.facts;
+    counts.events=(target.events||[]).length-before.events;
+    counts.relationships=(target.relationships||[]).length-before.relationships;
+    counts.semantic_anchors=(target.semantic_anchors||[]).length-before.semantic_anchors;
+    counts.character_anchors=(target.character_anchors||[]).length-before.character_anchors;
+    return counts;
+}
 function mergeSources(a,b) {
     const x=[...new Set([...sourceIndexes(a),...sourceIndexes(b)])].sort((m,n)=>m-n);
     return x.length ? x.map(n=>`#${n}`).join(',') : (a||b||null);
@@ -591,8 +1006,17 @@ function mergeSources(a,b) {
 
 function sourceTextForTime(source) {
     const chat = C().chat || [];
+    // Canonical story evidence only. Auxiliary UpdateVariable/JSONPatch blocks
+    // are handled separately by worldStateMetaForSourceV0112().
     return sourceIndexes(source)
-        .map(i => cleanMes(chat[i]))
+        .map(i => cleanMesForSummaryV0110(chat[i]))
+        .filter(Boolean)
+        .join('\n');
+}
+
+function sourceWorldMetaTextV0112(source) {
+    return worldStateMetaForSourceV0112(source)
+        .map(x => [x.date,x.time,x.location].filter(Boolean).join(' | '))
         .filter(Boolean)
         .join('\n');
 }
@@ -600,123 +1024,72 @@ function sourceTextForTime(source) {
 function classifySourceTimeEvidence(e) {
     const time = String(e?.time || '').trim();
     if (!time) {
-        return {
-            level: 'none',
-            label: '无时间',
-            reason: '记忆没有 time 字段'
-        };
+        return {level:'none', label:'无时间', reason:'记忆没有 time 字段'};
     }
 
     const src = sourceTextForTime(e?.source);
-    if (!src) {
-        return {
-            level: 'unverified',
-            label: '无法验证',
-            reason: '找不到 source 对应的原始聊天'
-        };
+    const meta = sourceWorldMetaTextV0112(e?.source);
+    if (!src && !meta) {
+        return {level:'unverified', label:'无法验证', reason:'找不到 source 对应的原始聊天或世界状态元数据'};
     }
+
+    const containsAny = (text, forms) => !!text && forms.some(x=>text.includes(x));
 
     // HH:MM，例如 22:00 / 02:30
     const numeric = [...time.matchAll(/(?:^|[^\d])([01]?\d|2[0-3])[:：]([0-5]\d)/g)];
-
     if (numeric.length) {
         const checks = numeric.map(m => {
-            const hh = String(Number(m[1]));
-            const hh2 = hh.padStart(2, '0');
-            const mm = m[2];
-
-            const forms = [
-                hh + ':' + mm,
-                hh2 + ':' + mm,
-                hh + '：' + mm,
-                hh2 + '：' + mm
-            ];
-
+            const hh=String(Number(m[1])), hh2=hh.padStart(2,'0'), mm=m[2];
+            const forms=[hh+':'+mm,hh2+':'+mm,hh+'：'+mm,hh2+'：'+mm];
             return {
-                clock: hh2 + ':' + mm,
-                found: forms.some(x => src.includes(x))
+                clock:hh2+':'+mm,
+                inCanonical:containsAny(src,forms),
+                inMeta:containsAny(meta,forms)
             };
         });
-
-        const found = checks.filter(x => x.found);
-        const missing = checks.filter(x => !x.found);
-
-        if (missing.length === 0) {
+        const missing=checks.filter(x=>!x.inCanonical&&!x.inMeta);
+        if (!missing.length) {
+            const allCanonical=checks.every(x=>x.inCanonical);
+            const anyCanonical=checks.some(x=>x.inCanonical);
+            if (allCanonical) return {
+                level:'explicit',
+                label:checks.length>1?'原文时间范围已验证':'原文明确时间',
+                reason:'source canonical 正文中找到全部时间：'+checks.map(x=>x.clock).join('、')
+            };
             return {
-                level: 'explicit',
-                label: checks.length > 1 ? '原文时间范围已验证' : '原文明确时间',
-                reason: 'source 原文中找到全部时间：' + found.map(x => x.clock).join('、')
+                level:anyCanonical?'partial':'structured',
+                label:anyCanonical?'原文/变量时间已验证':'变量状态时间',
+                reason:'时间由 canonical 正文与/或 UpdateVariable 的三个世界状态字段验证：'+checks.map(x=>x.clock).join('、')
             };
         }
-
-        if (found.length > 0) {
-            return {
-                level: 'partial',
-                label: '原文部分时间已验证',
-                reason: '已找到 ' + found.map(x => x.clock).join('、') +
-                        '；未找到 ' + missing.map(x => x.clock).join('、')
-            };
-        }
-
+        const found=checks.filter(x=>x.inCanonical||x.inMeta);
+        if (found.length) return {
+            level:'partial', label:'部分时间已验证',
+            reason:'已验证 '+found.map(x=>x.clock).join('、')+'；未验证 '+missing.map(x=>x.clock).join('、')
+        };
         return {
-            level: 'inferred',
-            label: '总结推测时间',
-            reason: '时间 ' + checks.map(x => x.clock).join('、') +
-                    ' 均未在 source 原文中找到'
+            level:'inferred', label:'总结推测时间',
+            reason:'时间 '+checks.map(x=>x.clock).join('、')+' 未在 canonical 正文或允许的世界状态元数据中找到'
         };
     }
 
-    // 中文“X点”，例如 凌晨2点 / 晚上10点
     const chineseHour = time.match(/(?:凌晨|半夜|早晨|早上|上午|中午|下午|傍晚|晚上|晚间|夜间|深夜)?\s*(\d{1,2})(?:点|时)/);
-
     if (chineseHour) {
-        const token = chineseHour[0].replace(/\s+/g, '');
-        const compactSrc = src.replace(/\s+/g, '');
-
-        if (compactSrc.includes(token)) {
-            return {
-                level: 'explicit',
-                label: '原文明确时间',
-                reason: `source 原文中找到“${token}”`
-            };
-        }
-
-        return {
-            level: 'inferred',
-            label: '总结推测时间',
-            reason: '具体钟点只存在于记忆 time 字段'
-        };
+        const token=chineseHour[0].replace(/\s+/g,''), c=(src||'').replace(/\s+/g,''), m=(meta||'').replace(/\s+/g,'');
+        if (c.includes(token)) return {level:'explicit',label:'原文明确时间',reason:`source canonical 正文中找到“${token}”`};
+        if (m.includes(token)) return {level:'structured',label:'变量状态时间',reason:`UpdateVariable 世界状态元数据中找到“${token}”`};
+        return {level:'inferred',label:'总结推测时间',reason:'具体钟点只存在于记忆 time 字段'};
     }
 
-    // 只有“凌晨/上午/晚间”等时段
-    const dayparts = [
-        '凌晨','半夜','清晨','早晨','早上','上午',
-        '中午','下午','傍晚','晚上','晚间','夜间','深夜'
-    ];
-
-    const hit = dayparts.find(x => time.includes(x));
-
+    const dayparts=['凌晨','半夜','清晨','早晨','早上','上午','中午','下午','傍晚','晚上','晚间','夜间','深夜'];
+    const hit=dayparts.find(x=>time.includes(x));
     if (hit) {
-        if (src.includes(hit)) {
-            return {
-                level: 'fuzzy',
-                label: '原文模糊时段',
-                reason: `source 原文中存在“${hit}”`
-            };
-        }
-
-        return {
-            level: 'inferred',
-            label: '总结推测时段',
-            reason: `“${hit}”只存在于记忆 time 字段`
-        };
+        if ((src||'').includes(hit)) return {level:'fuzzy',label:'原文模糊时段',reason:`source canonical 正文中存在“${hit}”`};
+        if ((meta||'').includes(hit)) return {level:'structured',label:'变量状态时段',reason:`UpdateVariable 世界状态元数据中存在“${hit}”`};
+        return {level:'inferred',label:'总结推测时段',reason:`“${hit}”只存在于记忆 time 字段`};
     }
 
-    return {
-        level: 'unverified',
-        label: '时间无法验证',
-        reason: '无法在 source 原文中验证该时间'
-    };
+    return {level:'unverified',label:'时间无法验证',reason:'无法在 canonical 正文或允许的世界状态元数据中验证该时间'};
 }
 
 function explicitClockFromSource(source) {
@@ -843,7 +1216,9 @@ function chineseNumberToInt(v) {
 }
 
 function sourceContainsClock(source, targetMinutes) {
-    const src = sourceTextForTime(source);
+    const canonical = sourceTextForTime(source);
+    const meta = sourceWorldMetaTextV0112(source);
+    const src = [canonical, meta].filter(Boolean).join('\n');
     if (!src || targetMinutes == null) return false;
 
     const targetH = Math.floor(targetMinutes / 60);
@@ -1020,28 +1395,38 @@ function hasStrongSameDayCue(e) {
 function sourceDateAnchor(source) {
     const chat = C().chat || [];
     const indexes = sourceIndexes(source);
-
     if (!indexes.length) return null;
 
-    const first = indexes[0];
+    // 1) A canonical <date> attached to the same source has highest priority.
+    for (const i of [...indexes].sort((a,b)=>b-a)) {
+        const text=stripAuxiliaryBlocksV0110(cleanMes(chat[i]));
+        const d=extractDateTagFromMessage(text);
+        if (d) return {date:d,source_index:i,source:'#'+i+' <date>',distance:Math.abs(indexes[0]-i),text,kind:'date_tag'};
+    }
 
-    // 从该 source 向前寻找最近一个原始聊天 <date>。
-    // 注意：这里只返回“候选日期锚点”，不代表一定可信。
-    for (let i = first; i >= 0; i--) {
-        const text = cleanMes(chat[i]);
-        const d = extractDateTagFromMessage(text);
-
-        if (d) {
+    // 2) Structured JSONPatch world date is an end-state candidate for the same
+    // source. It never bypasses validateSourceDateAnchor() continuity checks.
+    for (const i of [...indexes].sort((a,b)=>b-a)) {
+        const meta=extractWorldStateMetadataV0112(chat[i]);
+        if (meta?.date) {
             return {
-                date: d,
-                source_index: i,
-                source: '#' + i + ' <date>',
-                distance: first - i,
-                text
+                date:meta.date,
+                source_index:i,
+                source:'#'+i+' JSONPatch /世界/当前日期',
+                distance:Math.abs(indexes[0]-i),
+                text:cleanMesForSummaryV0110(chat[i]),
+                kind:'world_state_meta'
             };
         }
     }
 
+    // 3) Fallback to the nearest earlier canonical <date> tag.
+    const first=indexes[0];
+    for (let i=first-1;i>=0;i--) {
+        const text=stripAuxiliaryBlocksV0110(cleanMes(chat[i]));
+        const d=extractDateTagFromMessage(text);
+        if (d) return {date:d,source_index:i,source:'#'+i+' <date>',distance:first-i,text,kind:'date_tag'};
+    }
     return null;
 }
 
@@ -1052,10 +1437,23 @@ function sourceTextAround(index, before=2, after=2) {
     return chat.slice(a,b).map((m,j)=>cleanMes(m)).filter(Boolean).join('\n');
 }
 
+function hasExplicitMidnightCrossingCueV0112(text) {
+    const t=String(text||'');
+    const re=/(?:跨过(?:午夜|零点)|过了(?:午夜|零点)|午夜之后|零点之后|零点刚过)/g;
+    let m;
+    while((m=re.exec(t))){
+        const prefix=t.slice(Math.max(0,m.index-10),m.index);
+        // Reject explicit negation such as “没有跨过午夜 / 并未发生跨零点”.
+        if (/(?:没有|并没有|未|并未|不曾|从未|没有发生|并未发生)\s*$/.test(prefix)) continue;
+        return true;
+    }
+    return false;
+}
+
 function hasStrongRolloverEvidenceText(text) {
     const t = String(text||'');
-    if (/次日|第二天|翌日|隔天|第二日/.test(t)) return true;
-    if (/跨过(?:午夜|零点)|过了(?:午夜|零点)|午夜之后|零点之后|零点刚过|00[:：]\d{2}/.test(t)) return true;
+    if (/(?:^|[。！？\n])\s*(?:次日|第二天|翌日|隔天|第二日)(?:早晨|清晨|上午|醒来|起床)?/.test(t)) return true;
+    if (hasExplicitMidnightCrossingCueV0112(t) || /00[:：]\d{2}/.test(t)) return true;
     if (/第二天早晨|第二天清晨|第二天上午|翌日清晨|翌日上午|次日清晨|次日上午/.test(t)) return true;
     if (/昨晚|昨夜|昨天晚上/.test(t) && /今早|今天早上|清晨|早晨/.test(t)) return true;
     return false;
@@ -1079,7 +1477,7 @@ function detectRawRolloverBetween(startIndex, endIndex) {
     let lateNightSleep = null;
 
     for (let i = a; i <= b; i++) {
-        const text = cleanMes(chat[i]);
+        const text = cleanMesForSummaryV0110(chat[i]);
         if (!text) continue;
 
         // 明确“第二天 / 次日”
@@ -1092,7 +1490,7 @@ function detectRawRolloverBetween(startIndex, endIndex) {
         }
 
         // 明确跨午夜
-        if (/跨过(?:午夜|零点)|过了(?:午夜|零点)|午夜之后|零点之后|零点刚过/.test(text)) {
+        if (hasExplicitMidnightCrossingCueV0112(text)) {
             return {
                 type:'explicit_midnight',
                 source_index:i,
@@ -1168,7 +1566,7 @@ function validateSourceDateAnchor(r, currentDate, lastAcceptedAnchorIndex=null) 
             return {accept:true, reason:'explicit_next_day_narration'};
         }
 
-        if (/跨过(?:午夜|零点)|过了(?:午夜|零点)|午夜之后|零点之后|零点刚过/.test(joined)) {
+        if (hasExplicitMidnightCrossingCueV0112(joined)) {
             return {accept:true, reason:'explicit_midnight_crossing'};
         }
 
@@ -1232,7 +1630,7 @@ function hasVerifiedRelativeNextDayCue(r) {
 
     // 只接受叙事推进，不接受角色讨论“第二天要做什么”之类的对白。
     if (/(?:^|[。！？\n])\s*(?:第二天|次日|翌日|隔天|第二日)(?:早晨|清晨|上午|醒来|起床)?/.test(src)) return true;
-    if (/跨过(?:午夜|零点)|过了(?:午夜|零点)|午夜之后|零点之后/.test(src)) return true;
+    if (hasExplicitMidnightCrossingCueV0112(src)) return true;
 
     return false;
 }
@@ -2708,7 +3106,7 @@ function mergeItemsV0110(mem, incoming) {
     mem.items = [...map.values()];
 }
 
-function mergeResult(mem, r, endIndex) {
+function mergeResult(mem, r, endIndex, options={}) {
     // A chronological state change is not a contradiction.
     // Only keep conflicts that survive the continuity filter.
     const conflictFilter = filterConflictsForStoryContinuity(r.conflicts);
@@ -2725,15 +3123,13 @@ function mergeResult(mem, r, endIndex) {
     // v0.8.2：timeline source 防火墙。
     // timeline 必须能够追溯到真实原始聊天 #编号。
     // “主线总结（X）”等模型内部摘要标签不得作为历史事件重新进入 timeline。
-    const validTimelineSource = (source) => {
-        const src = String(source || '').trim();
-        if (!src) return false;
-
-        // 明确拒绝模型生成的摘要/总结伪来源。
-        if (/主线总结|剧情总结|历史总结|summary/i.test(src)) return false;
-
-        // 至少必须包含真实聊天楼层编号，如 #101、#101-#104、#101,#103。
-        return /#\d+/.test(src);
+    const startIndexV0112 = Number.isInteger(options?.startIndex) ? options.startIndex : null;
+    const validTimelineSource = (source) => validRealSourceV0112(source);
+    const validIncomingTimelineSource = (source) => {
+        if (!validTimelineSource(source)) return false;
+        return startIndexV0112 == null
+            ? true
+            : sourceWithinBatchV0112(source, startIndexV0112, endIndex);
     };
 
     const incomingTimeline = Array.isArray(r.timeline) ? r.timeline : [];
@@ -2741,7 +3137,7 @@ function mergeResult(mem, r, endIndex) {
     const rejectedTimeline = [];
 
     for (const e of incomingTimeline) {
-        if (validTimelineSource(e?.source)) {
+        if (validIncomingTimelineSource(e?.source)) {
             acceptedTimeline.push(e);
         } else {
             rejectedTimeline.push(e);
@@ -2998,8 +3394,17 @@ function mergeResult(mem, r, endIndex) {
     guardOpenLoopsTemporalV0105(mem);
     pruneExpiredOpenLoopsV0106(mem);
 
-    mem.last_processed_index = endIndex - 1;
-    mem.audit.push({ at: new Date().toISOString(), processed_to: mem.last_processed_index });
+    if (options?.advanceCursor !== false) {
+        mem.last_processed_index = endIndex - 1;
+        mem.audit.push({
+            at: new Date().toISOString(),
+            processed_to: mem.last_processed_index,
+            type: 'batch_commit_v0112',
+            timeline_accepted: acceptedTimeline.length,
+            timeline_rejected: rejectedTimeline.length,
+            range: startIndexV0112 == null ? null : [startIndexV0112, endIndex-1]
+        });
+    }
     if (mem.audit.length > 50) mem.audit = mem.audit.slice(-50);
 
     const s = S();
@@ -3040,6 +3445,7 @@ const SYSTEM_PROMPT = `你是长线角色扮演的“剧情记忆审计器”。
 9A. 任何被写成“过去已经发生”的具体事实，都必须由本批新增原始聊天的真实 source，或【已有可靠记忆】中的明确事实/semantic_anchors 支持。禁止为了叙事连贯自行补写过去的对话、约定、物品来源、动机、关系历史、接触、主动/被动或同意/拒绝状态。
 9B. 当前回复中的无害文学性细节若不影响连续性，可以不记录；不得把没有可靠依据的新装饰性细节升级成 timeline/facts/events/semantic_anchors 中的既定历史。证据不足时保持模糊。
 9C. <thinking>/<think>、HTML 草稿注释、故事考据、campus_gossip、小剧场、UpdateVariable、Analysis、JSONPatch、状态占位符、写作规划等辅助/元数据块不是 canonical 剧情正文，即使其中出现人物、地点、日期或行为，也不得进入长期记忆；只有真正正文 <content> 或无标签的剧情正文可作为事实来源。
+9D. 唯一例外：插件可能提供 [SMM_WORLD_STATE_META #N ...]，它只含 /世界/当前日期、/世界/当前时间、/世界/当前地点，且只用于校准该 #N assistant 回复结束时的 date/time/location；不得据此创造剧情事实、关系变化、人物行为或其他变量。正文明确事实与该元数据冲突时，正文优先。
 10. relationships 只记录文本已经支持的关系状态，不擅自把暧昧升级成恋爱/伴侣。
 10A. characters 只保存人物自身资料与当前即时状态。
 10B. characters 中只允许稳定字段 age/gender/identity/personality，以及当前状态字段 location/companion/physiology/outfit。
@@ -3363,7 +3769,7 @@ async function smmGenerateV093({
     }
 }
 
-async function summarizeRange(start, end) {
+async function summarizeRange(start, end, options={}) {
     const c = C();
     const mem = M();
     const prompt = `【已有可靠记忆】
@@ -3371,6 +3777,14 @@ ${JSON.stringify(compact(mem), null, 2)}
 
 【新增原始聊天】
 ${messagesText(start, end)}
+
+【SMM_WORLD_STATE_META 使用边界】
+- 该行由插件从同一条 assistant 回复的 <JSONPatch> 中只提取三个精确路径：/世界/当前日期、/世界/当前时间、/世界/当前地点。
+- 它不是 canonical 剧情正文，禁止转写为对白、动作、人物动机、facts/events/relationships/semantic_anchors。
+- 它只可作为“该 assistant 回复结束时”的结构化日期/时间/地点候选证据。
+- 若 canonical 正文或 USER 正文明示的时间推进、地点移动与该元数据冲突，以正文事实为准；不得让元数据覆盖“第二天/跨午夜/到达新地点”等明确叙事。
+- timeline 事件的 source 若包含该 assistant 回复且 time/date 为空，可使用同 source 的结构化元数据补齐；不得把后续楼层的元数据倒灌到更早事件。
+- 除上述三个路径外，任何 JSONPatch 变量（好感度、状态、数值、分析等）都没有被提供给总结器，也不得进入长期记忆。
 
 请只从“新增原始聊天”更新记忆。旧记忆只用于对照，不允许把旧记忆中尚未发生的未来内容变成事实。
 
@@ -3482,13 +3896,171 @@ ${bad}`;
         }
     }
 
-    mergeResult(mem, parsed, end);
-    await saveMeta();
+    // v0.11.2: fill only missing date/time/location from the same-source
+    // structured world-state metadata. Canonical story prose remains the authority.
+    applyWorldStateMetadataFallbackV0112(parsed, start, end);
+
+    let validation;
+    try {
+        validation = validateBatchCommitV0112(parsed, start, end);
+    } catch (e) {
+        if (e?.smmBatchCommitFailure) {
+            mem.audit = Array.isArray(mem.audit) ? mem.audit : [];
+            mem.audit.push({
+                at:new Date().toISOString(),
+                type:'batch_commit_rejected_v0112',
+                ...e.smmBatchCommitFailure
+            });
+            if (mem.audit.length > 50) mem.audit = mem.audit.slice(-50);
+            if (options?.save !== false) await saveMeta();
+        }
+        throw e;
+    }
+
+    const beforeMerge = cloneJSONV0112(mem);
+    try {
+        mergeResult(mem, parsed, end, {startIndex:start, advanceCursor:true});
+    } catch (e) {
+        restoreObjectInPlaceV0112(mem, beforeMerge);
+        throw e;
+    }
+
+    if (options?.save !== false) await saveMeta();
+    return validation;
 }
 
 let BUSY = false;
 let HISTORY_RUNNING = false;
 let HISTORY_STOP_REQUESTED = false;
+let GAP_REPAIR_RUNNING_V0112 = false;
+
+async function repairTimelineGapV0112() {
+    if (BUSY || HISTORY_RUNNING || GAP_REPAIR_RUNNING_V0112) {
+        return toast('当前已有总结/重建任务在运行。','warning');
+    }
+
+    const fromEl=document.getElementById('smm112_gap_from');
+    const toEl=document.getElementById('smm112_gap_to');
+    const start=Number(fromEl?.value);
+    const endInclusive=Number(toEl?.value);
+    const chat=C().chat||[];
+
+    if (!Number.isInteger(start) || !Number.isInteger(endInclusive) ||
+        start < 0 || endInclusive < start || endInclusive >= chat.length) {
+        return toast(`补总结范围无效。请输入 0-${Math.max(0,chat.length-1)} 之间的 #楼层编号。`,'warning');
+    }
+
+    const total=endInclusive-start+1;
+    if (!confirm(
+        `将只补总结 #${start}-#${endInclusive}（${total} 楼）。\n\n`+
+        '不会修改原聊天；不会回退 last_processed_index；不会覆盖当前日期、当前场景、当前人物临时状态或当前待办。\n'+
+        '开始前会自动备份当前 SMM 记忆。继续吗？'
+    )) return;
+
+    const c=C();
+    const original=cloneJSONV0112(M());
+    const originalCursor=Number(original.last_processed_index??-1);
+    const protectedCurrent={
+        current_story_date:original.current_story_date,
+        current_story_time:original.current_story_time,
+        current_scene:cloneJSONV0112(original.current_scene||{}),
+        active_arcs:cloneJSONV0112(original.active_arcs||[]),
+        open_loops:cloneJSONV0112(original.open_loops||[]),
+        closed_loops:cloneJSONV0112(original.closed_loops||[]),
+        loop_tombstones:cloneJSONV0112(original.loop_tombstones||[]),
+        last_processed_index:originalCursor
+    };
+
+    // Keep one automatic rollback snapshot for the latest gap repair.
+    for (const key of Object.keys(c.chatMetadata||{})) {
+        if (key.startsWith(META_KEY+'_backup_gap_v0112_')) delete c.chatMetadata[key];
+    }
+    const backupKey=META_KEY+'_backup_gap_v0112_'+Date.now();
+    c.chatMetadata[backupKey]=cloneJSONV0112(original);
+    await saveMeta();
+
+    const working=historicalWorkingMemoryV0112(original,start);
+    GAP_REPAIR_RUNNING_V0112=true;
+    BUSY=true;
+    let completedTo=start-1;
+
+    try {
+        c.chatMetadata[META_KEY]=working;
+        let pos=start;
+        const batch=Math.max(4,Number(S().batchMessages)||20);
+
+        while(pos<=endInclusive){
+            const endExclusive=Math.min(endInclusive+1,pos+batch);
+            const status=document.getElementById('smm112_gap_status');
+            if(status) status.textContent=`正在补总结 #${pos}-#${endExclusive-1}…`;
+            await summarizeRange(pos,endExclusive,{save:false});
+            completedTo=endExclusive-1;
+            pos=endExclusive;
+            await new Promise(r=>setTimeout(r,250));
+        }
+
+        const repaired=cloneJSONV0112(working);
+        c.chatMetadata[META_KEY]=original;
+        const target=M();
+        const counts=mergeHistoricalBackfillV0112(target,repaired,start,endInclusive);
+
+        // Historical repair is additive only. Restore all current/lifecycle snapshots exactly.
+        target.current_story_date=protectedCurrent.current_story_date;
+        target.current_story_time=protectedCurrent.current_story_time;
+        target.current_scene=protectedCurrent.current_scene;
+        target.active_arcs=protectedCurrent.active_arcs;
+        target.open_loops=protectedCurrent.open_loops;
+        target.closed_loops=protectedCurrent.closed_loops;
+        target.loop_tombstones=protectedCurrent.loop_tombstones;
+        target.last_processed_index=protectedCurrent.last_processed_index;
+        target.story_start=original.story_start;
+        target.audit=Array.isArray(target.audit)?target.audit:[];
+        target.audit.push({
+            at:new Date().toISOString(),
+            type:'timeline_gap_backfill_v0112',
+            range:[start,endInclusive],
+            preserved_cursor:protectedCurrent.last_processed_index,
+            counts
+        });
+        if(target.audit.length>50) target.audit=target.audit.slice(-50);
+
+        await saveMeta();
+        refresh(); refreshNative();
+        const box=document.getElementById('smm2_native_memory_box');
+        if(box?.dataset.open==='1'){
+            box.innerHTML=memoryReadableHTML();
+            if(M().schema===SMM4_SCHEMA) bindHistoryBrowserV4(); else bindHistoryBrowserLegacy();
+        }
+
+        const remaining=timelineCoverageGapsV0112(target);
+        const status=document.getElementById('smm112_gap_status');
+        if(status) status.textContent=remaining.length
+            ? `补总结完成。仍检测到大段缺口：#${remaining[0].start}-#${remaining[0].end}`
+            : '补总结完成；未再检测到大段时间线断档。';
+        toast(`缺口补总结完成：#${start}-#${endInclusive}。新增时间线 ${counts.timeline||0} 条；当前游标仍为 #${protectedCurrent.last_processed_index}。`,'success');
+    } catch(e) {
+        console.error('[StoryMemory] gap repair failed',e);
+        c.chatMetadata[META_KEY]=original;
+        const target=M();
+        target.audit=Array.isArray(target.audit)?target.audit:[];
+        target.audit.push({
+            at:new Date().toISOString(),
+            type:'timeline_gap_backfill_failed_v0112',
+            range:[start,endInclusive],
+            completed_to:completedTo,
+            error:String(e?.message||e)
+        });
+        if(target.audit.length>50) target.audit=target.audit.slice(-50);
+        await saveMeta();
+        const status=document.getElementById('smm112_gap_status');
+        if(status) status.textContent=`补总结已停止在 #${completedTo}：${String(e?.message||e)}`;
+        toast(`补总结失败，原记忆已恢复：${e?.message||e}`,'error');
+    } finally {
+        GAP_REPAIR_RUNNING_V0112=false;
+        BUSY=false;
+        refresh(); refreshNative();
+    }
+}
 
 async function summarizeNew(force=false) {
     if (BUSY) return;
@@ -3630,7 +4202,7 @@ function stat() {
 function panelHTML() {
     return `<div id="${PANEL_ID}" class="smm2-hidden">
       <div class="smm2-card">
-        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.1</span></div><button id="smm2_close">×</button></div>
+        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.2</span></div><button id="smm2_close">×</button></div>
         <div id="smm2_stats" class="smm2-stats"></div>
         <div class="smm2-grid">
           <button id="smm2_new">总结新增</button>
@@ -4995,6 +5567,24 @@ function nativeManagerHTML() {
             </summary>
 
             <div class="smm2-tool-body">
+              <details class="smm2-tool-card">
+                <summary>
+                  <span class="smm2-tool-title">补总结缺失楼层</span>
+                  <span class="smm2-tool-subtitle">只补时间线断档，不回退当前状态</span>
+                </summary>
+                <div class="smm2-tool-body">
+                  <div class="smm2-note">
+                    用于“已处理游标已越过，但时间线中间缺了一大段”的情况。输入时间线显示的 #楼层编号；不会修改原聊天。
+                  </div>
+                  <div class="smm2-fix-grid">
+                    <label><span>起始 #</span><input id="smm112_gap_from" type="number" min="0" step="1" placeholder="1489"></label>
+                    <div class="smm2-fix-arrow">→</div>
+                    <label><span>结束 #</span><input id="smm112_gap_to" type="number" min="0" step="1" placeholder="1622"></label>
+                  </div>
+                  <button id="smm112_gap_repair" class="menu_button smm2-primary-tool">补总结这个范围</button>
+                  <div id="smm112_gap_status" class="smm2-note"></div>
+                </div>
+              </details>
               <button id="smm51_native_resume" class="menu_button">从断点继续安全重建</button>
               <button id="smm2_native_stop" class="menu_button">暂停当前重建</button>
             </div>
@@ -5346,6 +5936,8 @@ function bindNativeManager() {
     q('smm2_native_stop').onclick = stopHistoryRebuild;
     q('smm2_native_rebuild').onclick = safeHistoryRebuild;
     q('smm51_native_resume').onclick = resumeSafeHistoryRebuild;
+    const gapRepairBtnV0112=q('smm112_gap_repair');
+    if(gapRepairBtnV0112) gapRepairBtnV0112.onclick=repairTimelineGapV0112;
     const cleanOrphansBtn=q('smm84_clean_orphans');
     if(cleanOrphansBtn) cleanOrphansBtn.onclick=async()=>{
         const mem=M();
@@ -5508,6 +6100,18 @@ function bindNativeManager() {
 
     if (safeInjectEl) {
         safeInjectEl.onchange = e => {
+            if (e.target.checked) {
+                const gaps=timelineCoverageGapsV0112(M());
+                if (gaps.length) {
+                    e.target.checked=false;
+                    s.safeMemoryInject=false;
+                    saveSettings();
+                    refreshSafeMemoryInjectionV0100();
+                    refreshNative();
+                    toast(`检测到时间线断档 #${gaps[0].start}-#${gaps[0].end}。请先用“补总结缺失楼层”修复，再开启记忆注入。`,'warning');
+                    return;
+                }
+            }
             s.safeMemoryInject = !!e.target.checked;
             saveSettings();
             refreshSafeMemoryInjectionV0100();
@@ -5614,6 +6218,21 @@ function refreshNative() {
     setValue('smm2_native_trigger', s.triggerMessages);
     setValue('smm2_native_batch', s.batchMessages);
     setValue('smm2_native_start', s.storyStart);
+
+    const gapsV0112=timelineCoverageGapsV0112(M());
+    const gapStatusV0112=document.getElementById('smm112_gap_status');
+    const fromV0112=document.getElementById('smm112_gap_from');
+    const toV0112=document.getElementById('smm112_gap_to');
+    if(gapsV0112.length){
+        const gap=gapsV0112[0];
+        if(fromV0112 && !String(fromV0112.value||'').trim()) fromV0112.value=gap.start;
+        if(toV0112 && !String(toV0112.value||'').trim()) toV0112.value=gap.end;
+        if(gapStatusV0112 && !GAP_REPAIR_RUNNING_V0112) {
+            gapStatusV0112.textContent=`检测到大段时间线断档：#${gap.start}-#${gap.end}（${gap.count} 楼）。自动隐藏不会跨过这里。`;
+        }
+    } else if(gapStatusV0112 && !GAP_REPAIR_RUNNING_V0112) {
+        gapStatusV0112.textContent='未检测到超过保护阈值的大段时间线断档。';
+    }
 }
 
 function installNativeExtensionEntry() {
@@ -5634,7 +6253,7 @@ function installNativeExtensionEntry() {
 
         wrap.innerHTML = `
           <div class="inline-drawer-toggle inline-drawer-header">
-            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.1</span></div>
+            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.2</span></div>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
           </div>
           <div class="inline-drawer-content">
@@ -5783,12 +6402,13 @@ function statsHTMLV0105() {
     const continuityNeedsReview =
         (Array.isArray(mem.conflicts) ? mem.conflicts.length : 0) +
         (Array.isArray(mem.quarantined) ? mem.quarantined.length : 0);
+    const coverageGapsV0112=timelineCoverageGapsV0112(mem);
 
     return [
         `<div class="smm105-stat-line"><b>剧情：</b>${esc(date)}　${esc(st.time)}</div>`,
         `<div class="smm105-stat-line"><b>处理：</b>${st.done}/${st.total}　待总结 ${st.pending}　已隐藏 ${hidden.count}</div>`,
         `<div class="smm105-stat-line"><b>记忆：</b>事件 ${st.events}　人物 ${people}　关系 ${relations}　锚点 ${anchors}</div>`,
-        `<div class="smm105-stat-line"><b>连续性：</b>${continuityNeedsReview ? '后台有待核查项' : '正常'}</div>`,
+        `<div class="smm105-stat-line"><b>连续性：</b>${coverageGapsV0112.length ? `⚠ 时间线断档 #${coverageGapsV0112[0].start}-#${coverageGapsV0112[0].end}` : (continuityNeedsReview ? '后台有待核查项' : '正常')}</div>`,
         `<div class="smm105-stat-line"><b>历史重建：</b>${esc(rebuildStatusLabelV0105(mem))}</div>`,
         rebuildCheckpointHTMLV0105(mem, st.total)
     ].filter(Boolean).join('');
@@ -5861,7 +6481,7 @@ function initializeExtension() {
     try {
         installUI();
         refresh();
-        console.log('[StoryMemory] v0.11.1 loaded successfully');
+        console.log('[StoryMemory] v0.11.2 loaded successfully');
     } catch (e) {
         console.error('[StoryMemory] UI initialization failed', e);
     }
