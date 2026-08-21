@@ -1,4 +1,4 @@
-// Story Memory Manager v0.11.2
+// Story Memory Manager v0.11.3
 // canonical-input purification / character-core preservation / story-arc continuity
 // does not rewrite original chat JSONL
 
@@ -784,6 +784,75 @@ function sourceWithinBatchV0112(source, start, endExclusive) {
     return idx.length > 0 && idx.every(i => i >= start && i < endExclusive);
 }
 
+// v0.11.3: tolerate common model-only source formatting variants without
+// weakening the actual batch boundary. We only recover integers that fall
+// inside the currently summarized batch, so dates/times/out-of-range numbers
+// cannot become valid message sources.
+function looseSourceIndexesV0113(source, start, endExclusive) {
+    const raw = String(source || '').trim();
+    if (!raw) return [];
+    if (/主线总结|剧情总结|历史总结|summary/i.test(raw)) return [];
+
+    const inBatch = (n) => Number.isInteger(n) && n >= start && n < endExclusive;
+    const out = [];
+
+    // First honor the canonical #123 / #123-#126 syntax. If the model
+    // explicitly referenced any #floor outside this batch, reject the whole
+    // source rather than silently trimming it into an apparently valid one.
+    const canonicalIdx=sourceIndexes(raw);
+    if (canonicalIdx.length) {
+        if (!canonicalIdx.every(inBatch)) return [];
+        for (const n of canonicalIdx) out.push(n);
+    }
+
+    // Recover explicit range forms such as 1489-1508, #1489-1508,
+    // 1489~1508, 1489至1508. Expansion is bounded to the current batch.
+    const rangeRe = /#?(\d{1,7})\s*(?:-|–|—|~|～|至|到)\s*#?(\d{1,7})/g;
+    let m;
+    while ((m = rangeRe.exec(raw))) {
+        const a = Number(m[1]), b = Number(m[2]);
+        if (!inBatch(a) || !inBatch(b)) continue;
+        const lo = Math.min(a,b), hi = Math.max(a,b);
+        for (let i=lo; i<=hi && i<endExclusive; i++) out.push(i);
+    }
+
+    // Finally accept standalone source-like integers only if they are inside
+    // the current batch. This safely handles "1489,1490" or "楼层 1489".
+    for (const mm of raw.matchAll(/\d{1,7}/g)) {
+        const n = Number(mm[0]);
+        if (inBatch(n)) out.push(n);
+    }
+
+    return [...new Set(out)].sort((a,b)=>a-b);
+}
+
+function canonicalSourceV0113(indexes) {
+    const xs=[...new Set((indexes||[]).filter(Number.isInteger))].sort((a,b)=>a-b);
+    if (!xs.length) return null;
+    if (xs.length===1) return `#${xs[0]}`;
+    let sequential=true;
+    for (let i=1;i<xs.length;i++) if (xs[i]!==xs[i-1]+1) { sequential=false; break; }
+    return sequential ? `#${xs[0]}-#${xs[xs.length-1]}` : xs.map(x=>`#${x}`).join(',');
+}
+
+function normalizeTimelineSourcesV0113(delta, start, endExclusive) {
+    if (!delta || !Array.isArray(delta.timeline)) return {normalized:0, unresolved:0};
+    let normalized=0, unresolved=0;
+    for (const e of delta.timeline) {
+        const before=String(e?.source ?? '').trim();
+        if (sourceWithinBatchV0112(before,start,endExclusive)) continue;
+        const idx=looseSourceIndexesV0113(before,start,endExclusive);
+        const canonical=canonicalSourceV0113(idx);
+        if (canonical) {
+            e.source=canonical;
+            normalized++;
+        } else {
+            unresolved++;
+        }
+    }
+    return {normalized, unresolved};
+}
+
 function canonicalBatchStatsV0112(start, endExclusive) {
     const chat = C().chat || [];
     const indexes = [];
@@ -798,6 +867,7 @@ function canonicalBatchStatsV0112(start, endExclusive) {
 }
 
 function validateBatchCommitV0112(delta, start, endExclusive) {
+    const sourceNormalizationV0113 = normalizeTimelineSourcesV0113(delta, start, endExclusive);
     const incoming = Array.isArray(delta?.timeline) ? delta.timeline : [];
     const accepted = incoming.filter(e => sourceWithinBatchV0112(e?.source, start, endExclusive));
     const rejected = incoming.filter(e => !sourceWithinBatchV0112(e?.source, start, endExclusive));
@@ -817,7 +887,10 @@ function validateBatchCommitV0112(delta, start, endExclusive) {
             timeline_incoming: incoming.length,
             timeline_accepted: 0,
             timeline_rejected: rejected.length,
-            rejected_sources: rejected.slice(0,8).map(x=>String(x?.source||''))
+            source_normalized_v0113: sourceNormalizationV0113.normalized,
+            source_unresolved_v0113: sourceNormalizationV0113.unresolved,
+            rejected_sources: rejected.slice(0,8).map(x=>String(x?.source||'')),
+            incoming_preview: incoming.slice(0,4).map(x=>({event:String(x?.event||'').slice(0,180),source:String(x?.source||'')}))
         };
         throw err;
     }
@@ -826,7 +899,9 @@ function validateBatchCommitV0112(delta, start, endExclusive) {
         canonical,
         timeline_incoming: incoming.length,
         timeline_accepted: accepted.length,
-        timeline_rejected: rejected.length
+        timeline_rejected: rejected.length,
+        source_normalized_v0113: sourceNormalizationV0113.normalized,
+        source_unresolved_v0113: sourceNormalizationV0113.unresolved
     };
 }
 
@@ -3769,6 +3844,87 @@ async function smmGenerateV093({
     }
 }
 
+function timelineOnlySchemaV0113() {
+    return {
+        name:'StoryMemoryTimelineRepair',
+        strict:true,
+        value:{
+            '$schema':'http://json-schema.org/draft-04/schema#',
+            type:'object',
+            properties:{
+                timeline:{
+                    type:'array',
+                    minItems:1,
+                    items:{
+                        type:'object',
+                        properties:{
+                            date:{type:['string','null']},
+                            time:{type:['string','null']},
+                            event:{type:'string'},
+                            source:{type:'string'}
+                        },
+                        required:['date','time','event','source']
+                    }
+                }
+            },
+            required:['timeline']
+        }
+    };
+}
+
+async function retryTimelineOnlyV0113(start,endExclusive,reason='') {
+    const allowed=[];
+    for(let i=start;i<endExclusive;i++) allowed.push(`#${i}`);
+    const prompt=`你只做一件事：从下面这批原始聊天中抽取可追溯的剧情时间线。
+
+【允许使用的 source 楼层】
+${allowed.join(', ')}
+
+【原始聊天】
+${messagesText(start,endExclusive)}
+
+【硬规则】
+1. timeline 必须至少有 1 条，只要这批聊天存在剧情动作、对白、决定、地点/时间推进或关系变化。
+2. 每条 source 只能引用上方允许列表中的真实楼层；格式优先使用 #123、#123-#126、#123,#125。
+3. 禁止使用日期、摘要名、角色名或任何不在允许列表里的编号作为 source。
+4. event 只概括 source 对应的真实正文，不得使用 thinking、campus_gossip、故事考据、UpdateVariable 或其他辅助块作为剧情事实。
+5. 相邻多楼属于同一事件时合并成一条，source 合并对应楼层。
+6. time/date 无法确认可为 null；不要猜测。
+7. 只返回 JSON 对象 {"timeline":[...]}，不要解释，不要 Markdown。
+
+上一次校验失败原因（仅用于避免重复格式错误）：${String(reason||'').slice(0,800)}`;
+
+    let raw=null, parsed=null, firstErr=null;
+    try{
+        raw=await withSmmTimeout(
+            smmGenerateV093({systemPrompt:'你是剧情事实抽取器。严格服从 source 楼层约束，不进行文学创作。',prompt,jsonSchema:timelineOnlySchemaV0113(),responseLength:2200}),
+            SMM_GENERATE_TIMEOUT_MS,
+            `timeline source 修复 #${start}-#${endExclusive-1}`
+        );
+        parsed=parseJSON(raw);
+    }catch(e){
+        if(isSmmTimeout(e)) throw e;
+        firstErr=e;
+    }
+    if(!parsed){
+        try{
+            raw=await withSmmTimeout(
+                smmGenerateV093({systemPrompt:'你是剧情事实抽取器。只返回合法 JSON。',prompt:prompt+'\n再次强调：只返回合法 JSON，timeline 至少一条。',responseLength:2200}),
+                SMM_GENERATE_TIMEOUT_MS,
+                `timeline source 兼容修复 #${start}-#${endExclusive-1}`
+            );
+            parsed=parseJSON(raw);
+        }catch(e){
+            if(isSmmTimeout(e)) throw e;
+            throw new Error(`timeline 专用重试未获得合法 JSON：第一次 ${firstErr?.message||'无'}；第二次 ${e?.message||e}`);
+        }
+    }
+    if(!parsed || !Array.isArray(parsed.timeline)) throw new Error('timeline 专用重试未返回 timeline 数组');
+    normalizeTimelineSourcesV0113(parsed,start,endExclusive);
+    applyWorldStateMetadataFallbackV0112(parsed,start,endExclusive);
+    return parsed.timeline;
+}
+
 async function summarizeRange(start, end, options={}) {
     const c = C();
     const mem = M();
@@ -3905,16 +4061,42 @@ ${bad}`;
         validation = validateBatchCommitV0112(parsed, start, end);
     } catch (e) {
         if (e?.smmBatchCommitFailure) {
-            mem.audit = Array.isArray(mem.audit) ? mem.audit : [];
-            mem.audit.push({
-                at:new Date().toISOString(),
-                type:'batch_commit_rejected_v0112',
-                ...e.smmBatchCommitFailure
-            });
-            if (mem.audit.length > 50) mem.audit = mem.audit.slice(-50);
-            if (options?.save !== false) await saveMeta();
+            // v0.11.3: one dedicated, timeline-only retry before declaring the
+            // batch unusable. This isolates source formatting from the full
+            // memory delta and prevents repeated user retries of the same batch.
+            const firstFailure=cloneJSONV0112(e.smmBatchCommitFailure);
+            try {
+                const repairedTimeline=await retryTimelineOnlyV0113(start,end,e?.message||'');
+                parsed.timeline=repairedTimeline;
+                applyWorldStateMetadataFallbackV0112(parsed,start,end);
+                validation=validateBatchCommitV0112(parsed,start,end);
+                mem.audit = Array.isArray(mem.audit) ? mem.audit : [];
+                mem.audit.push({
+                    at:new Date().toISOString(),
+                    type:'batch_source_retry_recovered_v0113',
+                    range:[start,end-1],
+                    first_failure:firstFailure,
+                    recovered_timeline:validation.timeline_accepted,
+                    source_normalized:validation.source_normalized_v0113||0
+                });
+                if (mem.audit.length > 50) mem.audit = mem.audit.slice(-50);
+            } catch (retryErr) {
+                mem.audit = Array.isArray(mem.audit) ? mem.audit : [];
+                mem.audit.push({
+                    at:new Date().toISOString(),
+                    type:'batch_commit_rejected_v0113',
+                    ...firstFailure,
+                    retry_error:String(retryErr?.message||retryErr)
+                });
+                if (mem.audit.length > 50) mem.audit = mem.audit.slice(-50);
+                if (options?.save !== false) await saveMeta();
+                const err=new Error(`批次 #${start}-#${end-1} 首次 source 校验失败，专用重试仍失败：${retryErr?.message||retryErr}`);
+                err.smmBatchCommitFailureV0113={start,end:end-1,firstFailure,retry_error:String(retryErr?.message||retryErr)};
+                throw err;
+            }
+        } else {
+            throw e;
         }
-        throw e;
     }
 
     const beforeMerge = cloneJSONV0112(mem);
@@ -3933,6 +4115,39 @@ let BUSY = false;
 let HISTORY_RUNNING = false;
 let HISTORY_STOP_REQUESTED = false;
 let GAP_REPAIR_RUNNING_V0112 = false;
+
+async function summarizeGapRangeAdaptiveV0113(start,endExclusive,depth=0) {
+    try {
+        return await summarizeRange(start,endExclusive,{save:false});
+    } catch (e) {
+        const span=endExclusive-start;
+        const sourceFailure=!!(e?.smmBatchCommitFailureV0113 || e?.smmBatchCommitFailure ||
+            /timeline|source|可追溯|校验失败/i.test(String(e?.message||'')));
+        if (!sourceFailure || span<=2 || depth>=5) throw e;
+
+        // Split on message boundaries. Prefer an even boundary so a user/assistant
+        // pair is less likely to be torn apart, but never leave an empty half.
+        let mid=start+Math.floor(span/2);
+        if ((mid-start)%2!==0 && mid+1<endExclusive) mid++;
+        if (mid<=start || mid>=endExclusive) mid=start+Math.floor(span/2);
+        if (mid<=start || mid>=endExclusive) throw e;
+
+        const mem=M();
+        mem.audit=Array.isArray(mem.audit)?mem.audit:[];
+        mem.audit.push({
+            at:new Date().toISOString(),
+            type:'gap_batch_split_v0113',
+            range:[start,endExclusive-1],
+            split:[[start,mid-1],[mid,endExclusive-1]],
+            reason:String(e?.message||e).slice(0,1000)
+        });
+        if(mem.audit.length>50) mem.audit=mem.audit.slice(-50);
+
+        await summarizeGapRangeAdaptiveV0113(start,mid,depth+1);
+        await summarizeGapRangeAdaptiveV0113(mid,endExclusive,depth+1);
+        return {split:true,start,endExclusive};
+    }
+}
 
 async function repairTimelineGapV0112() {
     if (BUSY || HISTORY_RUNNING || GAP_REPAIR_RUNNING_V0112) {
@@ -3993,7 +4208,7 @@ async function repairTimelineGapV0112() {
             const endExclusive=Math.min(endInclusive+1,pos+batch);
             const status=document.getElementById('smm112_gap_status');
             if(status) status.textContent=`正在补总结 #${pos}-#${endExclusive-1}…`;
-            await summarizeRange(pos,endExclusive,{save:false});
+            await summarizeGapRangeAdaptiveV0113(pos,endExclusive,0);
             completedTo=endExclusive-1;
             pos=endExclusive;
             await new Promise(r=>setTimeout(r,250));
@@ -4202,7 +4417,7 @@ function stat() {
 function panelHTML() {
     return `<div id="${PANEL_ID}" class="smm2-hidden">
       <div class="smm2-card">
-        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.2</span></div><button id="smm2_close">×</button></div>
+        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.3</span></div><button id="smm2_close">×</button></div>
         <div id="smm2_stats" class="smm2-stats"></div>
         <div class="smm2-grid">
           <button id="smm2_new">总结新增</button>
@@ -6253,7 +6468,7 @@ function installNativeExtensionEntry() {
 
         wrap.innerHTML = `
           <div class="inline-drawer-toggle inline-drawer-header">
-            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.2</span></div>
+            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.3</span></div>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
           </div>
           <div class="inline-drawer-content">
@@ -6481,7 +6696,7 @@ function initializeExtension() {
     try {
         installUI();
         refresh();
-        console.log('[StoryMemory] v0.11.2 loaded successfully');
+        console.log('[StoryMemory] v0.11.3 loaded successfully');
     } catch (e) {
         console.error('[StoryMemory] UI initialization failed', e);
     }
