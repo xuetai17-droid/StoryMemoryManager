@@ -1,26 +1,26 @@
-# v0.11.10 Release Audit
+# v0.11.11 Release Audit
 
-## 静态检查
+Baseline: user-uploaded v0.11.10 CODE GitHub package.
 
-- `node --check index.js`: PASS
-- `manifest.json` version: 0.11.10
-- UI/version strings: 0.11.10
+Checks performed:
+- `node --check index.js`: PASS.
+- `manifest.json` parses and reports `0.11.11`: PASS.
+- UI badges/startup log/version header all report `v0.11.11`: PASS.
+- Hybrid triage code present: preset plot -> reliable; strong factual fallback -> reliable; ambiguous -> needs-AI queue: PASS (static branch audit).
+- Empty/placeholder timeline creation removed from v0.11.11 path: PASS (static branch audit).
+- Coverage and visible timeline facts separated via `local_code_coverage_v01111`: PASS.
+- Needs-AI ranges stored only in audit metadata, not timeline: PASS.
+- Gap detector recognizes local code coverage ranges: PASS.
+- Prior code-repair detector now recognizes v0.11.10 and v0.11.11 in addition to v0.11.4-v0.11.9: PASS.
+- Existing v0.11.10 absolute-date weekday normalization and preset `<abstract><plot>` parser retained: PASS.
+- No API call added to the local hybrid path: PASS (static call-path audit).
 
-## 关键回归测试
+Behavioral contract:
+- Reliable `<abstract><plot>` is preserved directly.
+- Conservative fallback is emitted only when existing strong-action filters produce a non-empty factual event.
+- Ambiguous rows produce no visible timeline event and are queued for optional later AI processing.
+- Code coverage prevents intentionally deferred rows from being mistaken for a new silent-drop gap.
 
-PASS:
-
-- `<abstract><plot>` 直接保留，不泄漏用户碎片对白、Analysis、JSONPatch 或好感度。
-- 2025-09-22 + 错误“周五”显示 -> 周一。
-- 2025-09-23 + 错误“周五”显示 -> 周二。
-- 陈旧 world-state 从 2025-09-22 无剧情证据跳到 2025-09-26 -> 拒绝，维持 2025-09-22。
-- “四天后” + 2025-09-26 -> 允许多日推进。
-- 2025-09-22 23:40 -> 同日元数据 03:22 -> 自动校准为 2025-09-23 周二 03:22。
-- 2025-09-23 03:22 -> 20:14 -> 保持 2025-09-23 周二。
-- “第二天清晨”允许 +1 日。
-- 否定语义“没有数日后提示”不会触发多日推进。
-- 无法安全压缩的楼层生成内部 coverage-only 节点；不进入 recent_timeline 注入，也不在按日时间线 UI 中显示。
-
-## 未替代的真实环境验证
-
-无法在离线容器中替代用户的真实 SillyTavern 聊天数据执行一次完整 UI 重建。因此更新后仍应先保持自动注入/隐藏关闭，完成一次 0 API 重建和时间校准后人工检查目标区段。
+Limitations:
+- Pure JavaScript still does not have LLM-level semantic understanding. `needs_ai` is intentional, not a failure.
+- Runtime integration with the user's exact SillyTavern chat data must be verified in SillyTavern after installation.
