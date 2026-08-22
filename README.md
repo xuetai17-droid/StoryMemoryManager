@@ -1,12 +1,13 @@
-# Story Memory Manager v0.11.13 HYBRID
+# Story Memory Manager v0.11.15 HYBRID
 
-For large historical gaps, the recommended workflow is now:
+本版用于清理现有长期记忆中的实体污染，不需要重新总结、不调用 API。
 
-1. Run **代码压缩重建这个范围（0 API）** first.
-2. Review the reported `可靠 X 楼 / 需要 AI X 楼` counts.
-3. If semantic recovery is required, use **AI 仅补 needsAI（省 API）**.
-4. Do not use **API 补总结整个范围（高消耗）** unless you intentionally want to resend the whole interval.
+更新后进入：`更多工具 -> 历史重建 -> 修复全部实体 / 关系去重 / 质量审计（0 API）`。
 
-The selective AI action only submits rows that the 0-API triage explicitly marked `needsAI`. Reliable rows are kept locally and are not billed again. Successful AI batches are committed incrementally, so an interruption does not discard already-paid work; rerunning resumes from unresolved needsAI rows.
+重点修复：
+- `你 / 用户 / 主角 / {{user}}` 被误建为独立人物；
+- `科尔` 与 `科尔·布雷迪` 等唯一短名/全名重复；
+- 同一人物对因别名产生重复 relationships；
+- 这些别名在 timeline、facts、events、anchors、open_loops 等结构中的残留。
 
-During historical repair, current story state and the live processing cursor remain protected.
+安全原则：只做有确定证据的别名合并。短名只有在现有 characters 中唯一对应一个 `名·姓` 全名时才会自动映射；不会按“名字看起来像”随意合并。明显群体不会作为单个人物，但不会把群体关系凭空拆成多条个人关系。
