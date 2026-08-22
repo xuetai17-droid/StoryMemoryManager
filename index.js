@@ -1,4 +1,4 @@
-// Story Memory Manager v0.11.5
+// Story Memory Manager v0.11.6
 // canonical-input purification / character-core preservation / story-arc continuity
 // does not rewrite original chat JSONL
 
@@ -4151,7 +4151,7 @@ async function summarizeGapRangeAdaptiveV0113(start,endExclusive,depth=0) {
 
 
 // =========================================================
-// v0.11.5 structured local code-only gap backfill / rebuild (0 API)
+// v0.11.6 structured local code-only gap backfill / rebuild (0 API)
 // =========================================================
 
 function plainTextLocalV0114(text) {
@@ -4665,6 +4665,214 @@ function makeLocalTimelineNodesV0115(start,endInclusive,mem=M()) {
     return finalizeLocalNodesV0115(nodes);
 }
 
+
+
+// v0.11.6: deterministic local fact compression.
+// The goal is not to infer new facts, only to shorten already-present prose into
+// compact timeline text suitable for long-term memory.
+function stripQuotedDialogueLocalV0116(text) {
+    return String(text||'')
+        .replace(/“[^”]{0,500}”/g,' ')
+        .replace(/「[^」]{0,500}」/g,' ')
+        .replace(/『[^』]{0,500}』/g,' ')
+        .replace(/\"[^\"\n]{0,500}\"/g,' ')
+        .replace(/'{1}[^'\n]{0,300}'{1}/g,' ')
+        .replace(/[!！?？]{2,}/g,'。')
+        .replace(/[…]{2,}/g,'。')
+        .replace(/\s+/g,' ')
+        .trim();
+}
+
+function normalizePerspectiveLocalV0116(text,userName='') {
+    let s=String(text||'').trim();
+    const u=String(userName||'').trim();
+    if(!u) return s;
+    const esc=u.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+    const speakerRe=new RegExp(esc+'\\s*[:：]');
+    // Preset abstracts often switch into first/second person after naming the user.
+    // Only normalize POV when the user's name is explicitly present as a speaker anchor.
+    if(speakerRe.test(s)){
+        s=s.replace(new RegExp(esc+'\\s*[:：]\\s*','g'),u+' ');
+        s=s.replace(/你的/g,u+'的').replace(/你/g,u).replace(/我的/g,u+'的').replace(/我/g,u);
+    }
+    return s;
+}
+
+function compressEventLocalV0116(text,userName='',maxLen=190) {
+    let src=normalizePerspectiveLocalV0116(stripQuotedDialogueLocalV0116(text),userName)
+        .replace(/\s+/g,' ')
+        .replace(/[：:；;，,\s]+$/g,'')
+        .trim();
+    if(!src) return '';
+
+    const micro=/乳头|阴道|小穴|肉棒|龟头|精液|潮吹|自慰|抽插|后庭|子宫|阴蒂|体液|穴口|插入|震动棒|振动棒|玩具.*体内|高潮|淫水|红肿/i;
+    const action=/被.{0,18}(?:按|压|推|拖|拽|带|抱|袭击|伤害|威胁|控制|困住|救下|救出)|赶到|抵达|逼近|踹开|闯入|救下|救出|带离|带回|送往|联系|检查|治疗|固定|警告|威胁|决定|确认|约定|答应|拒绝|提出|要求|通知|召集|追赶|逃离|阻止|保护|报警|昏厥|昏迷|恢复|醒来|离开|返回|进入|前往|发现|遭到|遭受|受伤/;
+    const weak=/^(?:[^，。；]{0,10})?(?:哭|哭着|摇头|仰头|呻吟|尖叫|喘息|看着|望着|愣住|发抖|颤抖)/;
+    const location=/包间|房间|走廊|宅邸|医院|诊所|餐厅|教室|校园|车内|车上|图书馆|食堂|体育馆|水上中心|卧室|客厅|地下室/;
+
+    const clauses=src.split(/[。！？!?；;，,]+/)
+        .map(x=>x.trim().replace(/^[：:\s]+|[：:\s]+$/g,''))
+        .filter(x=>x.length>=7 && x.length<=180)
+        .filter(x=>!micro.test(x));
+
+    const scored=clauses.map((x,i)=>{
+        let score=0;
+        if(action.test(x)) score+=7;
+        if(location.test(x)) score+=1.5;
+        if(/[\u4e00-\u9fa5A-Za-z·]{2,10}(?:被|将|带|让|赶到|抵达|联系|检查|治疗|警告|救|离开|返回|进入)/.test(x)) score+=2;
+        if(x.length>=12&&x.length<=75) score+=2;
+        if(weak.test(x)&&!action.test(x)) score-=5;
+        if(/情趣|杀意|毫不掩饰|极度|疯狂|粗暴/.test(x)) score-=0.5;
+        return {x,i,score};
+    }).filter(x=>x.score>=3)
+      .sort((a,b)=>b.score-a.score||a.i-b.i)
+      .slice(0,4)
+      .sort((a,b)=>a.i-b.i);
+
+    let out=scored.map(x=>x.x).join('；').trim();
+    if(userName){
+        const esc=String(userName).replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+        out=out.replace(new RegExp('(?:'+esc+')\\s+(?:'+esc+')','g'),String(userName));
+    }
+    if(!out){
+        // Conservative fallback: use the first non-anatomical factual sentence,
+        // still capped aggressively. No invented bridge text is added.
+        const fallback=src.split(/(?<=[。！？!?；;])/).map(x=>x.trim()).find(x=>x.length>=10&&!micro.test(x))||src;
+        out=fallback;
+    }
+    out=out.replace(/\s+/g,' ').replace(/；{2,}/g,'；').trim();
+    if(out && !/[。！？!?]$/.test(out)) out+='。';
+    if(out.length>maxLen){
+        let cut=out.slice(0,maxLen);
+        const stop=Math.max(cut.lastIndexOf('。'),cut.lastIndexOf('；'));
+        out=(stop>=Math.floor(maxLen*0.55)?cut.slice(0,stop+1):cut).trim();
+        if(out&&!/[。！？!?]$/.test(out)) out+='。';
+    }
+    return out;
+}
+
+function sourceTemporalMetaLocalV0116(indexes,mem=M()) {
+    const chat=C().chat||[];
+    const sorted=[...new Set(indexes)].sort((a,b)=>b-a);
+    const out={date:null,time:null,location:null,kind:null,reason:null};
+
+    // 1) Exact UpdateVariable world-state metadata from the same source.
+    for(const i of sorted){
+        const meta=extractWorldStateMetadataV0112(chat[i]);
+        if(!meta) continue;
+        if(!out.date&&meta.date) out.date=meta.date;
+        if(!out.time&&meta.time) out.time=meta.time;
+        if(!out.location&&meta.location) out.location=meta.location;
+        if(out.time){
+            out.kind='world_meta';
+            out.reason=`同 source #${i} 的 /世界/当前时间`;
+            break;
+        }
+    }
+
+    // 2) Existing preset summaries such as <abstract> with structured time.
+    if(!out.time || !out.date || !out.location){
+        for(const i of sorted){
+            const m=chat[i];
+            if(!m || m.is_user) continue;
+            const prev=(i>0&&chat[i-1]?.is_user)?chat[i-1]:null;
+            const recs=structuredSummaryRecordsLocalV0115(m,prev,mem);
+            if(!recs.length) continue;
+            const rec=recs[recs.length-1]; // source end-state
+            if(!out.date&&rec.date) out.date=rec.date;
+            if(!out.time&&rec.time){ out.time=rec.time; out.kind='preset_summary'; out.reason=`同 source #${i} 的 <${rec.tag}> 时间`; }
+            if(!out.location&&rec.location) out.location=rec.location;
+            if(out.time&&out.date&&out.location) break;
+        }
+    }
+
+    // 3) Raw same-source clock/date fallback; never consult unrelated later rows.
+    if(!out.time){
+        const t=localTimeSameMessagesV0114(sorted);
+        if(t){ out.time=t; out.kind='raw_source'; out.reason='同 source 原文中的时间'; }
+    }
+    if(!out.date){
+        const d=explicitDateSameMessagesV0114(sorted)||directCanonicalDateCueV0114(sorted);
+        if(d) out.date=d;
+    }
+    if(!out.location){
+        const l=localLocationSameMessagesV0114(sorted);
+        if(l) out.location=l;
+    }
+    return out;
+}
+
+function repairExistingTimelineTemporalV0116(mem,start=0,endInclusive=null) {
+    const rows=Array.isArray(mem?.timeline)?mem.timeline:[];
+    const chat=C().chat||[];
+    const maxEnd=Number.isInteger(endInclusive)?endInclusive:Math.max(0,chat.length-1);
+    let timeFixed=0,dateFixed=0,locationFixed=0,scanned=0;
+    for(const e of rows){
+        const all=[...sourceIndexes(e?.source)].sort((a,b)=>a-b);
+        const idx=all.filter(i=>i>=start&&i<=maxEnd);
+        if(!idx.length) continue;
+        scanned++;
+        const needTime=isMissingStoryValueV0112(e?.time)||isUnresolvedStoryTimeV0112(e?.time);
+        const needDate=isMissingStoryValueV0112(e?.date);
+        const needLocation=isMissingStoryValueV0112(e?.location);
+        if(!needTime&&!needDate&&!needLocation) continue;
+        const meta=sourceTemporalMetaLocalV0116(idx,mem);
+        if(needDate&&meta.date){ e.date=meta.date; dateFixed++; }
+        if(needTime&&meta.time){
+            e.time=meta.time; timeFixed++;
+            if(meta.kind==='world_meta'){
+                e.time_evidence='structured';
+                e.time_evidence_label='变量状态时间';
+            }else if(meta.kind==='preset_summary'){
+                e.time_evidence='structured';
+                e.time_evidence_label='预设摘要时间';
+            }else{
+                const te=classifySourceTimeEvidence(e);
+                e.time_evidence=te.level; e.time_evidence_label=te.label;
+            }
+            e.time_evidence_reason=meta.reason||'同 source 时间修复';
+        }
+        if(needLocation&&meta.location){ e.location=meta.location; locationFixed++; }
+    }
+    return {scanned,timeFixed,dateFixed,locationFixed,start,endInclusive:maxEnd};
+}
+
+
+function syncCurrentStoryStateFromLatestMetaV0116(mem,endInclusive) {
+    const end=Math.max(0,Number(endInclusive)||0);
+    const latest=latestWorldStateMetaInRangeV0112(0,end+1);
+    if(!latest) return {found:false,index:null,date:false,time:false,location:false};
+    let date=false,time=false,location=false;
+    if(latest.date){
+        const cur=normalizeDateInput(mem?.current_story_date)?.iso||null;
+        const next=normalizeDateInput(latest.date)?.iso||null;
+        if(next && (!cur || dateDiffDaysLocalV0114(cur,next)>=0)){
+            if(mem.current_story_date!==next){ mem.current_story_date=next; date=true; }
+        }
+    }
+    if(latest.time && String(mem?.current_story_time||'')!==String(latest.time)){
+        mem.current_story_time=latest.time; time=true;
+    }
+    if(latest.location && mem?.current_scene && typeof mem.current_scene==='object' &&
+       String(mem.current_scene.location||'')!==String(latest.location)){
+        mem.current_scene.location=latest.location; location=true;
+    }
+    return {found:true,index:latest.index,date,time,location,meta:{date:latest.date,time:latest.time,location:latest.location}};
+}
+
+function makeLocalTimelineNodesV0116(start,endInclusive,mem=M()) {
+    const nodes=makeLocalTimelineNodesV0115(start,endInclusive,mem);
+    const chat=C().chat||[];
+    for(const node of nodes){
+        const idx=[...sourceIndexes(node?.source)].sort((a,b)=>a-b);
+        let userName='';
+        for(const i of idx){ if(chat[i]?.is_user){ userName=String(chat[i]?.name||'').trim(); if(userName) break; } }
+        const compact=compressEventLocalV0116(node.event,userName,190);
+        if(compact) node.event=compact;
+    }
+    return nodes;
+}
+
 function timelineEntryFullyInsideRangeV0115(e,start,endInclusive){
     const idx=sourceIndexes(e?.source);
     return idx.length>0 && idx.every(i=>i>=start && i<=endInclusive);
@@ -4672,7 +4880,7 @@ function timelineEntryFullyInsideRangeV0115(e,start,endInclusive){
 
 function priorCodeRepairAuditV0115(mem,start,endInclusive){
     return (mem?.audit||[]).some(a=>{
-        if(!/^timeline_gap_code_backfill_v011[45]$/.test(String(a?.type||''))) return false;
+        if(!/^timeline_gap_code_backfill_v011[456]$/.test(String(a?.type||''))) return false;
         const r=Array.isArray(a?.range)?a.range:[];
         const x=Number(r[0]), y=Number(r[1]);
         return Number.isFinite(x)&&Number.isFinite(y)&&x<=endInclusive&&y>=start;
@@ -4684,7 +4892,7 @@ function latestCodeRepairRangeV0115(mem=M()){
     const arr=Array.isArray(mem?.audit)?mem.audit:[];
     for(let i=arr.length-1;i>=0;i--){
         const a=arr[i];
-        if(!/^timeline_gap_code_backfill_v011[45]$/.test(String(a?.type||''))) continue;
+        if(!/^timeline_gap_code_backfill_v011[456]$/.test(String(a?.type||''))) continue;
         const r=Array.isArray(a?.range)?a.range:[];
         const x=Number(r[0]), y=Number(r[1]);
         if(Number.isInteger(x)&&Number.isInteger(y)&&x>=0&&y>=x) return {start:x,end:y,type:a.type};
@@ -4718,21 +4926,21 @@ async function repairTimelineGapLocalV0115() {
         ? '\n检测到这个范围之前做过 0 API 代码补档：本次会先移除“完全位于该范围内”的旧代码补档 timeline，再按结构化规则重建。'
         : '\n本次会向该范围补入 timeline；不会修改原聊天。';
     if(!confirm(
-        `将以 v0.11.5 本地代码处理 #${start}-#${endInclusive}（0 API）。\n`+
-        '会把 <abstract>/<meow_FM> 中类似“049 日期 | 时间 地点 事件”的多条记录拆成独立 timeline。\n'+
-        '没有结构化摘要的楼层才使用正文抽取式压缩。'+replaceMsg+'\n\n'+
+        `将以 v0.11.6 本地代码处理 #${start}-#${endInclusive}（0 API）。\n`+
+        '会把 <abstract>/<meow_FM> 的多条记录拆成独立 timeline，并把事件压缩为约 60-190 字。\n'+
+        '没有结构化摘要的楼层使用原正文事实性抽取；完成后还会修复当前游标之前已有 timeline 的“未明确时间”。'+replaceMsg+'\n\n'+
         '人物/关系/待办/当前游标不会被本地代码重写。继续吗？'
     )) return;
 
     const c=C();
     const snapshot=cloneJSONV0112(M());
-    const backupKey=META_KEY+'_backup_code_gap_v0115_'+Date.now();
+    const backupKey=META_KEY+'_backup_code_gap_v0116_'+Date.now();
     c.chatMetadata[backupKey]=cloneJSONV0112(snapshot);
     GAP_REPAIR_RUNNING_V0112=true; BUSY=true;
     try{
         const status=document.getElementById('smm112_gap_status');
-        if(status) status.textContent=`v0.11.5 本地代码正在处理 #${start}-#${endInclusive}（0 API）…`;
-        const nodes=makeLocalTimelineNodesV0115(start,endInclusive,snapshot);
+        if(status) status.textContent=`v0.11.6 本地代码正在处理 #${start}-#${endInclusive}（0 API）…`;
+        const nodes=makeLocalTimelineNodesV0116(start,endInclusive,snapshot);
         const coverage=coverageStatsLocalV0114(nodes,start,endInclusive);
         if(!nodes.length) throw new Error('本地代码没有生成任何 timeline 节点。');
         if(coverage.missing.length){
@@ -4766,15 +4974,30 @@ async function repairTimelineGapLocalV0115() {
         target.audit=Array.isArray(target.audit)?target.audit:[];
         target.audit.push({
             at:new Date().toISOString(),
-            type:'timeline_gap_code_backfill_v0115',
+            type:'timeline_gap_code_backfill_v0116',
             range:[start,endInclusive],
             api_calls:0,
             structured_parser:true,
+            local_fact_compression:true,
             replaced_previous_code_nodes:removed,
             nodes_generated:nodes.length,
             nodes_added:(target.timeline||[]).length-before,
             coverage:`${coverage.covered}/${coverage.total}`,
             preserved_cursor:snapshot.last_processed_index
+        });
+        // v0.11.6: after rebuilding the gap, also repair unresolved time/date on
+        // already-existing later timeline nodes using only their own source messages.
+        // This is what fixes old #1623+ rows that remained “未明确” even after the gap itself was rebuilt.
+        const repairEnd=Math.min(chat.length-1,Math.max(endInclusive,Number(snapshot.last_processed_index)||endInclusive));
+        const temporalRepair=repairExistingTimelineTemporalV0116(target,start,repairEnd);
+        const currentStateSync=syncCurrentStoryStateFromLatestMetaV0116(target,repairEnd);
+        target.audit.push({
+            at:new Date().toISOString(),
+            type:'timeline_time_repair_v0116',
+            range:[start,repairEnd],
+            api_calls:0,
+            ...temporalRepair,
+            current_state_sync:currentStateSync
         });
         if(target.audit.length>50) target.audit=target.audit.slice(-50);
         await saveMeta();
@@ -4786,11 +5009,11 @@ async function repairTimelineGapLocalV0115() {
         }
         const remaining=timelineCoverageGapsV0112(target);
         if(status) status.textContent=remaining.length
-            ? `v0.11.5 代码处理完成，但仍检测到大段缺口：#${remaining[0].start}-#${remaining[0].end}`
-            : `v0.11.5 代码处理完成：覆盖 ${coverage.covered}/${coverage.total} 楼，生成 ${nodes.length} 个 timeline 节点${removed?`，替换旧代码节点 ${removed} 条`:''}。`;
-        toast(`0 API 结构化补档完成：#${start}-#${endInclusive}，生成 ${nodes.length} 条 timeline${removed?`，替换旧结果 ${removed} 条`:''}。`,'success');
+            ? `v0.11.6 代码处理完成，但仍检测到大段缺口：#${remaining[0].start}-#${remaining[0].end}；另修复未明确时间 ${temporalRepair.timeFixed} 条${currentStateSync.time?`，当前剧情时间已同步`:''}。`
+            : `v0.11.6 代码处理完成：覆盖 ${coverage.covered}/${coverage.total} 楼，生成 ${nodes.length} 个 timeline 节点${removed?`，替换旧代码节点 ${removed} 条`:''}；另修复未明确时间 ${temporalRepair.timeFixed} 条${currentStateSync.time?`，当前剧情时间已同步`:''}。`;
+        toast(`0 API 重建完成：#${start}-#${endInclusive}，生成 ${nodes.length} 条 timeline${removed?`，替换旧结果 ${removed} 条`:''}；时间修复 ${temporalRepair.timeFixed} 条${currentStateSync.time?`，当前剧情时间已同步`:''}。`,'success');
     }catch(e){
-        console.error('[StoryMemory] v0.11.5 local code gap repair failed',e);
+        console.error('[StoryMemory] v0.11.6 local code gap repair failed',e);
         c.chatMetadata[META_KEY]=snapshot;
         await saveMeta();
         const status=document.getElementById('smm112_gap_status');
@@ -4800,6 +5023,32 @@ async function repairTimelineGapLocalV0115() {
         GAP_REPAIR_RUNNING_V0112=false; BUSY=false;
         refresh(); refreshNative();
     }
+}
+
+
+async function repairTimelineTimesLocalV0116() {
+    if (BUSY || HISTORY_RUNNING || GAP_REPAIR_RUNNING_V0112) return toast('当前已有总结/重建任务在运行。','warning');
+    const chat=C().chat||[];
+    const mem=M();
+    const end=Math.min(chat.length-1,Math.max(0,Number(mem?.last_processed_index)||chat.length-1));
+    if(!confirm(`将以 0 API 扫描当前时间线 #0-#${end}，只填补“未明确/无法验证”的日期、时间和地点；已有明确时间不会被覆盖。继续吗？`)) return;
+    BUSY=true;
+    const snapshot=cloneJSONV0112(mem);
+    try{
+        const r=repairExistingTimelineTemporalV0116(mem,0,end);
+        const currentStateSync=syncCurrentStoryStateFromLatestMetaV0116(mem,end);
+        mem.audit=Array.isArray(mem.audit)?mem.audit:[];
+        mem.audit.push({at:new Date().toISOString(),type:'timeline_time_repair_v0116',range:[0,end],api_calls:0,...r,current_state_sync:currentStateSync});
+        if(mem.audit.length>50) mem.audit=mem.audit.slice(-50);
+        await saveMeta(); refresh(); refreshNative();
+        const box=document.getElementById('smm2_native_memory_box');
+        if(box?.dataset.open==='1'){ box.innerHTML=memoryReadableHTML(); if(M().schema===SMM4_SCHEMA) bindHistoryBrowserV4(); else bindHistoryBrowserLegacy(); }
+        toast(`0 API 时间修复完成：时间 ${r.timeFixed} 条，日期 ${r.dateFixed} 条，地点 ${r.locationFixed} 条${currentStateSync.time?'；当前剧情时间已同步':''}。`,'success');
+    }catch(e){
+        console.error('[StoryMemory] v0.11.6 timeline time repair failed',e);
+        C().chatMetadata[META_KEY]=snapshot; await saveMeta();
+        toast(`时间修复失败，原记忆已恢复：${e?.message||e}`,'error');
+    }finally{ BUSY=false; refresh(); refreshNative(); }
 }
 
 async function repairTimelineGapLocalV0114() {
@@ -5151,7 +5400,7 @@ function stat() {
 function panelHTML() {
     return `<div id="${PANEL_ID}" class="smm2-hidden">
       <div class="smm2-card">
-        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.5</span></div><button id="smm2_close">×</button></div>
+        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.6</span></div><button id="smm2_close">×</button></div>
         <div id="smm2_stats" class="smm2-stats"></div>
         <div class="smm2-grid">
           <button id="smm2_new">总结新增</button>
@@ -6530,9 +6779,10 @@ function nativeManagerHTML() {
                     <div class="smm2-fix-arrow">→</div>
                     <label><span>结束 #</span><input id="smm112_gap_to" type="number" min="0" step="1" placeholder="1622"></label>
                   </div>
-                  <button id="smm114_gap_code_repair" class="menu_button smm2-primary-tool">代码补档 / 重建这个范围（0 API）</button>
+                  <button id="smm114_gap_code_repair" class="menu_button smm2-primary-tool">代码压缩重建这个范围（0 API）</button>
+                  <button id="smm116_time_repair" class="menu_button">仅修复时间线“未明确时间”（0 API）</button>
                   <button id="smm112_gap_repair" class="menu_button">API 补总结这个范围</button>
-                  <div class="smm2-note">0 API：优先把 &lt;abstract&gt;/&lt;meow_FM&gt; 的编号记录拆成独立 timeline；若本范围曾用代码补档，会先替换旧代码补档结果。不会更新人物/关系/待办。</div>
+                  <div class="smm2-note">0 API：结构化摘要会拆分并压缩为短事件；没有摘要时从原正文做事实性抽取。重建后还会用每条 timeline 自己的 source 修复后续“未明确时间”，不会更新人物/关系/待办。</div>
                   <div id="smm112_gap_status" class="smm2-note"></div>
                 </div>
               </details>
@@ -6889,6 +7139,8 @@ function bindNativeManager() {
     q('smm51_native_resume').onclick = resumeSafeHistoryRebuild;
     const gapCodeRepairBtnV0114=q('smm114_gap_code_repair');
     if(gapCodeRepairBtnV0114) gapCodeRepairBtnV0114.onclick=repairTimelineGapLocalV0115;
+    const timeRepairBtnV0116=q('smm116_time_repair');
+    if(timeRepairBtnV0116) timeRepairBtnV0116.onclick=repairTimelineTimesLocalV0116;
     const gapRepairBtnV0112=q('smm112_gap_repair');
     if(gapRepairBtnV0112) gapRepairBtnV0112.onclick=repairTimelineGapV0112;
     const cleanOrphansBtn=q('smm84_clean_orphans');
@@ -7188,7 +7440,7 @@ function refreshNative() {
         if(priorRangeV0115){
             if(fromV0112 && !String(fromV0112.value||'').trim()) fromV0112.value=priorRangeV0115.start;
             if(toV0112 && !String(toV0112.value||'').trim()) toV0112.value=priorRangeV0115.end;
-            if(gapStatusV0112) gapStatusV0112.textContent=`未检测到当前大段断档；已填入上一次 0 API 代码补档范围 #${priorRangeV0115.start}-#${priorRangeV0115.end}，可直接用 v0.11.5 结构化重建。`;
+            if(gapStatusV0112) gapStatusV0112.textContent=`未检测到当前大段断档；已填入上一次 0 API 代码补档范围 #${priorRangeV0115.start}-#${priorRangeV0115.end}，可直接用 v0.11.6 结构化重建。`;
         }else if(gapStatusV0112) {
             gapStatusV0112.textContent='未检测到超过保护阈值的大段时间线断档。';
         }
@@ -7213,7 +7465,7 @@ function installNativeExtensionEntry() {
 
         wrap.innerHTML = `
           <div class="inline-drawer-toggle inline-drawer-header">
-            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.5</span></div>
+            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.6</span></div>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
           </div>
           <div class="inline-drawer-content">
@@ -7441,7 +7693,7 @@ function initializeExtension() {
     try {
         installUI();
         refresh();
-        console.log('[StoryMemory] v0.11.5 loaded successfully');
+        console.log('[StoryMemory] v0.11.6 loaded successfully');
     } catch (e) {
         console.error('[StoryMemory] UI initialization failed', e);
     }
