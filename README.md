@@ -1,31 +1,20 @@
-# Story Memory Manager v0.11.7
+# Story Memory Manager v0.11.9 CODE
 
-本版本重点修复长篇聊天在 0 API 补档后的「日期分组与时间不一致」问题，并继续改进本地摘要质量。
+This release is intended for zero-extra-API gap repair when the active RP preset already emits structured summaries such as PLUTO `<abstract>`.
 
-## 推荐升级后的操作
+Recommended recovery flow:
+1. Keep auto summary OFF.
+2. Keep memory injection OFF.
+3. Keep automatic hiding OFF.
+4. Open `更多工具 → 历史重建 → 补总结缺失楼层`.
+5. Rebuild the missing range with `代码压缩重建这个范围（0 API）`.
+6. Review the timeline before re-enabling injection/hiding.
 
-在确认界面显示 `v0.11.7` 后：
+### v0.11.9 behavior
+- PLUTO XML abstract: uses `<plot>` directly as timeline text.
+- `<time>`: parsed into absolute date and time/range.
+- `<scene>`: parsed as location.
+- No re-summarization API call is made.
+- If an old message has no structured summary, only a conservative local fallback is used.
 
-1. 自动增量总结：关闭。
-2. 生成时注入剧情记忆：关闭。
-3. 总结后自动隐藏：关闭。
-4. 进入 `更多工具 → 历史重建 → 补总结缺失楼层`。
-5. 对需要重建的范围执行「代码压缩重建这个范围（0 API）」。
-6. 重建完成后，如历史 timeline 仍存在旧日期组或星期冲突，再执行「校准时间线日期/星期/时分（0 API）」。
-7. 检查时间线正确后，再决定是否恢复自动功能。
-
-## v0.11.7 的时间规则
-
-同一 source 的时间证据按以下原则校准：
-
-- 绝对日期优先用于机器时间轴。
-- `/世界/当前日期 + /世界/当前时间` 会作为同楼结束状态一起考虑。
-- `<abstract>` 中明确的 `YYYY-MM-DD + 周X + HH:MM` 可作为该摘要记录的结构化时间。
-- 日期可靠、星期冲突：保留日期，修正星期。
-- 日期只是继承值、星期正好指向下一天：最多向前推进 1 天。
-- 正常顺序剧情不得被旧 source 拉回更早日期。
-- 同日弱来源钟点倒退会被拒绝；深夜到凌晨可按跨日处理。
-
-## 0 API 的边界
-
-本地代码只做可追溯的 timeline 压缩和时间校准，不调用总结模型，也不会自行推理人物关系或补写未发生的剧情。对于需要高质量人物锚点、关系和主线重建的内容，仍建议以后在 API 额度允许时低频处理。
+Important limitation: code mode cannot semantically recreate a high-quality summary for arbitrary old prose that contains no structured summary. Such rows are intentionally kept conservative rather than hallucinated.

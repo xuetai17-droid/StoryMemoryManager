@@ -1,61 +1,59 @@
-# Story Memory Manager v0.11.7 Release Audit
+# Story Memory Manager v0.11.9 CODE — Release Audit
 
 ## Scope
+This release fixes the zero-extra-API timeline rebuild path after v0.11.8 produced dialogue-fragment entries such as a single short user quote instead of a plot summary.
 
-This release is based on the v0.11.6 CODE package and only extends the local/0-API gap-rebuild and temporal-calibration path. Existing API summary logic, source firewall, memory schema, original-chat protection, and UI architecture were not refactored.
+## Root cause confirmed
+PLUTO 2.0 emits structured XML summaries:
 
-## Fixes verified
+`<abstract><serial>…</serial><time>…</time><scene>…</scene><plot>…</plot></abstract>`
 
-1. **Unified date + weekday + clock calibration**
-   - `event.date` and `event.time` are calibrated together.
-   - Strong same-source absolute dates from `/世界/当前日期` or structured preset summaries are allowed to move the source axis forward but never backward.
-   - If a reliable date conflicts with `周X/星期X`, the date wins and the weekday token is rewritten to match the real calendar day.
-   - If the date is only inherited/weak and the weekday is exactly the next day, the date may advance by one day.
-   - Weak same-day raw clocks that move backward are rejected; deep-night to early-morning remains a permitted rollover.
+The older code-mode parser flattened the inside of `<abstract>` before reading the child tags. As a result, the XML fields were lost and the rebuild often fell back to heuristic raw-prose extraction. That fallback could select short dialogue or local body-detail sentences as the timeline event.
 
-2. **Existing timeline repair now fixes wrong date groups, not only missing time**
-   - v0.11.7 repairs existing rows whose date grouping is inconsistent with same-source world-state metadata.
-   - The repair result reports `timeFixed`, `dateFixed`, `weekdayFixed`, and `regressionBlocked` separately.
+## v0.11.9 changes
+- Parses raw PLUTO XML `<abstract>` before stripping tags.
+- Reads `<serial>`, `<time>`, `<scene>`, and `<plot>` separately.
+- Uses `<plot>` directly as the no-extra-API timeline event. It is not re-scored or re-summarized by the local dialogue extractor.
+- Uses `<time>` for absolute date + clock/range and `<scene>` for location.
+- Keeps legacy colon-style abstract parsing as fallback.
+- If no structured summary exists, local fallback is conservative and refuses to promote a tiny dialogue fragment into long-term memory just to satisfy coverage.
+- Adds a render-time weekday guard: displayed weekday is derived from the stored absolute date.
+- Time-repair metadata lookup also uses the v0.11.9 XML parser.
 
-3. **Pluto-style abstract parser**
-   - Added support for records shaped like `serial:... time:2025-09-22 周一 | 19:30 ... scene: ... plot: ...`.
-   - `serial/time/NSFW/scene/plot` labels are not kept in the timeline event body.
+## Static checks
+- `node --check index.js`: PASS
+- `manifest.json` version: 0.11.9
+- UI version badges: v0.11.9
+- startup log: v0.11.9
 
-4. **Local event cleanup**
-   - Repeated speaker names and broken punctuation are normalized.
-   - Very weak residual actions can fall back to one short non-explicit question/decision quote when present.
-   - Event length remains capped for long-term-memory use.
+## Parser/behavior tests
+### PLUTO XML abstract
+Input:
+- `<serial>047</serial>`
+- `<time>2025-09-22｜19:30-19:32</time>`
+- `<scene>KΣ宅邸·一楼厨房</scene>`
+- `<plot>科尔驾车带薛伶返回KΣ宅邸。薛伶表示饥饿，科尔带她进入厨房并加热剩饭。</plot>`
 
-## Tests executed
+Result: PASS
+- date = `2025-09-22`
+- time = `周一 19:30-19:32`
+- location preserved
+- plot preserved verbatim apart from whitespace/punctuation cleanup
+- user dialogue outside `<plot>` did not leak into event
+- `Analysis`, `JSONPatch`, favorability data did not leak into event
 
-- `node --check index.js`: PASS.
-- `manifest.json` parses and reports `0.11.7`: PASS.
-- Runtime route check confirms the active 0-API rebuild calls `makeLocalTimelineNodesV0117`: PASS.
-- Runtime route check confirms temporal repair calls `repairExistingTimelineTemporalV0117`: PASS.
-- VM test with the real `SMM-recent24.txt` sample (#1489-#1512): PASS.
-  - No auxiliary `campus_gossip / JSONPatch / UpdateVariable / Analysis` content enters timeline events.
-  - All generated sample nodes remain on the reliable `2025-09-22` date axis.
-  - Event text cap is enforced.
-- Synthetic Pluto abstract test: PASS.
-  - `2025-09-22`, `周一 19:30`, scene, and plot are parsed separately.
-  - Metadata labels do not leak into the event body.
-- Weekday rollover test (`2025-09-21 周日` + weak `周一 19:40`): PASS -> `2025-09-22 周一`.
-- Strong-date weekday-conflict test (`2025-09-23` + stale `周一 09:45`): PASS -> date remains `2025-09-23`, weekday normalized to `周二`.
-- Weak same-day clock-regression test: PASS -> backward clock rejected.
-- Midnight rollover test (`23:40` -> `01:10`): PASS -> next day and weekday corrected.
-- Existing wrong-group repair test:
-  - `#1517-#1518` old date `2025-09-21`, same-source world metadata `2025-09-22 周一 19:40`: corrected to `2025-09-22`.
-  - later row with same-source `2025-09-23 周二 07:00`: corrected to `2025-09-23`.
+### Stale weekday display guard
+Input: date `2025-09-23`, time text `秋季学期 周五 09:45`
+Result: `秋季学期 周二 09:45` — PASS
 
-## Safety boundaries
+### Legacy colon-style abstract
+Existing `serial: ... time: ... scene: ... plot: ...` parser remains functional — PASS
 
-- 0-API mode makes no external/model summary call.
-- Original SillyTavern chat messages are not rewritten.
-- `last_processed_index` remains protected during local timeline rebuild.
-- Only the three exact world-state JSONPatch paths are read as temporal/location metadata.
-- Favorability and other variables are not admitted as canonical story prose.
-- Local code does not infer relationships, character anchors, active arcs, or open-loop outcomes.
+## Known limitation
+Zero-API code cannot semantically reconstruct a high-quality summary for arbitrary historical prose that contains no structured summary. For those messages v0.11.9 intentionally uses a conservative fallback rather than inventing or over-interpreting events.
 
-## Remaining limitation
-
-Local compression is deterministic extraction, not semantic model summarization. It can still be less elegant than API summaries. v0.11.7 prioritizes traceability, compactness, and temporal correctness over literary paraphrase quality.
+## Safety/compatibility
+- Does not modify original chat messages / JSONL.
+- Does not call the summary API in code rebuild mode.
+- Does not change the current processed cursor during range rebuild.
+- Existing memory-injection, hiding, source-gap protection, and world-state metadata whitelist remain intact.
