@@ -1,20 +1,12 @@
-# Story Memory Manager v0.11.9 CODE
+# Story Memory Manager v0.11.10 CODE
 
-This release is intended for zero-extra-API gap repair when the active RP preset already emits structured summaries such as PLUTO `<abstract>`.
+本版继续使用 0 API 代码模式修复历史缺口，重点修正历史时间轴的日期跳跃、跨午夜与错误星期污染。
 
-Recommended recovery flow:
-1. Keep auto summary OFF.
-2. Keep memory injection OFF.
-3. Keep automatic hiding OFF.
-4. Open `更多工具 → 历史重建 → 补总结缺失楼层`.
-5. Rebuild the missing range with `代码压缩重建这个范围（0 API）`.
-6. Review the timeline before re-enabling injection/hiding.
+推荐流程：
 
-### v0.11.9 behavior
-- PLUTO XML abstract: uses `<plot>` directly as timeline text.
-- `<time>`: parsed into absolute date and time/range.
-- `<scene>`: parsed as location.
-- No re-summarization API call is made.
-- If an old message has no structured summary, only a conservative local fallback is used.
+1. 暂时关闭自动总结、生成时记忆注入、自动隐藏。
+2. 对缺口范围执行“代码压缩重建这个范围（0 API）”。
+3. 再执行“校准时间线日期/星期/时分（0 API）”。
+4. 检查 2025-09-22 是否统一显示周一，2025-09-23 是否统一显示周二，并检查凌晨事件是否正确进入次日。
 
-Important limitation: code mode cannot semantically recreate a high-quality summary for arbitrary old prose that contains no structured summary. Such rows are intentionally kept conservative rather than hallucinated.
+本版不会调用总结 API。没有足够信息安全压缩的楼层仅作为内部覆盖标记，不会生成“本轮未检测到……”占位文案，也不会注入模型。

@@ -1,14 +1,17 @@
-# Story Memory Manager v0.11.9
+# Story Memory Manager v0.11.10
 
-## 0 API preset-summary-first repair
+## 修复
 
-- Fixed a major v0.11.4-v0.11.8 issue where code-mode backfill could ignore PLUTO XML `<abstract>` structure and re-extract tiny dialogue fragments from raw prose.
-- Added direct XML parsing for `<abstract><serial>...<time>...<scene>...<plot>...</abstract>`.
-- `<plot>` is now treated as the canonical no-extra-API timeline summary and is preserved directly (only whitespace/length cleanup).
-- `<time>` now supplies absolute date + clock/range and `<scene>` supplies location.
-- Existing legacy/colon-style summaries remain supported as fallback.
-- If no structured summary exists, local fallback is deliberately conservative and will not promote a tiny dialogue fragment into long-term memory merely to satisfy coverage.
-- Added a render-time weekday guard: displayed weekday is always derived from the stored absolute date, preventing stale `周五` text from appearing under a Monday/Tuesday date.
-- Time-repair metadata lookup now also uses the v0.11.9 XML parser.
+- 修复 0 API 历史重建中，陈旧 `/世界/当前日期` 可无剧情证据一次跳过多天的问题。
+- 修复晚间/深夜后出现 00:xx–08:xx 时，被同日陈旧世界状态日期钉死而无法跨日的问题。
+- 星期只作为显示信息，绝不再作为日期推进依据；始终由最终绝对日期重新计算。
+- 对无结构化摘要且无法安全压缩出独立关键事件的楼层，改为内部 coverage-only 节点：用于证明楼层已覆盖，但不显示、不注入长期记忆。
+- 保留 v0.11.9 的 `<abstract><plot>` 直读机制；有预设摘要时仍优先采用其 plot，不二次抽取碎片对白。
 
-No original chat messages are modified. Code-mode rebuild remains 0 API.
+## 时间轴规则
+
+- 绝对日期为主轴。
+- 世界状态日期若向前跳超过 1 天，必须有同 source 的明确绝对日期或“X天后/数日后/一周后”等剧情证据，否则拒绝跳转。
+- 19:00+ → 00:00–08:00 的连续 source，若没有更强的同 source 绝对日期证明仍属同日，则自动跨日 +1。
+- 例如 2025-09-22 周一 23:40 → 03:22，将校准为 2025-09-23 周二 03:22。
+- 2025-09-22 永远显示周一；2025-09-23 永远显示周二。
