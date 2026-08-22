@@ -1,4 +1,4 @@
-// Story Memory Manager v0.11.17
+// Story Memory Manager v0.11.18
 // canonical-input purification / character-core preservation / story-arc continuity
 // does not rewrite original chat JSONL
 
@@ -612,34 +612,113 @@ function messagesText(start, end) {
     }).join('\n\n');
 }
 
+function repairJSONStringLocalV01118(input) {
+    let s=String(input??'').replace(/^\uFEFF/,'').trim();
+    s=s.replace(/^```(?:json|javascript|js)?\s*/i,'').replace(/\s*```$/,'').trim();
+    // Curly double quotes are a common model formatting leak. Apostrophes are left untouched.
+    s=s.replace(/[“”]/g,'"');
+
+    const a=s.indexOf('{'), b=s.lastIndexOf('}');
+    if(a<0||b<=a) return s;
+    s=s.slice(a,b+1);
+
+    // Escape literal line breaks/tabs inside quoted strings while preserving JSON structure.
+    let out='', inStr=false, escp=false;
+    for(let i=0;i<s.length;i++){
+        const ch=s[i];
+        if(inStr){
+            if(escp){ out+=ch; escp=false; continue; }
+            if(ch==='\\'){ out+=ch; escp=true; continue; }
+            if(ch==='"'){ out+=ch; inStr=false; continue; }
+            if(ch==='\n'){ out+='\\n'; continue; }
+            if(ch==='\r'){ continue; }
+            if(ch==='\t'){ out+='\\t'; continue; }
+            const code=ch.charCodeAt(0);
+            if(code<0x20){ out+=' '; continue; }
+            out+=ch; continue;
+        }
+        if(ch==='"'){ inStr=true; out+=ch; continue; }
+        out+=ch;
+    }
+    s=out;
+
+    // Remove JS-style comments only outside strings.
+    out=''; inStr=false; escp=false;
+    for(let i=0;i<s.length;i++){
+        const ch=s[i], nx=s[i+1];
+        if(inStr){
+            out+=ch;
+            if(escp){escp=false;continue;}
+            if(ch==='\\'){escp=true;continue;}
+            if(ch==='"') inStr=false;
+            continue;
+        }
+        if(ch==='"'){inStr=true;out+=ch;continue;}
+        if(ch==='/'&&nx==='/'){ while(i<s.length&&s[i]!=='\n') i++; out+='\n'; continue; }
+        if(ch==='/'&&nx==='*'){ i+=2; while(i<s.length-1&&!(s[i]==='*'&&s[i+1]==='/')) i++; i++; continue; }
+        out+=ch;
+    }
+    s=out;
+
+    // Drop standalone internal/debug note tokens accidentally emitted as object members.
+    s=s.replace(/,\s*"__[^"]+"\s*(?=[,}])/g,'');
+    s=s.replace(/,\s*__[A-Za-z0-9_]+\s*(?=[,}])/g,'');
+
+    // Quote bare property names and remove trailing commas. These transformations are
+    // intentionally limited to structural positions, not string contents.
+    s=s.replace(/([,{]\s*)([A-Za-z_$\u4e00-\u9fff][A-Za-z0-9_$\u4e00-\u9fff]*)(\s*:)/g,'$1"$2"$3');
+    s=s.replace(/,\s*([}\]])/g,'$1');
+    // A naked '-' as a value is invalid JSON and is usually an unfinished placeholder.
+    s=s.replace(/:\s*-(?=\s*[,}])/g,': null');
+    return s;
+}
+
 function parseJSON(text) {
     let t = String(text ?? '').trim();
     if (!t) throw new Error('模型返回为空，无法解析 JSON');
 
-    // Remove common markdown fences.
     t = t.replace(/^```(?:json)?\s*/i,'').replace(/\s*```$/,'').trim();
-
-    // Prefer the outermost JSON object if the model added prose before/after it.
     const a = t.indexOf('{'), b = t.lastIndexOf('}');
-    if (a >= 0 && b > a) {
-        t = t.slice(a, b + 1);
-    } else {
+    if (a >= 0 && b > a) t = t.slice(a, b + 1);
+    else {
         const preview = t.replace(/\s+/g, ' ').slice(0, 240);
         throw new Error(`模型未返回 JSON 对象：${preview}`);
     }
 
-    let obj;
-    try {
-        obj = JSON.parse(t);
-    } catch (e) {
-        const preview = t.replace(/\s+/g, ' ').slice(0, 240);
-        throw new Error(`JSON 解析失败：${e.message}；响应开头：${preview}`);
+    let obj, firstErr=null;
+    try { obj = JSON.parse(t); }
+    catch (e) { firstErr=e; }
+
+    // v0.11.18: locally repair common model JSON mistakes before spending another API call.
+    if(!obj){
+        const repaired=repairJSONStringLocalV01118(t);
+        try { obj=JSON.parse(repaired); }
+        catch(e){
+            const preview=t.replace(/\s+/g,' ').slice(0,240);
+            throw new Error(`JSON 解析失败：${firstErr?.message||'未知'}；本地修复后仍失败：${e.message}；响应开头：${preview}`);
+        }
     }
 
-    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
-        throw new Error('返回内容不是 JSON 对象');
-    }
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) throw new Error('返回内容不是 JSON 对象');
     return obj;
+}
+
+const SUMMARY_KEYS_V01118=new Set([
+    'story_start','current_story_date','current_story_time','current_scene','timeline','facts','events','characters','relationships',
+    'character_anchors','active_arcs','open_loops','locations','items','conflicts','quarantined','semantic_anchors'
+]);
+function sanitizeSummaryObjectV01118(obj){
+    if(!obj||typeof obj!=='object'||Array.isArray(obj)) return obj;
+    // Known harmless aliases produced by some backends. Map before the whitelist pass.
+    if(!obj.current_scene && obj.current_scene_core && typeof obj.current_scene_core==='object') obj.current_scene=obj.current_scene_core;
+    const clean={};
+    for(const [k,v] of Object.entries(obj)) if(SUMMARY_KEYS_V01118.has(k)) clean[k]=v;
+    const arr=['timeline','facts','events','relationships','character_anchors','active_arcs','open_loops','locations','items','conflicts','quarantined','semantic_anchors'];
+    for(const k of arr) if(!Array.isArray(clean[k])) clean[k]=[];
+    if(!clean.characters||typeof clean.characters!=='object'||Array.isArray(clean.characters)) clean.characters={};
+    if(!clean.current_scene||typeof clean.current_scene!=='object'||Array.isArray(clean.current_scene)) clean.current_scene={};
+    for(const k of ['story_start','current_story_date','current_story_time']) if(!(k in clean)) clean[k]=null;
+    return clean;
 }
 
 function uniqMerge(oldArr, newArr, keyFn) {
@@ -4017,7 +4096,7 @@ ${messagesText(start, end)}
             SMM_GENERATE_TIMEOUT_MS,
             `结构化总结 #${start+1}-#${end}`
         );
-        parsed = filterMetaSignals(parseJSON(raw));
+        parsed = sanitizeSummaryObjectV01118(filterMetaSignals(parseJSON(raw)));
     } catch (e) {
         if (isSmmTimeout(e)) throw e;
         firstError = e;
@@ -4030,7 +4109,7 @@ ${messagesText(start, end)}
                 systemPrompt:SYSTEM_PROMPT,
                 prompt: prompt + '\n\n只返回一个合法 JSON 对象，不要解释、不要 Markdown、不要代码围栏。字段必须包含 story_start,current_story_date,current_story_time,current_scene,timeline,facts,events,characters,relationships,character_anchors,active_arcs,open_loops,locations,items,conflicts,quarantined,semantic_anchors。'
             }), SMM_GENERATE_TIMEOUT_MS, `兼容总结 #${start+1}-#${end}`);
-            parsed = filterMetaSignals(parseJSON(raw));
+            parsed = sanitizeSummaryObjectV01118(filterMetaSignals(parseJSON(raw)));
         } catch (e) {
             if (isSmmTimeout(e)) throw e;
             secondError = e;
@@ -4056,7 +4135,7 @@ ${bad}`;
                 SMM_GENERATE_TIMEOUT_MS,
                 `JSON修复 #${start+1}-#${end}`
             );
-            parsed = filterMetaSignals(parseJSON(repaired));
+            parsed = sanitizeSummaryObjectV01118(filterMetaSignals(parseJSON(repaired)));
         } catch (e) {
             if (isSmmTimeout(e)) throw e;
             const e1 = firstError?.message || '无';
@@ -5088,8 +5167,33 @@ function fallbackEventLocalV0119(userMsg,assistantMsg,userName='') {
     return '';
 }
 
+function timelineDaypartLocalV01118(mins){
+    if(mins==null) return null;
+    const h=Math.floor(mins/60);
+    if(h<5) return '凌晨';
+    if(h<9) return '早晨';
+    if(h<12) return '上午';
+    if(h<14) return '中午';
+    if(h<18) return '下午';
+    if(h<22) return '晚间';
+    return '深夜';
+}
 function displayTimelineTimeLocalV0119(e) {
-    return ensureWeekdayTimelineTimeLocalV0119(e?.time,e?.date)||String(e?.time||'');
+    const raw=ensureWeekdayTimelineTimeLocalV0119(e?.time,e?.date)||String(e?.time||'');
+    if(!raw) return '';
+    // v0.11.18: variable-state minute precision is useful for ordering, but noisy in
+    // long-term memory UI. Keep exact source/preset times; show only a natural daypart
+    // when the clock came solely from UpdateVariable/world-state metadata.
+    const label=String(e?.time_evidence_label||'');
+    const level=String(e?.time_evidence||'');
+    const structuredOnly=level==='structured' && /变量状态/.test(label) && !/原文|预设/.test(label);
+    if(!structuredOnly) return raw;
+    const mins=timelineClockMinutesV01114(raw);
+    const part=timelineDaypartLocalV01118(mins);
+    if(!part) return raw;
+    const iso=normalizeDateInput(e?.date)?.iso||null;
+    const wd=iso?weekdayLabelISO_V0117(iso):'';
+    return `${wd?wd+' ':''}${part}`.trim();
 }
 
 function sourceTemporalMetaLocalV0117(indexes,mem=M()){
@@ -6147,7 +6251,7 @@ function stat() {
 function panelHTML() {
     return `<div id="${PANEL_ID}" class="smm2-hidden">
       <div class="smm2-card">
-        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.17</span></div><button id="smm2_close">×</button></div>
+        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.18</span></div><button id="smm2_close">×</button></div>
         <div id="smm2_stats" class="smm2-stats"></div>
         <div class="smm2-grid">
           <button id="smm2_new">总结新增</button>
@@ -6554,7 +6658,7 @@ function normalizeStoryEntitiesV01114(mem=M()) {
         mem.characters=out;
     }
 
-    // v0.11.17: historical memories may contain mixed legacy shapes (string + object).
+    // v0.11.18: historical memories may contain mixed legacy shapes (string + object).
     // Never assign object properties onto primitive strings; normalize them in-place instead.
     if(Array.isArray(mem.timeline)) for(let i=0;i<mem.timeline.length;i++){
         const e=mem.timeline[i];
@@ -6733,7 +6837,7 @@ async function runUnifiedPostProcessV01114(){
     }
     BUSY=true;
     try {
-        if(status) status.textContent='v0.11.17 正在执行：实体统一 / 关系去重 / timeline 去重 / 质量审计（0 API）…';
+        if(status) status.textContent='v0.11.18 正在执行：实体统一 / 关系去重 / timeline 去重 / 质量审计（0 API）…';
         toast('开始执行实体与关系整理（0 API）…','info');
         const mem=M();
         if(!mem || typeof mem!=='object') throw new Error('当前记忆对象不可用');
@@ -6745,10 +6849,10 @@ async function runUnifiedPostProcessV01114(){
         const q=result.quality;
         toast(`统一整理完成：实体修正 ${result.entities.changed} 处（人物别名合并 ${result.entities.merged_characters||0}），合并重复 timeline ${result.dedup.merged} 条，移除空事件 ${result.dedup.empty_removed} 条。`,'success');
         const latestStatus=document.getElementById('smm112_gap_status');
-        if(latestStatus) latestStatus.textContent=`v0.11.17 质量审计：timeline ${q.timeline}；主角泛称残留 ${q.generic_aliases}；人物泛称键 ${q.generic_character_keys}；人物别名重复 ${q.alias_character_duplicates}；重复关系对 ${q.duplicate_relationship_pairs}；非法 source ${q.invalid_sources}；空事件 ${q.empty_events}；疑似重复 ${q.duplicate_candidates}；时间倒退 ${q.time_backtracks}。`;
+        if(latestStatus) latestStatus.textContent=`v0.11.18 质量审计：timeline ${q.timeline}；主角泛称残留 ${q.generic_aliases}；人物泛称键 ${q.generic_character_keys}；人物别名重复 ${q.alias_character_duplicates}；重复关系对 ${q.duplicate_relationship_pairs}；非法 source ${q.invalid_sources}；空事件 ${q.empty_events}；疑似重复 ${q.duplicate_candidates}；时间倒退 ${q.time_backtracks}。`;
         return {before,...result};
     } catch(e) {
-        console.error('[StoryMemory] v0.11.17 unified entity cleanup failed',e);
+        console.error('[StoryMemory] v0.11.18 unified entity cleanup failed',e);
         const latestStatus=document.getElementById('smm112_gap_status');
         if(latestStatus) latestStatus.textContent='统一实体整理失败：'+(e?.message||e);
         toast('统一实体整理失败：'+(e?.message||e),'error');
@@ -6851,7 +6955,7 @@ function historyRecords() {
     const m=M(), out=[];
     for (const x of chronologicalCopy(m.timeline||[])) {
         const p=storyDateParts(x);
-        out.push({type:'timeline', label:`${p?.label || x.date || '日期未定'} ${x.time || ''}`, text:x.event || '', raw:x});
+        out.push({type:'timeline', label:`${p?.label || x.date || '日期未定'} ${displayTimelineTimeLocalV0119(x) || ''}`, text:x.event || '', raw:x});
     }
     for (const g of mergedCharactersView()) {
         out.push({type:'character', label:g.name, text:JSON.stringify(g.states), raw:g});
@@ -7268,7 +7372,7 @@ function v4DateAudit(mem=M()) {
 function historyRecordsV4() {
     const m=M(), out=[];
     for(const day of v4DaysSorted(m)){
-        for(const e of day.events||[]) out.push({type:'timeline',label:`${day.date} ${e.time||''}`,text:e.event||''});
+        for(const e of day.events||[]) out.push({type:'timeline',label:`${day.date} ${displayTimelineTimeLocalV0119(e)||''}`,text:e.event||''});
     }
     for(const c of Object.values(m.characters_v4||{})){
         out.push({type:'character',label:c.name,text:JSON.stringify({profile:c.profile,current_state:c.current_state})});
@@ -8250,7 +8354,7 @@ function bindNativeManager() {
     if(timeRepairBtnV0116) timeRepairBtnV0116.onclick=repairTimelineTimesLocalV0117;
     const unifiedPostBtnV01114=q('smm114_unified_post');
     if(unifiedPostBtnV01114) unifiedPostBtnV01114.onclick=runUnifiedPostProcessV01114;
-    // v0.11.17: DOM re-render fallback; prevents this button from becoming inert.
+    // v0.11.18: DOM re-render fallback; prevents this button from becoming inert.
     if(!window.__SMM_V01116_UNIFIED_DELEGATE__){
         window.__SMM_V01116_UNIFIED_DELEGATE__=true;
         document.addEventListener('click',(ev)=>{
@@ -8586,7 +8690,7 @@ function installNativeExtensionEntry() {
 
         wrap.innerHTML = `
           <div class="inline-drawer-toggle inline-drawer-header">
-            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.17</span></div>
+            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.18</span></div>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
           </div>
           <div class="inline-drawer-content">
@@ -8814,7 +8918,7 @@ function initializeExtension() {
     try {
         installUI();
         refresh();
-        console.log('[StoryMemory] v0.11.17 loaded successfully');
+        console.log('[StoryMemory] v0.11.18 loaded successfully');
     } catch (e) {
         console.error('[StoryMemory] UI initialization failed', e);
     }

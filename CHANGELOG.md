@@ -1,7 +1,14 @@
-# v0.11.17 HYBRID
+# v0.11.18 HYBRID
 
-- 修复“修复全部实体 / 关系去重 / 质量审计”遇到旧版字符串型 facts 时崩溃：`Cannot create property 'fact' on string ...`。
-- 实体统一器现在兼容历史记忆中的混合结构：timeline/facts/events/relationships/open_loops/semantic_anchors/character_anchors/active_arcs/items/locations 可同时存在字符串与对象记录。
-- 对字符串记录只做安全文本规范化，不再向 primitive 值写对象属性。
-- timeline 的纯字符串旧记录会安全升级为 `{event, source:null}`，便于后续质量审计处理；其余字段尽量保留原结构，避免无依据改写历史。
-- 保留 v0.11.16 的按钮委托绑定、错误提示、实体别名合并、关系去重、timeline 去重和质量审计。
+## JSON 容错
+- API 返回轻微损坏 JSON 时，先在本地修复，再决定是否需要额外 API 重试。
+- 支持常见问题：Markdown 围栏、弯引号、字符串内裸换行/控制字符、JS 注释、未加引号的属性名、尾逗号、裸 `-` 占位、独立 `__debug`/`__note` 成员。
+- 已知后端别名 `current_scene_core` 会映射为 `current_scene`。
+- 总结对象写入前使用顶层字段白名单，未知调试字段不会进入长期记忆。
+- 缺失的标准数组/对象字段会补为空结构，减少仅因包装格式导致的整次总结报废。
+
+## 时间显示粒度
+- 底层日期/时分仍保留用于排序与连续性校验。
+- 如果具体 HH:MM 仅来自 `/世界/当前时间` 的变量状态元数据，历史时间线 UI 改为自然时段显示：凌晨/早晨/上午/中午/下午/晚间/深夜。
+- 原文明确时间、预设 `<abstract>` 明确时间仍保留精确时分。
+- 不修改原聊天，也不降低底层时间校准精度。
