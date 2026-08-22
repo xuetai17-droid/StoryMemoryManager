@@ -1,4 +1,4 @@
-// Story Memory Manager v0.11.4
+// Story Memory Manager v0.11.5
 // canonical-input purification / character-core preservation / story-arc continuity
 // does not rewrite original chat JSONL
 
@@ -4151,7 +4151,7 @@ async function summarizeGapRangeAdaptiveV0113(start,endExclusive,depth=0) {
 
 
 // =========================================================
-// v0.11.4 local code-only gap backfill (0 API)
+// v0.11.5 structured local code-only gap backfill / rebuild (0 API)
 // =========================================================
 
 function plainTextLocalV0114(text) {
@@ -4187,6 +4187,105 @@ function embeddedSummaryLocalV0114(m) {
         if(parts.length) return parts.join('；').slice(0,700);
     }
     return '';
+}
+
+
+function summaryBlocksLocalV0115(m) {
+    if(!m || m.is_user) return [];
+    const raw=String(m?.mes||'');
+    const out=[];
+    for(const tag of ['abstract','meow_FM','scene_summary','memory_summary']){
+        const re=new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)<\\/${tag}>`,'gi');
+        let hit;
+        while((hit=re.exec(raw))){
+            const text=plainTextLocalV0114(stripAuxiliaryBlocksV0110(hit[1]));
+            if(text) out.push({tag,text});
+        }
+    }
+    return out;
+}
+
+function normalizeSummaryDateLocalV0115(raw) {
+    const m=String(raw||'').match(/(20\d{2})[年\-\/.](\d{1,2})[月\-\/.](\d{1,2})日?/);
+    if(!m) return null;
+    return normalizeDateInput(`${m[1]}-${String(Number(m[2])).padStart(2,'0')}-${String(Number(m[3])).padStart(2,'0')}`)?.iso||null;
+}
+
+function parseSummaryTimePrefixLocalV0115(text) {
+    const src=String(text||'').trim();
+    const patterns=[
+        /^((?:[01]?\d|2[0-3])[:：][0-5]\d\s*(?:-|~|～|—|–|至|到)\s*(?:[01]?\d|2[0-3])[:：][0-5]\d)\s+/,
+        /^((?:[01]?\d|2[0-3])[:：][0-5]\d)\s+/,
+        /^((?:凌晨|清晨|早晨|早上|上午|中午|下午|傍晚|晚上|晚间|夜间|深夜)(?:\s*(?:[01]?\d|2[0-3])[:：][0-5]\d)?)\s+/
+    ];
+    for(const re of patterns){
+        const m=src.match(re);
+        if(m) return {time:m[1].replace(/：/g,':').replace(/\s+/g,' ').trim(),rest:src.slice(m[0].length).trim()};
+    }
+    return {time:null,rest:src};
+}
+
+function knownStoryNamesLocalV0115(userMsg,assistantMsg,mem=M()) {
+    const set=new Set();
+    const add=x=>{ const v=String(x||'').trim(); if(v&&v.length>=2) set.add(v); };
+    add(userMsg?.name); add(assistantMsg?.name);
+    for(const k of Object.keys(mem?.characters||{})){
+        add(k);
+        const bits=String(k||'').split(/[·・\s()（）/]/).filter(Boolean);
+        for(const b of bits) if(b.length>=2) add(b);
+    }
+    return [...set].sort((a,b)=>b.length-a.length);
+}
+
+function splitLocationPrefixLocalV0115(rest,userMsg,assistantMsg,mem=M()) {
+    const src=String(rest||'').trim();
+    if(!src) return {location:null,event:''};
+    let best=-1;
+    for(const name of knownStoryNamesLocalV0115(userMsg,assistantMsg,mem)){
+        const i=src.indexOf(name);
+        if(i>0 && (best<0 || i<best)) best=i;
+    }
+    if(best>0){
+        const prefix=src.slice(0,best).trim().replace(/[|｜]+$/,'').trim();
+        const event=src.slice(best).trim();
+        const locationLike=/宅邸|房|室|厅|楼|馆|校|院|店|餐厅|Bistro|车内|车上|路|街|广场|机场|车站|宿舍|教室|图书馆|食堂|体育|中心|医院|诊所|公园|海滩|码头|酒吧|咖啡|实验室|办公室|后台|包间|走廊|厨房|卧室|客厅|地下室/i.test(prefix);
+        if(prefix.length<=70 && event.length>=8 && (locationLike || prefix.length<=35)) return {location:prefix,event};
+    }
+    return {location:null,event:src};
+}
+
+function structuredSummaryRecordsLocalV0115(m,userMsg=null,mem=M()) {
+    const out=[];
+    const assistantMsg=m;
+    for(const block of summaryBlocksLocalV0115(m)){
+        const text=String(block.text||'').trim();
+        if(!text) continue;
+        // Typical preset record: 049 2025-09-23 | 12:55-13:00 地点 事件；050 2025-09-23 | ...
+        const marker=/(?:^|[\n\r；;])\s*(?:(\d{1,4})\s+)?((?:20\d{2})[年\-\/.]\d{1,2}[月\-\/.]\d{1,2}日?)\s*[|｜]\s*/g;
+        const hits=[]; let h;
+        while((h=marker.exec(text))) hits.push({index:h.index,bodyStart:marker.lastIndex,no:h[1]||null,dateRaw:h[2]});
+        if(!hits.length) continue;
+        for(let i=0;i<hits.length;i++){
+            const cur=hits[i], next=hits[i+1];
+            let body=text.slice(cur.bodyStart,next?next.index:text.length).trim();
+            body=body.replace(/^[；;\s]+|[；;\s]+$/g,'').trim();
+            if(!body) continue;
+            const t=parseSummaryTimePrefixLocalV0115(body);
+            const split=splitLocationPrefixLocalV0115(t.rest,userMsg,assistantMsg,mem);
+            let event=String(split.event||'').replace(/^[|｜:：\-–—\s]+/,'').trim();
+            if(!event) event=t.rest;
+            if(event.length>520) event=event.slice(0,520).replace(/[，、,:：;；]?[^。！？!?]*$/,'')||event.slice(0,520);
+            out.push({
+                tag:block.tag,
+                record_no:cur.no,
+                date:normalizeSummaryDateLocalV0115(cur.dateRaw),
+                time:t.time,
+                location:split.location,
+                event
+            });
+        }
+    }
+    return out;
 }
 
 function sentenceCandidatesLocalV0114(text) {
@@ -4443,12 +4542,264 @@ function makeLocalTimelineNodesV0114(start,endInclusive,mem=M()) {
     return mergeLocalTimelineNodesV0114(nodes);
 }
 
+
+function dedupeStructuredLocalV0115(nodes) {
+    const out=[];
+    const map=new Map();
+    for(const raw of (nodes||[])){
+        const node={...raw};
+        if(node.__local_kind_v0115==='structured'){
+            const key=JSON.stringify([
+                String(node.date||''),String(node.time||''),
+                String(node.location||''),String(node.event||'').replace(/\s+/g,' ').trim()
+            ]);
+            const prev=map.get(key);
+            if(prev){
+                const idx=[...sourceIndexes(prev.source),...sourceIndexes(node.source)];
+                prev.source=canonicalSourceV0113(idx)||prev.source;
+                continue;
+            }
+            map.set(key,node);
+        }
+        out.push(node);
+    }
+    return out;
+}
+
+function mergeFallbackLocalV0115(nodes) {
+    const out=[];
+    for(const raw of nodes||[]){
+        const node={...raw};
+        const prev=out.at(-1);
+        const sameFallback=prev?.__local_kind_v0115==='fallback' && node.__local_kind_v0115==='fallback';
+        const parts=Number(prev?.__local_parts_v0115||1);
+        const adjacent=prev && sourceLast(prev.source)+1===sourceFirst(node.source);
+        const sameDate=prev && String(prev.date||'')===String(node.date||'');
+        if(sameFallback && adjacent && sameDate && parts<2){
+            const idx=[...sourceIndexes(prev.source),...sourceIndexes(node.source)];
+            prev.source=canonicalSourceV0113(idx)||prev.source;
+            prev.event=`${String(prev.event||'').trim()}；${String(node.event||'').trim()}`.slice(0,720);
+            prev.time=node.time||prev.time||null;
+            prev.location=node.location||prev.location||null;
+            prev.__local_parts_v0115=parts+1;
+            const te=classifySourceTimeEvidence(prev);
+            prev.time_evidence=te.level; prev.time_evidence_label=te.label; prev.time_evidence_reason=te.reason;
+        }else{
+            node.__local_parts_v0115=1;
+            out.push(node);
+        }
+    }
+    return out;
+}
+
+function finalizeLocalNodesV0115(nodes) {
+    const deduped=dedupeStructuredLocalV0115(nodes);
+    const merged=mergeFallbackLocalV0115(deduped);
+    return merged.map(({__local_kind_v0115,__local_parts_v0115,...x})=>x);
+}
+
+function makeLocalTimelineNodesV0115(start,endInclusive,mem=M()) {
+    const chat=C().chat||[];
+    const nodes=[];
+    let currentDate=priorReliableDateV0114(mem,start);
+    let previousTime=null;
+    let i=start;
+
+    while(i<=endInclusive){
+        let a=i,b=i,userMsg=null,assistantMsg=null;
+        const first=chat[i];
+        if(first?.is_user && i+1<=endInclusive && chat[i+1] && !chat[i+1].is_user){
+            userMsg=first; assistantMsg=chat[i+1]; b=i+1;
+        }else if(!first?.is_user){
+            assistantMsg=first;
+            if(i>start && chat[i-1]?.is_user && i-1>=start){ a=i-1; userMsg=chat[i-1]; }
+        }else userMsg=first;
+
+        const indexes=[]; for(let k=a;k<=b;k++) indexes.push(k);
+        const source=canonicalSourceV0113(indexes)||`#${i}`;
+        const combined=indexes.map(k=>cleanMesForSummaryV0110(chat[k])).join('\n');
+        const pairMetaTime=localTimeSameMessagesV0114(indexes);
+        const pairMetaDate=explicitDateSameMessagesV0114(indexes);
+        const pairMetaLocation=localLocationSameMessagesV0114(indexes);
+        const records=structuredSummaryRecordsLocalV0115(assistantMsg,userMsg,mem);
+
+        if(records.length){
+            for(const rec of records){
+                const nextTime=rec.time||pairMetaTime||null;
+                const candidateDate=rec.date||pairMetaDate||null;
+                const date=chooseLocalDateV0114(candidateDate,currentDate,`${combined}\n${rec.event||''}`,previousTime,nextTime,indexes);
+                if(date) currentDate=date;
+                if(nextTime) previousTime=nextTime;
+                const node={
+                    date:date||null,
+                    time:nextTime,
+                    event:String(rec.event||'').trim(),
+                    source,
+                    __local_kind_v0115:'structured'
+                };
+                const loc=rec.location||pairMetaLocation;
+                if(loc) node.location=loc;
+                if(rec.time){
+                    node.time_evidence='structured';
+                    node.time_evidence_label='预设摘要时间';
+                    node.time_evidence_reason=`来自本批 source 的 <${rec.tag}> 结构化记录${rec.record_no?` #${rec.record_no}`:''}`;
+                }else{
+                    const te=classifySourceTimeEvidence(node);
+                    node.time_evidence=te.level; node.time_evidence_label=te.label; node.time_evidence_reason=te.reason;
+                }
+                if(node.event) nodes.push(node);
+            }
+        }else{
+            const date=chooseLocalDateV0114(pairMetaDate,currentDate,combined,previousTime,pairMetaTime,indexes);
+            if(date) currentDate=date;
+            if(pairMetaTime) previousTime=pairMetaTime;
+            const event=localEventForPairV0114(userMsg,assistantMsg);
+            const node={date:date||null,time:pairMetaTime||null,event,source,__local_kind_v0115:'fallback'};
+            if(pairMetaLocation) node.location=pairMetaLocation;
+            const te=classifySourceTimeEvidence(node);
+            node.time_evidence=te.level; node.time_evidence_label=te.label; node.time_evidence_reason=te.reason;
+            nodes.push(node);
+        }
+        i=(b>=i?b+1:i+1);
+    }
+    return finalizeLocalNodesV0115(nodes);
+}
+
+function timelineEntryFullyInsideRangeV0115(e,start,endInclusive){
+    const idx=sourceIndexes(e?.source);
+    return idx.length>0 && idx.every(i=>i>=start && i<=endInclusive);
+}
+
+function priorCodeRepairAuditV0115(mem,start,endInclusive){
+    return (mem?.audit||[]).some(a=>{
+        if(!/^timeline_gap_code_backfill_v011[45]$/.test(String(a?.type||''))) return false;
+        const r=Array.isArray(a?.range)?a.range:[];
+        const x=Number(r[0]), y=Number(r[1]);
+        return Number.isFinite(x)&&Number.isFinite(y)&&x<=endInclusive&&y>=start;
+    });
+}
+
+
+function latestCodeRepairRangeV0115(mem=M()){
+    const arr=Array.isArray(mem?.audit)?mem.audit:[];
+    for(let i=arr.length-1;i>=0;i--){
+        const a=arr[i];
+        if(!/^timeline_gap_code_backfill_v011[45]$/.test(String(a?.type||''))) continue;
+        const r=Array.isArray(a?.range)?a.range:[];
+        const x=Number(r[0]), y=Number(r[1]);
+        if(Number.isInteger(x)&&Number.isInteger(y)&&x>=0&&y>=x) return {start:x,end:y,type:a.type};
+    }
+    return null;
+}
+
 function coverageStatsLocalV0114(nodes,start,endInclusive) {
     const covered=new Set();
     for(const e of nodes||[]) for(const i of sourceIndexes(e?.source)) if(i>=start&&i<=endInclusive) covered.add(i);
     const missing=[];
     for(let i=start;i<=endInclusive;i++) if(!covered.has(i)) missing.push(i);
     return {covered:covered.size,total:endInclusive-start+1,missing};
+}
+
+async function repairTimelineGapLocalV0115() {
+    if (BUSY || HISTORY_RUNNING || GAP_REPAIR_RUNNING_V0112) {
+        return toast('当前已有总结/重建任务在运行。','warning');
+    }
+    const fromEl=document.getElementById('smm112_gap_from');
+    const toEl=document.getElementById('smm112_gap_to');
+    const start=Number(fromEl?.value), endInclusive=Number(toEl?.value);
+    const chat=C().chat||[];
+    if(!Number.isInteger(start)||!Number.isInteger(endInclusive)||start<0||endInclusive<start||endInclusive>=chat.length){
+        return toast(`代码补档范围无效。请输入 0-${Math.max(0,chat.length-1)} 之间的 #楼层编号。`,'warning');
+    }
+
+    const original=M();
+    const hasPrior=priorCodeRepairAuditV0115(original,start,endInclusive);
+    const replaceMsg=hasPrior
+        ? '\n检测到这个范围之前做过 0 API 代码补档：本次会先移除“完全位于该范围内”的旧代码补档 timeline，再按结构化规则重建。'
+        : '\n本次会向该范围补入 timeline；不会修改原聊天。';
+    if(!confirm(
+        `将以 v0.11.5 本地代码处理 #${start}-#${endInclusive}（0 API）。\n`+
+        '会把 <abstract>/<meow_FM> 中类似“049 日期 | 时间 地点 事件”的多条记录拆成独立 timeline。\n'+
+        '没有结构化摘要的楼层才使用正文抽取式压缩。'+replaceMsg+'\n\n'+
+        '人物/关系/待办/当前游标不会被本地代码重写。继续吗？'
+    )) return;
+
+    const c=C();
+    const snapshot=cloneJSONV0112(M());
+    const backupKey=META_KEY+'_backup_code_gap_v0115_'+Date.now();
+    c.chatMetadata[backupKey]=cloneJSONV0112(snapshot);
+    GAP_REPAIR_RUNNING_V0112=true; BUSY=true;
+    try{
+        const status=document.getElementById('smm112_gap_status');
+        if(status) status.textContent=`v0.11.5 本地代码正在处理 #${start}-#${endInclusive}（0 API）…`;
+        const nodes=makeLocalTimelineNodesV0115(start,endInclusive,snapshot);
+        const coverage=coverageStatsLocalV0114(nodes,start,endInclusive);
+        if(!nodes.length) throw new Error('本地代码没有生成任何 timeline 节点。');
+        if(coverage.missing.length){
+            throw new Error(`本地补档覆盖不完整：${coverage.covered}/${coverage.total}，缺少 ${coverage.missing.slice(0,20).map(x=>'#'+x).join(', ')}${coverage.missing.length>20?'…':''}`);
+        }
+
+        const target=M();
+        const oldTimeline=Array.isArray(target.timeline)?target.timeline:[];
+        let removed=0;
+        if(hasPrior){
+            target.timeline=oldTimeline.filter(e=>{
+                if(timelineEntryFullyInsideRangeV0115(e,start,endInclusive)){ removed++; return false; }
+                return true;
+            });
+        }
+        const before=(target.timeline||[]).length;
+        target.timeline=uniqMerge(target.timeline,nodes,x=>JSON.stringify([
+            x.date,x.time,x.location||'',String(x.event||'').replace(/\s+/g,' ').trim(),x.source
+        ]));
+        target.timeline.sort((a,b)=>sourceFirst(a?.source)-sourceFirst(b?.source));
+
+        // Preserve present-state memory. This operation is timeline-only.
+        target.last_processed_index=snapshot.last_processed_index;
+        target.current_story_date=snapshot.current_story_date;
+        target.current_story_time=snapshot.current_story_time;
+        target.current_scene=cloneJSONV0112(snapshot.current_scene||{});
+        target.active_arcs=cloneJSONV0112(snapshot.active_arcs||[]);
+        target.open_loops=cloneJSONV0112(snapshot.open_loops||[]);
+        target.closed_loops=cloneJSONV0112(snapshot.closed_loops||[]);
+        target.loop_tombstones=cloneJSONV0112(snapshot.loop_tombstones||[]);
+        target.audit=Array.isArray(target.audit)?target.audit:[];
+        target.audit.push({
+            at:new Date().toISOString(),
+            type:'timeline_gap_code_backfill_v0115',
+            range:[start,endInclusive],
+            api_calls:0,
+            structured_parser:true,
+            replaced_previous_code_nodes:removed,
+            nodes_generated:nodes.length,
+            nodes_added:(target.timeline||[]).length-before,
+            coverage:`${coverage.covered}/${coverage.total}`,
+            preserved_cursor:snapshot.last_processed_index
+        });
+        if(target.audit.length>50) target.audit=target.audit.slice(-50);
+        await saveMeta();
+        refresh(); refreshNative();
+        const box=document.getElementById('smm2_native_memory_box');
+        if(box?.dataset.open==='1'){
+            box.innerHTML=memoryReadableHTML();
+            if(M().schema===SMM4_SCHEMA) bindHistoryBrowserV4(); else bindHistoryBrowserLegacy();
+        }
+        const remaining=timelineCoverageGapsV0112(target);
+        if(status) status.textContent=remaining.length
+            ? `v0.11.5 代码处理完成，但仍检测到大段缺口：#${remaining[0].start}-#${remaining[0].end}`
+            : `v0.11.5 代码处理完成：覆盖 ${coverage.covered}/${coverage.total} 楼，生成 ${nodes.length} 个 timeline 节点${removed?`，替换旧代码节点 ${removed} 条`:''}。`;
+        toast(`0 API 结构化补档完成：#${start}-#${endInclusive}，生成 ${nodes.length} 条 timeline${removed?`，替换旧结果 ${removed} 条`:''}。`,'success');
+    }catch(e){
+        console.error('[StoryMemory] v0.11.5 local code gap repair failed',e);
+        c.chatMetadata[META_KEY]=snapshot;
+        await saveMeta();
+        const status=document.getElementById('smm112_gap_status');
+        if(status) status.textContent=`代码处理失败，原记忆已恢复：${String(e?.message||e)}`;
+        toast(`代码处理失败，原记忆已恢复：${e?.message||e}`,'error');
+    }finally{
+        GAP_REPAIR_RUNNING_V0112=false; BUSY=false;
+        refresh(); refreshNative();
+    }
 }
 
 async function repairTimelineGapLocalV0114() {
@@ -4800,7 +5151,7 @@ function stat() {
 function panelHTML() {
     return `<div id="${PANEL_ID}" class="smm2-hidden">
       <div class="smm2-card">
-        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.4</span></div><button id="smm2_close">×</button></div>
+        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.5</span></div><button id="smm2_close">×</button></div>
         <div id="smm2_stats" class="smm2-stats"></div>
         <div class="smm2-grid">
           <button id="smm2_new">总结新增</button>
@@ -6179,9 +6530,9 @@ function nativeManagerHTML() {
                     <div class="smm2-fix-arrow">→</div>
                     <label><span>结束 #</span><input id="smm112_gap_to" type="number" min="0" step="1" placeholder="1622"></label>
                   </div>
-                  <button id="smm114_gap_code_repair" class="menu_button smm2-primary-tool">代码补档这个范围（0 API）</button>
+                  <button id="smm114_gap_code_repair" class="menu_button smm2-primary-tool">代码补档 / 重建这个范围（0 API）</button>
                   <button id="smm112_gap_repair" class="menu_button">API 补总结这个范围</button>
-                  <div class="smm2-note">代码补档只补 timeline：优先复用 &lt;abstract&gt;/&lt;meow_FM&gt;，否则做本地抽取式压缩；不会更新人物/关系/待办。</div>
+                  <div class="smm2-note">0 API：优先把 &lt;abstract&gt;/&lt;meow_FM&gt; 的编号记录拆成独立 timeline；若本范围曾用代码补档，会先替换旧代码补档结果。不会更新人物/关系/待办。</div>
                   <div id="smm112_gap_status" class="smm2-note"></div>
                 </div>
               </details>
@@ -6537,7 +6888,7 @@ function bindNativeManager() {
     q('smm2_native_rebuild').onclick = safeHistoryRebuild;
     q('smm51_native_resume').onclick = resumeSafeHistoryRebuild;
     const gapCodeRepairBtnV0114=q('smm114_gap_code_repair');
-    if(gapCodeRepairBtnV0114) gapCodeRepairBtnV0114.onclick=repairTimelineGapLocalV0114;
+    if(gapCodeRepairBtnV0114) gapCodeRepairBtnV0114.onclick=repairTimelineGapLocalV0115;
     const gapRepairBtnV0112=q('smm112_gap_repair');
     if(gapRepairBtnV0112) gapRepairBtnV0112.onclick=repairTimelineGapV0112;
     const cleanOrphansBtn=q('smm84_clean_orphans');
@@ -6832,8 +7183,15 @@ function refreshNative() {
         if(gapStatusV0112 && !GAP_REPAIR_RUNNING_V0112) {
             gapStatusV0112.textContent=`检测到大段时间线断档：#${gap.start}-#${gap.end}（${gap.count} 楼）。自动隐藏不会跨过这里。`;
         }
-    } else if(gapStatusV0112 && !GAP_REPAIR_RUNNING_V0112) {
-        gapStatusV0112.textContent='未检测到超过保护阈值的大段时间线断档。';
+    } else if(!GAP_REPAIR_RUNNING_V0112) {
+        const priorRangeV0115=latestCodeRepairRangeV0115(M());
+        if(priorRangeV0115){
+            if(fromV0112 && !String(fromV0112.value||'').trim()) fromV0112.value=priorRangeV0115.start;
+            if(toV0112 && !String(toV0112.value||'').trim()) toV0112.value=priorRangeV0115.end;
+            if(gapStatusV0112) gapStatusV0112.textContent=`未检测到当前大段断档；已填入上一次 0 API 代码补档范围 #${priorRangeV0115.start}-#${priorRangeV0115.end}，可直接用 v0.11.5 结构化重建。`;
+        }else if(gapStatusV0112) {
+            gapStatusV0112.textContent='未检测到超过保护阈值的大段时间线断档。';
+        }
     }
 }
 
@@ -6855,7 +7213,7 @@ function installNativeExtensionEntry() {
 
         wrap.innerHTML = `
           <div class="inline-drawer-toggle inline-drawer-header">
-            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.4</span></div>
+            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.5</span></div>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
           </div>
           <div class="inline-drawer-content">
@@ -7083,7 +7441,7 @@ function initializeExtension() {
     try {
         installUI();
         refresh();
-        console.log('[StoryMemory] v0.11.4 loaded successfully');
+        console.log('[StoryMemory] v0.11.5 loaded successfully');
     } catch (e) {
         console.error('[StoryMemory] UI initialization failed', e);
     }
