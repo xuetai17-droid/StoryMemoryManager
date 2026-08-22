@@ -1,4 +1,4 @@
-// Story Memory Manager v0.11.6
+// Story Memory Manager v0.11.7
 // canonical-input purification / character-core preservation / story-arc continuity
 // does not rewrite original chat JSONL
 
@@ -4151,7 +4151,7 @@ async function summarizeGapRangeAdaptiveV0113(start,endExclusive,depth=0) {
 
 
 // =========================================================
-// v0.11.6 structured local code-only gap backfill / rebuild (0 API)
+// v0.11.7 structured local code-only gap backfill / rebuild (0 API)
 // =========================================================
 
 function plainTextLocalV0114(text) {
@@ -4667,7 +4667,7 @@ function makeLocalTimelineNodesV0115(start,endInclusive,mem=M()) {
 
 
 
-// v0.11.6: deterministic local fact compression.
+// v0.11.7: deterministic local fact compression.
 // The goal is not to infer new facts, only to shorten already-present prose into
 // compact timeline text suitable for long-term memory.
 function stripQuotedDialogueLocalV0116(text) {
@@ -4873,6 +4873,371 @@ function makeLocalTimelineNodesV0116(start,endInclusive,mem=M()) {
     return nodes;
 }
 
+
+// =========================================================
+// v0.11.7 unified local temporal calibration + cleaner 0 API compression
+// =========================================================
+
+const WEEKDAY_CN_V0117=['周日','周一','周二','周三','周四','周五','周六'];
+
+function weekdayIndexISO_V0117(date){
+    const iso=normalizeDateInput(date)?.iso||null;
+    if(!iso) return null;
+    const t=Date.parse(iso+'T00:00:00Z');
+    return Number.isFinite(t)?new Date(t).getUTCDay():null;
+}
+
+function weekdayIndexTextV0117(time){
+    const m=String(time||'').match(/(?:星期|周)\s*([一二三四五六日天])/);
+    if(!m) return null;
+    return ({'日':0,'天':0,'一':1,'二':2,'三':3,'四':4,'五':5,'六':6})[m[1]] ?? null;
+}
+
+function weekdayLabelISO_V0117(date){
+    const i=weekdayIndexISO_V0117(date);
+    return i==null?'':WEEKDAY_CN_V0117[i];
+}
+
+function normalizeWeekdayInTimeV0117(time,date){
+    let t=String(time||'').trim();
+    if(!t||!date) return t||null;
+    const label=weekdayLabelISO_V0117(date);
+    if(!label) return t;
+    if(/星期\s*[一二三四五六日天]/.test(t)) t=t.replace(/星期\s*[一二三四五六日天]/,label);
+    else if(/周\s*[一二三四五六日天]/.test(t)) t=t.replace(/周\s*[一二三四五六日天]/,label);
+    return t;
+}
+
+function exactWorldStateMetaSameSourceV0117(indexes){
+    const chat=C().chat||[];
+    const out={date:null,time:null,location:null,index:null};
+    for(const i of [...new Set(indexes||[])].sort((a,b)=>b-a)){
+        const meta=extractWorldStateMetadataV0112(chat[i]);
+        if(!meta) continue;
+        if(out.index==null) out.index=i;
+        if(!out.date&&meta.date) out.date=meta.date;
+        if(!out.time&&meta.time) out.time=meta.time;
+        if(!out.location&&meta.location) out.location=meta.location;
+        if(out.date&&out.time&&out.location) break;
+    }
+    return out;
+}
+
+function structuredSummaryRecordsLocalV0117(m,userMsg=null,mem=M()){
+    const old=structuredSummaryRecordsLocalV0115(m,userMsg,mem);
+    if(old.length) return old;
+    if(!m||m.is_user) return [];
+    const out=[];
+    for(const block of summaryBlocksLocalV0115(m)){
+        const text=String(block.text||'').trim();
+        if(!text) continue;
+        // Pluto / similar preset abstract:
+        // serial:日月华章-047 time:2025-09-22 周一 | 19:30 ... scene: 主场景 - xxx ... plot: ...
+        const tm=text.match(/\btime\s*:\s*((?:20\d{2})[\-\/.]\d{1,2}[\-\/.]\d{1,2})\s*((?:星期|周)\s*[一二三四五六日天])?\s*(?:[|｜]\s*)?((?:[01]?\d|2[0-3])[:：][0-5]\d(?:\s*(?:-|~|～|—|–|至|到)\s*(?:[01]?\d|2[0-3])[:：][0-5]\d)?)/i);
+        const plot=text.match(/\bplot\s*:\s*([\s\S]*?)$/i);
+        if(!tm||!plot) continue;
+        const serial=text.match(/\bserial\s*:\s*([^\s]+)/i)?.[1]||'';
+        const no=serial.match(/(\d{1,4})$/)?.[1]||null;
+        let scene='';
+        const sm=text.match(/\bscene\s*:\s*([\s\S]*?)(?=\s+(?:【[^】]*】\s*:|plot\s*:)|$)/i);
+        if(sm){
+            scene=String(sm[1]||'')
+                .replace(/^\s*(?:主场景\s*[-—–:]?\s*)/i,'')
+                .replace(/\s*\(\s*停留回合\s*[:：][^)]*\)\s*$/,'')
+                .trim();
+        }
+        let event=String(plot[1]||'')
+            .replace(/\b(?:serial|time|NSFW|scene)\s*:[^；;\n]*/gi,' ')
+            .replace(/^[|｜:：\-–—\s]+/,'')
+            .trim();
+        if(!event) continue;
+        out.push({
+            tag:block.tag,
+            record_no:no,
+            date:normalizeSummaryDateLocalV0115(tm[1]),
+            time:`${tm[2]?tm[2].replace(/\s+/g,''):''}${tm[2]?' ':''}${tm[3].replace(/：/g,':')}`.trim(),
+            location:scene||null,
+            event
+        });
+    }
+    return out;
+}
+
+function sourceTemporalMetaLocalV0117(indexes,mem=M()){
+    const chat=C().chat||[];
+    const sorted=[...new Set(indexes||[])].sort((a,b)=>b-a);
+    const out={date:null,time:null,location:null,kind:null,reason:null};
+    const wm=exactWorldStateMetaSameSourceV0117(sorted);
+    if(wm.date) out.date=wm.date;
+    if(wm.time){ out.time=wm.time; out.kind='world_meta'; out.reason=`同 source #${wm.index} 的 /世界/当前时间`; }
+    if(wm.location) out.location=wm.location;
+
+    if(!out.time||!out.date||!out.location){
+        for(const i of sorted){
+            const m=chat[i];
+            if(!m||m.is_user) continue;
+            const prev=(i>0&&chat[i-1]?.is_user)?chat[i-1]:null;
+            const recs=structuredSummaryRecordsLocalV0117(m,prev,mem);
+            if(!recs.length) continue;
+            const rec=recs[recs.length-1];
+            if(!out.date&&rec.date) out.date=rec.date;
+            if(!out.time&&rec.time){ out.time=rec.time; out.kind='preset_summary'; out.reason=`同 source #${i} 的 <${rec.tag}> 时间`; }
+            if(!out.location&&rec.location) out.location=rec.location;
+            if(out.date&&out.time&&out.location) break;
+        }
+    }
+    if(!out.time){
+        const t=localTimeSameMessagesV0114(sorted);
+        if(t){ out.time=t; out.kind='raw_source'; out.reason='同 source 原文中的时间'; }
+    }
+    if(!out.date){
+        const d=explicitDateSameMessagesV0114(sorted)||directCanonicalDateCueV0114(sorted);
+        if(d) out.date=d;
+    }
+    if(!out.location){
+        const l=localLocationSameMessagesV0114(sorted);
+        if(l) out.location=l;
+    }
+    return out;
+}
+
+function reconcileTemporalLocalV0117({currentDate=null,previousTime=null,candidateDate=null,candidateTime=null,combined='',authority='raw'}){
+    let cur=normalizeDateInput(currentDate)?.iso||null;
+    const cand=normalizeDateInput(candidateDate)?.iso||null;
+    let date=cur;
+    let time=String(candidateTime||'').trim()||null;
+    const notes=[];
+    const strongDate=/^(?:world_meta|structured_summary|date_tag)$/.test(String(authority||''));
+
+    if(cand){
+        if(!cur) date=cand;
+        else{
+            const diff=dateDiffDaysLocalV0114(cur,cand);
+            if(diff!=null && diff>=0){ date=cand; if(diff>0) notes.push(`采用同 source 明确日期 ${cand}`); }
+            else if(diff!=null && diff<0){ date=cur; notes.push(`拒绝倒退日期 ${cand}`); }
+        }
+    }else if(cur && hasNextDayCueTextV0114(combined)){
+        date=addDaysISO(cur,1); notes.push('相对时间词推进 +1 天');
+    }
+
+    let p=parseStoryClock(previousTime), n=parseStoryClock(time);
+    // Only infer midnight rollover when no same-source strong date has already fixed the day.
+    if(date&&cur&&date===cur&&!cand && p!=null&&n!=null&&p>=18*60&&n<=8*60){
+        date=addDaysISO(cur,1); notes.push('深夜→凌晨跨日');
+    }
+
+    const wd=weekdayIndexTextV0117(time);
+    if(date&&wd!=null){
+        const actual=weekdayIndexISO_V0117(date);
+        if(actual!=null&&wd!==actual){
+            const next=addDaysISO(date,1);
+            const nextWd=weekdayIndexISO_V0117(next);
+            // Weekday is allowed to push the date only one day forward when the date
+            // was inherited / weak. An explicit world-state or structured date wins.
+            if(!strongDate && nextWd===wd){
+                date=next; notes.push('星期信息推进 +1 天');
+            }else{
+                notes.push(`星期与日期冲突，保留日期 ${date}`);
+            }
+        }
+    }
+
+    // If a same-day clock goes backward without a rollover/next-day cue, reject the
+    // stale clock rather than making the canonical source axis regress.
+    p=parseStoryClock(previousTime); n=parseStoryClock(time);
+    if(date&&cur&&date===cur&&p!=null&&n!=null&&n<p&&!(p>=18*60&&n<=8*60)&&!hasNextDayCueTextV0114(combined)){
+        if(authority==='raw'){
+            time=previousTime||time;
+            notes.push('拒绝同日倒退钟点');
+        }
+    }
+
+    if(date&&time) time=normalizeWeekdayInTimeV0117(time,date);
+    return {date:date||cand||cur||null,time,corrected:notes.length>0,reason:notes.join('；')};
+}
+
+function keyDialogueFactLocalV0117(text,userName=''){
+    const src=plainTextLocalV0114(text);
+    const u=String(userName||'').trim()||'USER';
+    if(!src) return '';
+    const micro=/乳头|阴道|小穴|肉棒|龟头|精液|潮吹|自慰|抽插|后庭|子宫|阴蒂|插入|高潮|淫水/i;
+    const matches=[...src.matchAll(/[“「『"]([^”」』"\n]{2,90})[”」』"]/g)];
+    for(const m of matches){
+        const q=String(m[1]||'').trim();
+        if(!q||micro.test(q)) continue;
+        if(!/[？?吗呢]|为什么|怎么|是否|要不要|能不能|可不可以|我想|我要|我不|不要|答应|拒绝|愿意|决定|去|来|走|留下|喜欢|爱|需要/.test(q)) continue;
+        const before=src.slice(Math.max(0,m.index-32),m.index);
+        let target='';
+        for(const name of knownStoryNamesLocalV0115(null,null,M())){
+            if(name!==u&&before.includes(name)){ target=name; break; }
+        }
+        const verb=/[？?吗呢]|为什么|怎么|是否|要不要|能不能|可不可以/.test(q)?'询问':'表示';
+        return `${u}${verb}${target||''}：“${q.slice(0,68)}${q.length>68?'…':''}”`;
+    }
+    return '';
+}
+
+function cleanupEventLocalV0117(text,userName=''){
+    let s=String(text||'')
+        .replace(/\bserial\s*:[^\s；;]+/gi,' ')
+        .replace(/\btime\s*:\s*20\d{2}[^；;]{0,45}/gi,' ')
+        .replace(/\bNSFW\s*:\s*[^；;\s]+/gi,' ')
+        .replace(/\bscene\s*:\s*[^；;]{0,120}(?=\bplot\s*:|$)/gi,' ')
+        .replace(/\bplot\s*:\s*/gi,' ')
+        .replace(/\s+/g,' ')
+        .trim();
+    const u=String(userName||'').trim();
+    if(u){
+        const esc=u.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+        s=s.replace(new RegExp(`(?:${esc})(?:\\s*[：:]?\\s*${esc})+`,'g'),u);
+        s=s.replace(new RegExp(`^${esc}\\s*[：:]\\s*${esc}\\s*`),u+' ');
+    }
+    s=s.replace(/；\s*[，。；]+/g,'；').replace(/[，；]\s*。/g,'。').replace(/；{2,}/g,'；');
+    const parts=s.split('；').map(x=>x.trim()).filter(x=>x.length>=7);
+    s=(parts.length?parts.join('；'):s).trim();
+    return s;
+}
+
+function compressEventLocalV0117(text,userName='',maxLen=170){
+    const original=String(text||'');
+    let out=compressEventLocalV0116(cleanupEventLocalV0117(original,userName),userName,maxLen);
+    out=cleanupEventLocalV0117(out,userName);
+    const strong=/来到|到达|离开|进入|返回|前往|醒来|睡去|发现|遇到|收到|告诉|询问|回答|答应|拒绝|决定|确认|约定|开始|结束|带离|带回|送往|联系|检查|治疗|受伤|袭击|威胁|救下|救出|阻止|保护|召集|表白|邀请|警告|提出|要求|同意|发生/;
+    const weak=/^(?:[\u4e00-\u9fa5A-Za-z·]{2,10}\s*)?(?:歪着头|咬了咬嘴唇|看着|望着|哭着|摇着头|脸通红|伸手推不动|缩了缩身子)[，。；\s]*$/;
+    if((!out||out.length<28||(!strong.test(out)&&weak.test(out)))&&userName){
+        const q=keyDialogueFactLocalV0117(original,userName);
+        if(q) out=q+'。';
+    }
+    out=cleanupEventLocalV0117(out,userName);
+    if(out.length>maxLen){
+        let cut=out.slice(0,maxLen);
+        const stop=Math.max(cut.lastIndexOf('。'),cut.lastIndexOf('；'));
+        out=(stop>=Math.floor(maxLen*.55)?cut.slice(0,stop+1):cut).trim();
+    }
+    if(out&&!/[。！？!?]$/.test(out)) out+='。';
+    return out;
+}
+
+function makeLocalTimelineNodesV0117(start,endInclusive,mem=M()){
+    const chat=C().chat||[];
+    const nodes=[];
+    let currentDate=priorReliableDateV0114(mem,start);
+    let previousTime=null;
+    let i=start;
+
+    while(i<=endInclusive){
+        let a=i,b=i,userMsg=null,assistantMsg=null;
+        const first=chat[i];
+        if(first?.is_user&&i+1<=endInclusive&&chat[i+1]&&!chat[i+1].is_user){ userMsg=first; assistantMsg=chat[i+1]; b=i+1; }
+        else if(!first?.is_user){ assistantMsg=first; if(i>start&&chat[i-1]?.is_user&&i-1>=start){ a=i-1; userMsg=chat[i-1]; } }
+        else userMsg=first;
+
+        const indexes=[]; for(let k=a;k<=b;k++) indexes.push(k);
+        const source=canonicalSourceV0113(indexes)||`#${i}`;
+        const combined=indexes.map(k=>cleanMesForSummaryV0110(chat[k])).join('\n');
+        const world=exactWorldStateMetaSameSourceV0117(indexes);
+        const rawTime=localTimeSameMessagesV0114(indexes);
+        const rawDate=explicitDateSameMessagesV0114(indexes);
+        const rawLoc=localLocationSameMessagesV0114(indexes);
+        const records=structuredSummaryRecordsLocalV0117(assistantMsg,userMsg,mem);
+        const userName=String(userMsg?.name||'').trim();
+
+        if(records.length){
+            for(const rec of records){
+                const candidateDate=rec.date||world.date||rawDate||null;
+                const candidateTime=rec.time||world.time||rawTime||null;
+                const authority=rec.date?'structured_summary':(world.date?'world_meta':'raw');
+                const tr=reconcileTemporalLocalV0117({currentDate,previousTime,candidateDate,candidateTime,combined:`${combined}\n${rec.event||''}`,authority});
+                if(tr.date) currentDate=tr.date;
+                if(tr.time) previousTime=tr.time;
+                const node={date:tr.date||null,time:tr.time,event:compressEventLocalV0117(rec.event,userName,170),source};
+                const loc=rec.location||world.location||rawLoc; if(loc) node.location=loc;
+                if(tr.corrected){ node.time_evidence='structured'; node.time_evidence_label='连续性校准时间'; node.time_evidence_reason=tr.reason; }
+                else if(rec.time){ node.time_evidence='structured'; node.time_evidence_label='预设摘要时间'; node.time_evidence_reason=`来自本批 source 的 <${rec.tag}> 结构化记录${rec.record_no?` #${rec.record_no}`:''}`; }
+                else if(world.time){ node.time_evidence='structured'; node.time_evidence_label='变量状态时间'; node.time_evidence_reason=`同 source #${world.index} 的 /世界/当前时间`; }
+                else { const te=classifySourceTimeEvidence(node); node.time_evidence=te.level; node.time_evidence_label=te.label; node.time_evidence_reason=te.reason; }
+                if(node.event) nodes.push(node);
+            }
+        }else{
+            const candidateDate=world.date||rawDate||null;
+            const candidateTime=world.time||rawTime||null;
+            const authority=world.date?'world_meta':'raw';
+            const tr=reconcileTemporalLocalV0117({currentDate,previousTime,candidateDate,candidateTime,combined,authority});
+            if(tr.date) currentDate=tr.date;
+            if(tr.time) previousTime=tr.time;
+            const rawEvent=localEventForPairV0114(userMsg,assistantMsg);
+            const event=compressEventLocalV0117(rawEvent,userName,170);
+            const node={date:tr.date||null,time:tr.time,event,source,__local_kind_v0115:'fallback'};
+            const loc=world.location||rawLoc; if(loc) node.location=loc;
+            if(tr.corrected){ node.time_evidence='structured'; node.time_evidence_label='连续性校准时间'; node.time_evidence_reason=tr.reason; }
+            else if(world.time){ node.time_evidence='structured'; node.time_evidence_label='变量状态时间'; node.time_evidence_reason=`同 source #${world.index} 的 /世界/当前时间`; }
+            else { const te=classifySourceTimeEvidence(node); node.time_evidence=te.level; node.time_evidence_label=te.label; node.time_evidence_reason=te.reason; }
+            nodes.push(node);
+        }
+        i=(b>=i?b+1:i+1);
+    }
+    return finalizeLocalNodesV0115(nodes).map(n=>{
+        const idx=[...sourceIndexes(n?.source)].sort((a,b)=>a-b);
+        let userName=''; for(const j of idx){ if(chat[j]?.is_user){ userName=String(chat[j]?.name||'').trim(); if(userName) break; } }
+        const x={...n}; x.event=compressEventLocalV0117(x.event,userName,170); return x;
+    });
+}
+
+function repairExistingTimelineTemporalV0117(mem,start=0,endInclusive=null){
+    const rows=Array.isArray(mem?.timeline)?mem.timeline:[];
+    const chat=C().chat||[];
+    const maxEnd=Number.isInteger(endInclusive)?endInclusive:Math.max(0,chat.length-1);
+    const ordered=rows.map((e,pos)=>({e,pos,first:sourceFirst(e?.source)})).filter(x=>x.first>=0).sort((a,b)=>a.first-b.first||a.pos-b.pos);
+    let currentDate=normalizeDateInput(mem?.story_start)?.iso||null;
+    let previousTime=null;
+    let timeFixed=0,dateFixed=0,locationFixed=0,weekdayFixed=0,regressionBlocked=0,scanned=0;
+
+    for(const row of ordered){
+        const e=row.e;
+        const all=[...sourceIndexes(e?.source)].sort((a,b)=>a-b);
+        const idx=all.filter(i=>i>=start&&i<=maxEnd);
+        if(!idx.length){
+            const d=normalizeDateInput(e?.date)?.iso||null;
+            if(d&&(!currentDate||dateDiffDaysLocalV0114(currentDate,d)>=0)) currentDate=d;
+            if(e?.time) previousTime=e.time;
+            continue;
+        }
+        scanned++;
+        const meta=sourceTemporalMetaLocalV0117(idx,mem);
+        const oldDate=normalizeDateInput(e?.date)?.iso||null;
+        const oldTime=String(e?.time||'').trim()||null;
+        const candidateDate=meta.date||oldDate||null;
+        let candidateTime=oldTime;
+        const needTime=isMissingStoryValueV0112(oldTime)||isUnresolvedStoryTimeV0112(oldTime);
+        if(needTime&&meta.time) candidateTime=meta.time;
+        // If the existing weekday contradicts a stronger same-source date and the
+        // world/preset metadata also has a time, prefer that structured time.
+        if(meta.date&&oldTime&&weekdayIndexTextV0117(oldTime)!=null&&weekdayIndexTextV0117(oldTime)!==weekdayIndexISO_V0117(meta.date)&&meta.time){
+            candidateTime=meta.time;
+        }
+        const authority=meta.date?(meta.kind==='preset_summary'?'structured_summary':'world_meta'):'raw';
+        const combined=idx.map(i=>cleanMesForSummaryV0110(chat[i])).join('\n');
+        const tr=reconcileTemporalLocalV0117({currentDate,previousTime,candidateDate,candidateTime,combined,authority});
+
+        if(tr.date&&oldDate!==tr.date){ e.date=tr.date; dateFixed++; }
+        else if(!oldDate&&tr.date){ e.date=tr.date; dateFixed++; }
+        if(tr.time&&oldTime!==tr.time){
+            if(oldTime&&parseStoryClock(tr.time)===parseStoryClock(oldTime)&&weekdayIndexTextV0117(oldTime)!==weekdayIndexTextV0117(tr.time)) weekdayFixed++;
+            if(tr.reason?.includes('拒绝同日倒退钟点')) regressionBlocked++;
+            e.time=tr.time; timeFixed++;
+        }
+        if((isMissingStoryValueV0112(e?.location))&&meta.location){ e.location=meta.location; locationFixed++; }
+        if(tr.time){
+            if(tr.corrected){ e.time_evidence='structured'; e.time_evidence_label='连续性校准时间'; e.time_evidence_reason=tr.reason; }
+            else if(meta.kind==='world_meta'){ e.time_evidence='structured'; e.time_evidence_label='变量状态时间'; e.time_evidence_reason=meta.reason||'同 source 世界状态时间'; }
+            else if(meta.kind==='preset_summary'){ e.time_evidence='structured'; e.time_evidence_label='预设摘要时间'; e.time_evidence_reason=meta.reason||'同 source 预设摘要时间'; }
+        }
+        if(tr.date) currentDate=tr.date;
+        if(tr.time) previousTime=tr.time;
+    }
+    return {scanned,timeFixed,dateFixed,locationFixed,weekdayFixed,regressionBlocked,start,endInclusive:maxEnd};
+}
+
 function timelineEntryFullyInsideRangeV0115(e,start,endInclusive){
     const idx=sourceIndexes(e?.source);
     return idx.length>0 && idx.every(i=>i>=start && i<=endInclusive);
@@ -4880,7 +5245,7 @@ function timelineEntryFullyInsideRangeV0115(e,start,endInclusive){
 
 function priorCodeRepairAuditV0115(mem,start,endInclusive){
     return (mem?.audit||[]).some(a=>{
-        if(!/^timeline_gap_code_backfill_v011[456]$/.test(String(a?.type||''))) return false;
+        if(!/^timeline_gap_code_backfill_v011[4567]$/.test(String(a?.type||''))) return false;
         const r=Array.isArray(a?.range)?a.range:[];
         const x=Number(r[0]), y=Number(r[1]);
         return Number.isFinite(x)&&Number.isFinite(y)&&x<=endInclusive&&y>=start;
@@ -4892,7 +5257,7 @@ function latestCodeRepairRangeV0115(mem=M()){
     const arr=Array.isArray(mem?.audit)?mem.audit:[];
     for(let i=arr.length-1;i>=0;i--){
         const a=arr[i];
-        if(!/^timeline_gap_code_backfill_v011[456]$/.test(String(a?.type||''))) continue;
+        if(!/^timeline_gap_code_backfill_v011[4567]$/.test(String(a?.type||''))) continue;
         const r=Array.isArray(a?.range)?a.range:[];
         const x=Number(r[0]), y=Number(r[1]);
         if(Number.isInteger(x)&&Number.isInteger(y)&&x>=0&&y>=x) return {start:x,end:y,type:a.type};
@@ -4926,7 +5291,7 @@ async function repairTimelineGapLocalV0115() {
         ? '\n检测到这个范围之前做过 0 API 代码补档：本次会先移除“完全位于该范围内”的旧代码补档 timeline，再按结构化规则重建。'
         : '\n本次会向该范围补入 timeline；不会修改原聊天。';
     if(!confirm(
-        `将以 v0.11.6 本地代码处理 #${start}-#${endInclusive}（0 API）。\n`+
+        `将以 v0.11.7 本地代码处理 #${start}-#${endInclusive}（0 API）。\n`+
         '会把 <abstract>/<meow_FM> 的多条记录拆成独立 timeline，并把事件压缩为约 60-190 字。\n'+
         '没有结构化摘要的楼层使用原正文事实性抽取；完成后还会修复当前游标之前已有 timeline 的“未明确时间”。'+replaceMsg+'\n\n'+
         '人物/关系/待办/当前游标不会被本地代码重写。继续吗？'
@@ -4939,8 +5304,8 @@ async function repairTimelineGapLocalV0115() {
     GAP_REPAIR_RUNNING_V0112=true; BUSY=true;
     try{
         const status=document.getElementById('smm112_gap_status');
-        if(status) status.textContent=`v0.11.6 本地代码正在处理 #${start}-#${endInclusive}（0 API）…`;
-        const nodes=makeLocalTimelineNodesV0116(start,endInclusive,snapshot);
+        if(status) status.textContent=`v0.11.7 本地代码正在处理 #${start}-#${endInclusive}（0 API）…`;
+        const nodes=makeLocalTimelineNodesV0117(start,endInclusive,snapshot);
         const coverage=coverageStatsLocalV0114(nodes,start,endInclusive);
         if(!nodes.length) throw new Error('本地代码没有生成任何 timeline 节点。');
         if(coverage.missing.length){
@@ -4974,26 +5339,28 @@ async function repairTimelineGapLocalV0115() {
         target.audit=Array.isArray(target.audit)?target.audit:[];
         target.audit.push({
             at:new Date().toISOString(),
-            type:'timeline_gap_code_backfill_v0116',
+            type:'timeline_gap_code_backfill_v0117',
             range:[start,endInclusive],
             api_calls:0,
             structured_parser:true,
             local_fact_compression:true,
+            unified_temporal_calibration:true,
+            weekday_consistency:true,
             replaced_previous_code_nodes:removed,
             nodes_generated:nodes.length,
             nodes_added:(target.timeline||[]).length-before,
             coverage:`${coverage.covered}/${coverage.total}`,
             preserved_cursor:snapshot.last_processed_index
         });
-        // v0.11.6: after rebuilding the gap, also repair unresolved time/date on
+        // v0.11.7: after rebuilding the gap, also repair unresolved time/date on
         // already-existing later timeline nodes using only their own source messages.
         // This is what fixes old #1623+ rows that remained “未明确” even after the gap itself was rebuilt.
         const repairEnd=Math.min(chat.length-1,Math.max(endInclusive,Number(snapshot.last_processed_index)||endInclusive));
-        const temporalRepair=repairExistingTimelineTemporalV0116(target,start,repairEnd);
+        const temporalRepair=repairExistingTimelineTemporalV0117(target,start,repairEnd);
         const currentStateSync=syncCurrentStoryStateFromLatestMetaV0116(target,repairEnd);
         target.audit.push({
             at:new Date().toISOString(),
-            type:'timeline_time_repair_v0116',
+            type:'timeline_time_repair_v0117',
             range:[start,repairEnd],
             api_calls:0,
             ...temporalRepair,
@@ -5009,11 +5376,11 @@ async function repairTimelineGapLocalV0115() {
         }
         const remaining=timelineCoverageGapsV0112(target);
         if(status) status.textContent=remaining.length
-            ? `v0.11.6 代码处理完成，但仍检测到大段缺口：#${remaining[0].start}-#${remaining[0].end}；另修复未明确时间 ${temporalRepair.timeFixed} 条${currentStateSync.time?`，当前剧情时间已同步`:''}。`
-            : `v0.11.6 代码处理完成：覆盖 ${coverage.covered}/${coverage.total} 楼，生成 ${nodes.length} 个 timeline 节点${removed?`，替换旧代码节点 ${removed} 条`:''}；另修复未明确时间 ${temporalRepair.timeFixed} 条${currentStateSync.time?`，当前剧情时间已同步`:''}。`;
+            ? `v0.11.7 代码处理完成，但仍检测到大段缺口：#${remaining[0].start}-#${remaining[0].end}；时间校准 ${temporalRepair.timeFixed} 条、日期校准 ${temporalRepair.dateFixed} 条、星期校准 ${temporalRepair.weekdayFixed} 条${currentStateSync.time?`，当前剧情时间已同步`:''}。`
+            : `v0.11.7 代码处理完成：覆盖 ${coverage.covered}/${coverage.total} 楼，生成 ${nodes.length} 个 timeline 节点${removed?`，替换旧代码节点 ${removed} 条`:''}；时间校准 ${temporalRepair.timeFixed} 条、日期校准 ${temporalRepair.dateFixed} 条、星期校准 ${temporalRepair.weekdayFixed} 条${currentStateSync.time?`，当前剧情时间已同步`:''}。`;
         toast(`0 API 重建完成：#${start}-#${endInclusive}，生成 ${nodes.length} 条 timeline${removed?`，替换旧结果 ${removed} 条`:''}；时间修复 ${temporalRepair.timeFixed} 条${currentStateSync.time?`，当前剧情时间已同步`:''}。`,'success');
     }catch(e){
-        console.error('[StoryMemory] v0.11.6 local code gap repair failed',e);
+        console.error('[StoryMemory] v0.11.7 local code gap repair failed',e);
         c.chatMetadata[META_KEY]=snapshot;
         await saveMeta();
         const status=document.getElementById('smm112_gap_status');
@@ -5026,26 +5393,26 @@ async function repairTimelineGapLocalV0115() {
 }
 
 
-async function repairTimelineTimesLocalV0116() {
+async function repairTimelineTimesLocalV0117() {
     if (BUSY || HISTORY_RUNNING || GAP_REPAIR_RUNNING_V0112) return toast('当前已有总结/重建任务在运行。','warning');
     const chat=C().chat||[];
     const mem=M();
     const end=Math.min(chat.length-1,Math.max(0,Number(mem?.last_processed_index)||chat.length-1));
-    if(!confirm(`将以 0 API 扫描当前时间线 #0-#${end}，只填补“未明确/无法验证”的日期、时间和地点；已有明确时间不会被覆盖。继续吗？`)) return;
+    if(!confirm(`将以 0 API 扫描当前时间线 #0-#${end}，校准日期+星期+时分：会修复“未明确”、日期分组错误、星期冲突和同日倒退；只使用同 source 原文/预设摘要/世界状态元数据。继续吗？`)) return;
     BUSY=true;
     const snapshot=cloneJSONV0112(mem);
     try{
-        const r=repairExistingTimelineTemporalV0116(mem,0,end);
+        const r=repairExistingTimelineTemporalV0117(mem,0,end);
         const currentStateSync=syncCurrentStoryStateFromLatestMetaV0116(mem,end);
         mem.audit=Array.isArray(mem.audit)?mem.audit:[];
-        mem.audit.push({at:new Date().toISOString(),type:'timeline_time_repair_v0116',range:[0,end],api_calls:0,...r,current_state_sync:currentStateSync});
+        mem.audit.push({at:new Date().toISOString(),type:'timeline_time_repair_v0117',range:[0,end],api_calls:0,...r,current_state_sync:currentStateSync});
         if(mem.audit.length>50) mem.audit=mem.audit.slice(-50);
         await saveMeta(); refresh(); refreshNative();
         const box=document.getElementById('smm2_native_memory_box');
         if(box?.dataset.open==='1'){ box.innerHTML=memoryReadableHTML(); if(M().schema===SMM4_SCHEMA) bindHistoryBrowserV4(); else bindHistoryBrowserLegacy(); }
-        toast(`0 API 时间修复完成：时间 ${r.timeFixed} 条，日期 ${r.dateFixed} 条，地点 ${r.locationFixed} 条${currentStateSync.time?'；当前剧情时间已同步':''}。`,'success');
+        toast(`0 API 时间校准完成：时间 ${r.timeFixed} 条，日期 ${r.dateFixed} 条，星期 ${r.weekdayFixed} 条，阻止倒退 ${r.regressionBlocked} 条，地点 ${r.locationFixed} 条${currentStateSync.time?'；当前剧情时间已同步':''}。`,'success');
     }catch(e){
-        console.error('[StoryMemory] v0.11.6 timeline time repair failed',e);
+        console.error('[StoryMemory] v0.11.7 timeline time repair failed',e);
         C().chatMetadata[META_KEY]=snapshot; await saveMeta();
         toast(`时间修复失败，原记忆已恢复：${e?.message||e}`,'error');
     }finally{ BUSY=false; refresh(); refreshNative(); }
@@ -5400,7 +5767,7 @@ function stat() {
 function panelHTML() {
     return `<div id="${PANEL_ID}" class="smm2-hidden">
       <div class="smm2-card">
-        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.6</span></div><button id="smm2_close">×</button></div>
+        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.7</span></div><button id="smm2_close">×</button></div>
         <div id="smm2_stats" class="smm2-stats"></div>
         <div class="smm2-grid">
           <button id="smm2_new">总结新增</button>
@@ -6780,7 +7147,7 @@ function nativeManagerHTML() {
                     <label><span>结束 #</span><input id="smm112_gap_to" type="number" min="0" step="1" placeholder="1622"></label>
                   </div>
                   <button id="smm114_gap_code_repair" class="menu_button smm2-primary-tool">代码压缩重建这个范围（0 API）</button>
-                  <button id="smm116_time_repair" class="menu_button">仅修复时间线“未明确时间”（0 API）</button>
+                  <button id="smm116_time_repair" class="menu_button">校准时间线日期/星期/时分（0 API）</button>
                   <button id="smm112_gap_repair" class="menu_button">API 补总结这个范围</button>
                   <div class="smm2-note">0 API：结构化摘要会拆分并压缩为短事件；没有摘要时从原正文做事实性抽取。重建后还会用每条 timeline 自己的 source 修复后续“未明确时间”，不会更新人物/关系/待办。</div>
                   <div id="smm112_gap_status" class="smm2-note"></div>
@@ -7140,7 +7507,7 @@ function bindNativeManager() {
     const gapCodeRepairBtnV0114=q('smm114_gap_code_repair');
     if(gapCodeRepairBtnV0114) gapCodeRepairBtnV0114.onclick=repairTimelineGapLocalV0115;
     const timeRepairBtnV0116=q('smm116_time_repair');
-    if(timeRepairBtnV0116) timeRepairBtnV0116.onclick=repairTimelineTimesLocalV0116;
+    if(timeRepairBtnV0116) timeRepairBtnV0116.onclick=repairTimelineTimesLocalV0117;
     const gapRepairBtnV0112=q('smm112_gap_repair');
     if(gapRepairBtnV0112) gapRepairBtnV0112.onclick=repairTimelineGapV0112;
     const cleanOrphansBtn=q('smm84_clean_orphans');
@@ -7440,7 +7807,7 @@ function refreshNative() {
         if(priorRangeV0115){
             if(fromV0112 && !String(fromV0112.value||'').trim()) fromV0112.value=priorRangeV0115.start;
             if(toV0112 && !String(toV0112.value||'').trim()) toV0112.value=priorRangeV0115.end;
-            if(gapStatusV0112) gapStatusV0112.textContent=`未检测到当前大段断档；已填入上一次 0 API 代码补档范围 #${priorRangeV0115.start}-#${priorRangeV0115.end}，可直接用 v0.11.6 结构化重建。`;
+            if(gapStatusV0112) gapStatusV0112.textContent=`未检测到当前大段断档；已填入上一次 0 API 代码补档范围 #${priorRangeV0115.start}-#${priorRangeV0115.end}，可直接用 v0.11.7 结构化重建。`;
         }else if(gapStatusV0112) {
             gapStatusV0112.textContent='未检测到超过保护阈值的大段时间线断档。';
         }
@@ -7465,7 +7832,7 @@ function installNativeExtensionEntry() {
 
         wrap.innerHTML = `
           <div class="inline-drawer-toggle inline-drawer-header">
-            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.6</span></div>
+            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.7</span></div>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
           </div>
           <div class="inline-drawer-content">
@@ -7693,7 +8060,7 @@ function initializeExtension() {
     try {
         installUI();
         refresh();
-        console.log('[StoryMemory] v0.11.6 loaded successfully');
+        console.log('[StoryMemory] v0.11.7 loaded successfully');
     } catch (e) {
         console.error('[StoryMemory] UI initialization failed', e);
     }
