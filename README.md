@@ -1,14 +1,20 @@
-# Story Memory Manager v0.11.3
+# Story Memory Manager v0.11.4
 
-This build is a targeted reliability release for long-form SillyTavern chats.
+本版针对“历史时间线有缺口，但总结 API 已接近额度上限”的场景增加 0 API 本地代码补档。
 
-Key behavior:
+## 推荐用法
 
-- Prevents summary cursor advancement when a real batch produces no traceable timeline.
-- Detects large historical source gaps and blocks memory injection/auto-hide across them.
-- Provides targeted “补总结缺失楼层”.
-- v0.11.3 automatically normalizes common model source formatting, retries timeline extraction once, and adaptively splits a failing repair batch instead of requiring repeated manual attempts.
-- Historical gap repair is rollback-safe and does not modify original chat JSONL.
-- Date/time/location may be read only from the three exact world-state JSONPatch paths as bounded metadata; all other UpdateVariable data remains excluded from canonical story memory.
+1. 自动增量总结：关闭。
+2. 生成时注入剧情记忆：关闭。
+3. 总结后自动隐藏：关闭。
+4. 打开 `更多工具 → 历史重建 → 补总结缺失楼层`。
+5. 保持自动识别出的起止楼层，例如 `1489 → 1622`。
+6. 点击 **代码补档这个范围（0 API）**。
 
-For the known gap, use the detected range `#1489-#1622` after updating. Keep automatic summary, memory injection, and auto-hide off until the repaired timeline is inspected.
+该按钮不会请求模型。它只建立可追溯的 timeline 桥接节点，优先读取原消息已有摘要；没有摘要时做抽取式压缩。
+
+## 重要限制
+
+0 API 模式不是 LLM 摘要的等价替代品。它不会主动推理人物关系、人物锚点、主线、待办或隐含因果。它的目标是：低成本、安全地把漏掉的原始楼层重新覆盖进 timeline，避免 SMM 把整段剧情当作不存在。
+
+补档完成后先检查时间线和日期，再决定是否重新启用记忆注入。

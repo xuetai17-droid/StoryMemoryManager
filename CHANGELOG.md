@@ -1,22 +1,17 @@
-# Changelog
+# Story Memory Manager v0.11.4
 
-## 0.11.3
+## 0 API 本地代码补档
 
-- 修复 v0.11.2 “补总结缺失楼层”在模型返回非标准 source 格式时反复停在首批的问题。
-- 新增安全 source 归一化：仅在当前批次范围内兼容 `#1489-1508`、`1489-1508`、`1489至1508`、`1489,1490`、`楼层 1490` 等常见模型格式，并统一改写为 canonical `#...` source。
-- source 归一化不会吞掉越界引用：若模型明确引用任一批次外 `#楼层`，整条 source 仍拒绝，不会裁剪成“看似合法”的本批 source。
-- 首次完整记忆总结若没有任何合法 timeline，自动执行一次“timeline-only source 修复重试”，只读取本批 canonical 原文并强制使用允许楼层编号。
-- timeline-only 重试仍失败时，缺口补总结会自动递归拆分当前批次（20→约10→约4/6→2），避免一个坏 source 让整个 134 楼修复永久卡死。
-- 最小拆分仍失败则停止并回滚，继续保持 v0.11.2 的“游标不推进、原记忆恢复”安全原则。
-- 失败审计增加 incoming timeline/source 预览、归一化数量和专用重试错误，便于后续精确定位。
-- 保留 v0.11.2 的断档检测、注入/隐藏保护、定向补总结、世界状态 date/time/location 元数据桥与否定跨午夜保护。
+- 新增“代码补档这个范围（0 API）”。该路径完全不调用总结模型/API。
+- 优先复用角色预设已经生成的 `<abstract>`、`<meow_FM>`、`<scene_summary>`、`<memory_summary>`。
+- 若原回复没有内嵌摘要，则从 USER 原文与 assistant canonical `<content>` 做本地抽取式压缩。
+- 每两个 user/assistant 对合并为一个 timeline 节点，避免一次补档生成过多时间线条目。
+- 代码补档只补 `timeline`，不凭本地启发式重写 characters / relationships / facts / open_loops / active_arcs。
+- 继续使用 `/世界/当前日期`、`/世界/当前时间`、`/世界/当前地点` 的白名单元数据来校准本地节点。
+- 本地日期规则拒绝旧 metadata 导致的日期回退；+1 日仅在明确“第二天/次日”等、可靠跨午夜钟点、或 canonical 正文明示日期时接受。
+- 补档前自动备份 SMM memory；失败时恢复原记忆；不修改原聊天，不改变 `last_processed_index`。
+- 保留 v0.11.3 的 API 补总结按钮作为可选方式，但不再是缺口修复的首选按钮。
 
-## 0.11.2
+## 继承
 
-- 修复总结批次被 source firewall 全部拒绝、或模型返回空 timeline 时游标仍继续推进导致的 silent-drop / 时间线断档。
-- 新增本批 source 范围校验：timeline source 必须引用本批真实 #消息编号。
-- 新增大段时间线覆盖缺口检测，并阻止安全记忆注入与自动隐藏跨过未修复缺口。
-- 新增“补总结缺失楼层”工具：仅重做指定 #楼层区间，保留 `last_processed_index`、当前剧情日期/时间、current_scene、active_arcs、open_loops 与当前人物临时状态。
-- 定向补总结使用缺口之前的历史工作记忆作为上下文，避免后续剧情状态反向污染历史修复。
-- 定向补总结自动创建最近一次回滚备份，失败时恢复原记忆。
-- 新增仅限 `/世界/当前日期`、`/世界/当前时间`、`/世界/当前地点` 的 UpdateVariable 元数据桥；完整变量块继续从 canonical 剧情总结输入中剔除。
+- v0.11.2/v0.11.3 的 silent-drop 游标保护、source 校验、断档检测、断档期间禁止安全注入/自动隐藏、World State metadata bridge 均保留。
