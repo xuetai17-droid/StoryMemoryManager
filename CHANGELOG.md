@@ -1,9 +1,15 @@
-# Story Memory Manager v0.11.11
+# Story Memory Manager v0.11.12
 
-## Hybrid 0-API 收口版
-- 0 API 改为三级管线：可靠 `<abstract><plot>` 直读；明确强事实保守提取；复杂内容不再制造假摘要，而进入隐藏的“需要 AI”队列。
-- 彻底禁止空白/占位 timeline。coverage 与剧情事实分离。
-- 代码处理范围用隐藏 coverage 审计登记，不会因“没有可安全摘要”再次被误判成大段断档。
-- 输出统计：检查楼数、可靠处理楼数、需要 AI 楼数及连续范围。
-- 保留 v0.11.10 的绝对日期→星期、时间连续性、跨日与 `<abstract><plot>` 直读逻辑。
-- 修复旧代码补档审计正则只识别 v0.11.4-v0.11.9、遗漏 v0.11.10+ 的问题。
+## Fixed
+
+- Fixed a deterministic `ReferenceError: triage is not defined` in the v0.11.11 hybrid 0-API rebuild path.
+- Hybrid triage state is now initialized inside `makeLocalTimelineNodesV0117()` before any structured/fallback branch uses it.
+- Structured `<abstract><plot>` records now mark their source rows as `reliable` only when at least one non-empty visible event was actually accepted.
+- Structured records that parse but collapse to no safe event are now routed to `needsAI` instead of being silently counted as reliable.
+- `presetPlotNodes` and `factualFallbackNodes` counters are updated only on accepted nodes.
+- Existing transaction rollback behavior is preserved: any unexpected code-mode exception restores the pre-run memory snapshot.
+
+## Compatibility
+
+- Keeps the v0.11.11 hybrid policy: reliable preset plot first, conservative factual fallback second, otherwise coverage-only + optional AI queue.
+- No API call is introduced by code rebuild, time calibration, coverage recording, or triage statistics.
