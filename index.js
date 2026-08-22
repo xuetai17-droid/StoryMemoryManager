@@ -1,4 +1,4 @@
-// Story Memory Manager v0.11.15
+// Story Memory Manager v0.11.16
 // canonical-input purification / character-core preservation / story-arc continuity
 // does not rewrite original chat JSONL
 
@@ -6147,7 +6147,7 @@ function stat() {
 function panelHTML() {
     return `<div id="${PANEL_ID}" class="smm2-hidden">
       <div class="smm2-card">
-        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.15</span></div><button id="smm2_close">×</button></div>
+        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.16</span></div><button id="smm2_close">×</button></div>
         <div id="smm2_stats" class="smm2-stats"></div>
         <div class="smm2-grid">
           <button id="smm2_new">总结新增</button>
@@ -6694,16 +6694,36 @@ function unifiedPostProcessV01114(mem=M(), options={}) {
 }
 
 async function runUnifiedPostProcessV01114(){
-    if(BUSY||HISTORY_RUNNING||GAP_REPAIR_RUNNING_V0112) return toast('当前已有总结/重建任务在运行。','warning');
-    const mem=M();
-    const before=qualityAuditV01114(mem);
-    const result=unifiedPostProcessV01114(mem,{audit:true});
-    await saveMeta(); refresh(); refreshNative();
-    const q=result.quality;
-    toast(`统一整理完成：实体修正 ${result.entities.changed} 处（人物别名合并 ${result.entities.merged_characters||0}），合并重复 timeline ${result.dedup.merged} 条，移除空事件 ${result.dedup.empty_removed} 条。`,'success');
     const status=document.getElementById('smm112_gap_status');
-    if(status) status.textContent=`v0.11.15 质量审计：timeline ${q.timeline}；主角泛称残留 ${q.generic_aliases}；人物泛称键 ${q.generic_character_keys}；人物别名重复 ${q.alias_character_duplicates}；重复关系对 ${q.duplicate_relationship_pairs}；非法 source ${q.invalid_sources}；空事件 ${q.empty_events}；疑似重复 ${q.duplicate_candidates}；时间倒退 ${q.time_backtracks}。`;
-    return {before,...result};
+    if(BUSY||HISTORY_RUNNING||GAP_REPAIR_RUNNING_V0112){
+        if(status) status.textContent='统一实体整理未启动：当前已有总结/重建任务在运行。';
+        return toast('当前已有总结/重建任务在运行。','warning');
+    }
+    BUSY=true;
+    try {
+        if(status) status.textContent='v0.11.16 正在执行：实体统一 / 关系去重 / timeline 去重 / 质量审计（0 API）…';
+        toast('开始执行实体与关系整理（0 API）…','info');
+        const mem=M();
+        if(!mem || typeof mem!=='object') throw new Error('当前记忆对象不可用');
+        const before=qualityAuditV01114(mem);
+        const result=unifiedPostProcessV01114(mem,{audit:true});
+        await saveMeta();
+        refresh();
+        refreshNative();
+        const q=result.quality;
+        toast(`统一整理完成：实体修正 ${result.entities.changed} 处（人物别名合并 ${result.entities.merged_characters||0}），合并重复 timeline ${result.dedup.merged} 条，移除空事件 ${result.dedup.empty_removed} 条。`,'success');
+        const latestStatus=document.getElementById('smm112_gap_status');
+        if(latestStatus) latestStatus.textContent=`v0.11.16 质量审计：timeline ${q.timeline}；主角泛称残留 ${q.generic_aliases}；人物泛称键 ${q.generic_character_keys}；人物别名重复 ${q.alias_character_duplicates}；重复关系对 ${q.duplicate_relationship_pairs}；非法 source ${q.invalid_sources}；空事件 ${q.empty_events}；疑似重复 ${q.duplicate_candidates}；时间倒退 ${q.time_backtracks}。`;
+        return {before,...result};
+    } catch(e) {
+        console.error('[StoryMemory] v0.11.16 unified entity cleanup failed',e);
+        const latestStatus=document.getElementById('smm112_gap_status');
+        if(latestStatus) latestStatus.textContent='统一实体整理失败：'+(e?.message||e);
+        toast('统一实体整理失败：'+(e?.message||e),'error');
+        return null;
+    } finally {
+        BUSY=false;
+    }
 }
 
 function mergedCharactersView() {
@@ -8198,6 +8218,16 @@ function bindNativeManager() {
     if(timeRepairBtnV0116) timeRepairBtnV0116.onclick=repairTimelineTimesLocalV0117;
     const unifiedPostBtnV01114=q('smm114_unified_post');
     if(unifiedPostBtnV01114) unifiedPostBtnV01114.onclick=runUnifiedPostProcessV01114;
+    // v0.11.16: DOM re-render fallback; prevents this button from becoming inert.
+    if(!window.__SMM_V01116_UNIFIED_DELEGATE__){
+        window.__SMM_V01116_UNIFIED_DELEGATE__=true;
+        document.addEventListener('click',(ev)=>{
+            const btn=ev?.target?.closest?.('#smm114_unified_post');
+            if(!btn || typeof btn.onclick==='function') return;
+            ev.preventDefault();
+            runUnifiedPostProcessV01114();
+        });
+    }
     const needsAiRepairBtnV01113=q('smm113_needs_ai_repair');
     if(needsAiRepairBtnV01113) needsAiRepairBtnV01113.onclick=repairNeedsAiOnlyV01113;
     const gapRepairBtnV0112=q('smm112_gap_repair');
@@ -8524,7 +8554,7 @@ function installNativeExtensionEntry() {
 
         wrap.innerHTML = `
           <div class="inline-drawer-toggle inline-drawer-header">
-            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.15</span></div>
+            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.16</span></div>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
           </div>
           <div class="inline-drawer-content">
@@ -8752,7 +8782,7 @@ function initializeExtension() {
     try {
         installUI();
         refresh();
-        console.log('[StoryMemory] v0.11.15 loaded successfully');
+        console.log('[StoryMemory] v0.11.16 loaded successfully');
     } catch (e) {
         console.error('[StoryMemory] UI initialization failed', e);
     }
