@@ -1,4 +1,4 @@
-// Story Memory Manager v0.11.16
+// Story Memory Manager v0.11.17
 // canonical-input purification / character-core preservation / story-arc continuity
 // does not rewrite original chat JSONL
 
@@ -6147,7 +6147,7 @@ function stat() {
 function panelHTML() {
     return `<div id="${PANEL_ID}" class="smm2-hidden">
       <div class="smm2-card">
-        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.16</span></div><button id="smm2_close">×</button></div>
+        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.17</span></div><button id="smm2_close">×</button></div>
         <div id="smm2_stats" class="smm2-stats"></div>
         <div class="smm2-grid">
           <button id="smm2_new">总结新增</button>
@@ -6554,26 +6554,58 @@ function normalizeStoryEntitiesV01114(mem=M()) {
         mem.characters=out;
     }
 
-    for(const e of (mem.timeline||[])) if(e) e.event=norm(e.event);
-    for(const f of (mem.facts||[])) if(f) f.fact=norm(f.fact);
-    for(const e of (mem.events||[])) if(e) for(const k of ['title','event','description','summary','result']) if(typeof e[k]==='string') e[k]=norm(e[k]);
-    for(const r of (mem.relationships||[])) if(r){
+    // v0.11.17: historical memories may contain mixed legacy shapes (string + object).
+    // Never assign object properties onto primitive strings; normalize them in-place instead.
+    if(Array.isArray(mem.timeline)) for(let i=0;i<mem.timeline.length;i++){
+        const e=mem.timeline[i];
+        if(typeof e==='string'){ mem.timeline[i]={event:norm(e),source:null}; changed++; continue; }
+        if(e && typeof e==='object') e.event=norm(e.event);
+    }
+    if(Array.isArray(mem.facts)) for(let i=0;i<mem.facts.length;i++){
+        const f=mem.facts[i];
+        if(typeof f==='string'){ mem.facts[i]=norm(f); continue; }
+        if(f && typeof f==='object'){
+            if(typeof f.fact==='string') f.fact=norm(f.fact);
+            else if(typeof f.text==='string') f.text=norm(f.text);
+            else if(typeof f.description==='string') f.description=norm(f.description);
+        }
+    }
+    if(Array.isArray(mem.events)) for(let i=0;i<mem.events.length;i++){
+        const e=mem.events[i];
+        if(typeof e==='string'){ mem.events[i]=norm(e); continue; }
+        if(e && typeof e==='object') for(const k of ['title','event','description','summary','result']) if(typeof e[k]==='string') e[k]=norm(e[k]);
+    }
+    if(Array.isArray(mem.relationships)) for(let i=0;i<mem.relationships.length;i++){
+        const r=mem.relationships[i];
+        if(typeof r==='string'){ mem.relationships[i]=norm(r); continue; }
+        if(!r || typeof r!=='object') continue;
         if(Array.isArray(r.people)) r.people=[...new Set(r.people.map(person).filter(Boolean))];
         if(Array.isArray(r.pair)) r.pair=[...new Set(r.pair.map(person).filter(Boolean))];
         for(const k of ['state','change','description']) if(typeof r[k]==='string') r[k]=norm(r[k]);
     }
-    for(const x of (mem.open_loops||[])) if(x){
+    if(Array.isArray(mem.open_loops)) for(let i=0;i<mem.open_loops.length;i++){
+        const x=mem.open_loops[i];
+        if(typeof x==='string'){ mem.open_loops[i]=norm(x); continue; }
+        if(!x || typeof x!=='object') continue;
         for(const k of ['description','title','due']) if(typeof x[k]==='string') x[k]=norm(x[k]);
         for(const k of ['character','person','owner']) if(typeof x[k]==='string') x[k]=person(x[k]);
     }
-    for(const x of (mem.semantic_anchors||[])) if(x) normDeep(x);
-    for(const x of (mem.character_anchors||[])) if(x){
+    for(const key of ['semantic_anchors','active_arcs','items','locations']){
+        const arr=mem[key];
+        if(!Array.isArray(arr)) continue;
+        for(let i=0;i<arr.length;i++){
+            if(typeof arr[i]==='string') arr[i]=norm(arr[i]);
+            else if(arr[i] && typeof arr[i]==='object') normDeep(arr[i]);
+        }
+    }
+    if(Array.isArray(mem.character_anchors)) for(let i=0;i<mem.character_anchors.length;i++){
+        const x=mem.character_anchors[i];
+        if(typeof x==='string'){ mem.character_anchors[i]=norm(x); continue; }
+        if(!x || typeof x!=='object') continue;
         if(typeof x.character==='string') x.character=person(x.character);
+        if(typeof x.name==='string') x.name=person(x.name);
         for(const k of ['anchor','description','behavior','speech']) if(typeof x[k]==='string') x[k]=norm(x[k]);
     }
-    for(const x of (mem.active_arcs||[])) if(x) normDeep(x);
-    for(const x of (mem.items||[])) if(x) normDeep(x);
-    for(const x of (mem.locations||[])) if(x) normDeep(x);
     if(mem.current_scene && typeof mem.current_scene==='object'){
         for(const [k,v] of Object.entries(mem.current_scene)){
             if(typeof v==='string') mem.current_scene[k]=norm(v);
@@ -6701,7 +6733,7 @@ async function runUnifiedPostProcessV01114(){
     }
     BUSY=true;
     try {
-        if(status) status.textContent='v0.11.16 正在执行：实体统一 / 关系去重 / timeline 去重 / 质量审计（0 API）…';
+        if(status) status.textContent='v0.11.17 正在执行：实体统一 / 关系去重 / timeline 去重 / 质量审计（0 API）…';
         toast('开始执行实体与关系整理（0 API）…','info');
         const mem=M();
         if(!mem || typeof mem!=='object') throw new Error('当前记忆对象不可用');
@@ -6713,10 +6745,10 @@ async function runUnifiedPostProcessV01114(){
         const q=result.quality;
         toast(`统一整理完成：实体修正 ${result.entities.changed} 处（人物别名合并 ${result.entities.merged_characters||0}），合并重复 timeline ${result.dedup.merged} 条，移除空事件 ${result.dedup.empty_removed} 条。`,'success');
         const latestStatus=document.getElementById('smm112_gap_status');
-        if(latestStatus) latestStatus.textContent=`v0.11.16 质量审计：timeline ${q.timeline}；主角泛称残留 ${q.generic_aliases}；人物泛称键 ${q.generic_character_keys}；人物别名重复 ${q.alias_character_duplicates}；重复关系对 ${q.duplicate_relationship_pairs}；非法 source ${q.invalid_sources}；空事件 ${q.empty_events}；疑似重复 ${q.duplicate_candidates}；时间倒退 ${q.time_backtracks}。`;
+        if(latestStatus) latestStatus.textContent=`v0.11.17 质量审计：timeline ${q.timeline}；主角泛称残留 ${q.generic_aliases}；人物泛称键 ${q.generic_character_keys}；人物别名重复 ${q.alias_character_duplicates}；重复关系对 ${q.duplicate_relationship_pairs}；非法 source ${q.invalid_sources}；空事件 ${q.empty_events}；疑似重复 ${q.duplicate_candidates}；时间倒退 ${q.time_backtracks}。`;
         return {before,...result};
     } catch(e) {
-        console.error('[StoryMemory] v0.11.16 unified entity cleanup failed',e);
+        console.error('[StoryMemory] v0.11.17 unified entity cleanup failed',e);
         const latestStatus=document.getElementById('smm112_gap_status');
         if(latestStatus) latestStatus.textContent='统一实体整理失败：'+(e?.message||e);
         toast('统一实体整理失败：'+(e?.message||e),'error');
@@ -8218,7 +8250,7 @@ function bindNativeManager() {
     if(timeRepairBtnV0116) timeRepairBtnV0116.onclick=repairTimelineTimesLocalV0117;
     const unifiedPostBtnV01114=q('smm114_unified_post');
     if(unifiedPostBtnV01114) unifiedPostBtnV01114.onclick=runUnifiedPostProcessV01114;
-    // v0.11.16: DOM re-render fallback; prevents this button from becoming inert.
+    // v0.11.17: DOM re-render fallback; prevents this button from becoming inert.
     if(!window.__SMM_V01116_UNIFIED_DELEGATE__){
         window.__SMM_V01116_UNIFIED_DELEGATE__=true;
         document.addEventListener('click',(ev)=>{
@@ -8554,7 +8586,7 @@ function installNativeExtensionEntry() {
 
         wrap.innerHTML = `
           <div class="inline-drawer-toggle inline-drawer-header">
-            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.16</span></div>
+            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.17</span></div>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
           </div>
           <div class="inline-drawer-content">
@@ -8782,7 +8814,7 @@ function initializeExtension() {
     try {
         installUI();
         refresh();
-        console.log('[StoryMemory] v0.11.16 loaded successfully');
+        console.log('[StoryMemory] v0.11.17 loaded successfully');
     } catch (e) {
         console.error('[StoryMemory] UI initialization failed', e);
     }
