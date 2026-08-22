@@ -1,15 +1,20 @@
-# Story Memory Manager v0.11.12
+# Story Memory Manager v0.11.13 HYBRID
 
-## Fixed
+## Selective needsAI completion
 
-- Fixed a deterministic `ReferenceError: triage is not defined` in the v0.11.11 hybrid 0-API rebuild path.
-- Hybrid triage state is now initialized inside `makeLocalTimelineNodesV0117()` before any structured/fallback branch uses it.
-- Structured `<abstract><plot>` records now mark their source rows as `reliable` only when at least one non-empty visible event was actually accepted.
-- Structured records that parse but collapse to no safe event are now routed to `needsAI` instead of being silently counted as reliable.
-- `presetPlotNodes` and `factualFallbackNodes` counters are updated only on accepted nodes.
-- Existing transaction rollback behavior is preserved: any unexpected code-mode exception restores the pre-run memory snapshot.
+- Adds `AI 仅补 needsAI（省 API）`.
+- Reads the latest 0-API hybrid triage queue and sends only rows classified as `needsAI` to the summarizer.
+- Rows already classified as reliable are not re-sent to the API.
+- Consecutive needsAI rows are compacted into ranges and split into pair-safe batches using the configured batch size.
+- Each successful batch is committed immediately and recorded as resolved. If a later batch fails or API quota is exhausted, completed batches remain saved; rerunning skips them.
+- The existing full-range API backfill remains available, but is relabeled as high-consumption.
+- Current story date/time/scene, lifecycle state, open loops, and `last_processed_index` remain protected during historical AI completion.
+- After selective completion, the existing 0-API temporal calibrator runs across the repaired interval.
 
-## Compatibility
+## Preserved from v0.11.12
 
-- Keeps the v0.11.11 hybrid policy: reliable preset plot first, conservative factual fallback second, otherwise coverage-only + optional AI queue.
-- No API call is introduced by code rebuild, time calibration, coverage recording, or triage statistics.
+- 0-API hybrid triage (`reliable` vs `needsAI`).
+- Source firewall / cursor commit protection.
+- Local abstract/plot extraction and conservative fallback.
+- Date/weekday/time calibration and world-state metadata isolation.
+- Gap detection, rollback, and code-only rebuild.

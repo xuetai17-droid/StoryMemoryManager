@@ -1,29 +1,33 @@
-# v0.11.12 Release Audit
+# Release Audit — v0.11.13 HYBRID
 
 ## Scope
 
-This release fixes the v0.11.11 hybrid 0-API runtime failure and triage accounting. It intentionally does not redesign the timeline/time parser again.
+Base: user-supplied StoryMemoryManager v0.11.12 HYBRID package.
 
-## Static checks
+## Changes verified
 
-- `makeLocalTimelineNodesV0117()` declares a local `triage` object before all branches: PASS.
-- Structured accepted records populate `triage.reliable`: PASS.
-- Structured records with no accepted event populate `triage.needsAI`: PASS.
-- Factual fallback accepted records populate `reliable` and `factualFallbackNodes`: PASS.
-- Unsafe fallback rows populate `needsAI` and do not create visible placeholder events: PASS.
-- No code-mode API call added: PASS.
-- Existing rollback catch/restore path retained: PASS.
-- Manifest parses and reports `0.11.12`: PASS.
-- UI badges/startup log/version header report `v0.11.12`: PASS.
+- Manifest version: `0.11.13`.
+- UI version badges: `v0.11.13`.
+- Startup log: `v0.11.13 loaded successfully`.
+- Added selective action: `AI 仅补 needsAI（省 API）`.
+- Full-range API action retained and explicitly marked high-consumption.
+- Selective queue is derived from the latest `local_needs_ai_v01111` triage audit for the requested interval.
+- Previously resolved `needs_ai_api_resolved_v01113` ranges are subtracted before any new API call.
+- Consecutive unresolved indexes are compacted and pair-safe chunked.
+- Each successful chunk is merged through the existing historical backfill merger and saved immediately.
+- Later failure does not roll back earlier successful chunks.
+- Protected live state restored after each historical merge: current date/time/scene, arcs, open/closed loops, tombstones, story start, and cursor.
+- Existing adaptive source-retry/split logic remains in use for each AI chunk.
+- Existing temporal repair runs after completion.
 
-## Runtime-oriented regression checks
+## Static validation
 
-- JavaScript syntax (`node --check`): PASS.
-- VM harness: calling the hybrid builder no longer throws `ReferenceError: triage is not defined`: PASS.
-- Hybrid triage metadata is attached to returned node arrays: PASS.
-- Reliable/needs-AI sets are de-duplicated by the existing stats layer: PASS.
-- Package ZIP integrity test: PASS.
+- `node --check index.js`: PASS.
+- `manifest.json` parses and reports `0.11.13`: PASS.
+- Selective button has a bound click handler: PASS.
+- Version badges and startup log match manifest: PASS.
+- ZIP contains root extension files (`index.js`, `style.css`, `manifest.json`, docs): PASS.
 
-## Operational note
+## Runtime limitation
 
-The user should re-run the failed range after installing v0.11.12. Because v0.11.11 restored the original memory on failure, no manual memory rollback is required before retrying.
+A real summarizer/API call cannot be executed in the build container because it requires the user's SillyTavern connection/profile. Runtime validation therefore still requires one in-app selective needsAI run.

@@ -1,18 +1,12 @@
-# Story Memory Manager v0.11.12 HYBRID
+# Story Memory Manager v0.11.13 HYBRID
 
-This release is a correctness fix for the v0.11.11 hybrid 0-API rebuild pipeline.
+For large historical gaps, the recommended workflow is now:
 
-The pipeline remains:
+1. Run **代码压缩重建这个范围（0 API）** first.
+2. Review the reported `可靠 X 楼 / 需要 AI X 楼` counts.
+3. If semantic recovery is required, use **AI 仅补 needsAI（省 API）**.
+4. Do not use **API 补总结整个范围（高消耗）** unless you intentionally want to resend the whole interval.
 
-1. Use a reliable preset `<abstract><plot>` directly when available.
-2. Otherwise accept only conservative deterministic factual extraction.
-3. If neither is safe, create no visible timeline event; record the source rows as checked and `needs AI`.
+The selective AI action only submits rows that the 0-API triage explicitly marked `needsAI`. Reliable rows are kept locally and are not billed again. Successful AI batches are committed incrementally, so an interruption does not discard already-paid work; rerunning resumes from unresolved needsAI rows.
 
-v0.11.12 fixes the runtime triage initialization bug and makes the reliable/needs-AI accounting correspond to events that were actually accepted.
-
-Recommended recovery after upgrading from v0.11.11:
-
-- Keep automatic summarization, memory injection, and automatic hiding disabled.
-- Re-run the desired 0-API code rebuild range.
-- Verify the completion message reports `reliable N / needs AI M` and does not show `triage is not defined`.
-- Only after reviewing the rebuilt timeline should injection/hiding be re-enabled.
+During historical repair, current story state and the live processing cursor remain protected.
