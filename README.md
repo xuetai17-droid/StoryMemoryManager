@@ -1,4 +1,4 @@
-# Story Memory Manager v0.11.19 HYBRID
+# Story Memory Manager v0.11.20 HYBRID
 
 本版重点修复主聊天模型（例如冥王星）拿不到当前聊天 SMM 连续性记忆的问题。
 

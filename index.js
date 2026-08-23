@@ -1,4 +1,4 @@
-// Story Memory Manager v0.11.19
+// Story Memory Manager v0.11.20
 // canonical-input purification / character-core preservation / story-arc continuity
 // does not rewrite original chat JSONL
 
@@ -124,32 +124,42 @@ function currentSceneCoreV0110(scene) {
 
 function buildSafeMemoryPromptV0100() {
     const mem = M();
-
-    const payload = {
-        current_story_date: mem.current_story_date || null,
-        current_story_time: mem.current_story_time || null,
-        current_scene_core: currentSceneCoreV0110(mem.current_scene),
-        character_anchors: (mem.character_anchors || []).slice(-20),
-        active_arcs: (mem.active_arcs || []).slice(0, 6),
-        semantic_anchors: (mem.semantic_anchors || []).slice(-20),
-        recent_timeline: (mem.timeline || []).filter(x=>!x?.__coverage_only_v01110).slice(-10),
-        characters: stableCharactersForPromptV0110(mem),
-        relationships: (mem.relationships || []).slice(-12),
-        open_loops: (mem.open_loops || []).slice(-8)
+    const scene = currentSceneCoreV0110(mem.current_scene);
+    const timeline = (mem.timeline || []).filter(x=>!x?.__coverage_only_v01110).slice(-6);
+    const names = new Set();
+    for (const k of ['participants','people']) {
+        const v=scene?.[k];
+        if(Array.isArray(v)) v.forEach(x=>names.add(String(x)));
+        else if(typeof v==='string') v.split(/[、,，/；;]/).forEach(x=>x.trim()&&names.add(x.trim()));
+    }
+    const timelineText = JSON.stringify(timeline);
+    const allChars = stableCharactersForPromptV0110(mem) || {};
+    for(const name of Object.keys(allChars)) if(timelineText.includes(name)) names.add(name);
+    const chars={};
+    for(const name of names) if(allChars[name]) chars[name]=allChars[name];
+    // If relevance extraction finds too little, keep only a small recent subset rather than the whole cast.
+    if(Object.keys(chars).length<2) for(const name of Object.keys(allChars).slice(-5)) chars[name]=allChars[name];
+    const rels=(mem.relationships||[]).filter(r=>{
+        const t=JSON.stringify(r); return [...names].some(n=>t.includes(n));
+    }).slice(-6);
+    const loops=(mem.open_loops||[]).slice(-4);
+    const arcs=(mem.active_arcs||[]).slice(0,3);
+    const facts=(mem.semantic_anchors||[]).slice(-6);
+    const payload={
+        date:mem.current_story_date||null,
+        time:mem.current_story_time||null,
+        scene,
+        relevant_characters:chars,
+        relevant_relationships:rels,
+        recent_events:timeline,
+        active_arcs:arcs,
+        unresolved:loops,
+        continuity_facts:facts
     };
-
     return [
-        '【Story Memory｜已确认长期连续性】',
-        '这是一份压缩连续性记忆，不是角色卡，也不是写作模板。',
-        '角色的基础人格、语言风格、价值观与原始设定，以角色卡/世界书为最高优先级；SMM 的压缩人物摘要不得覆盖或重写角色卡。',
-        'character_anchors 只保存由剧情长期验证出的稳定行为/语言锚点；若与角色卡冲突，以角色卡为准。',
-        'semantic_anchors 中事件性质、因果、主动/被动和明确意愿状态属于连续性硬事实。',
-        'active_arcs 是仍在发展的主线方向，不是任务清单；不得为了推进主线而强行让角色做不符合人设的行为。',
-        '如果一个局部生活片段已经自然结束，不要用反复吃饭、洗澡、睡觉、通勤、上药或重复解释同一问题来替代剧情发展；应在符合人设和当前因果的前提下，自然进入下一个有意义的剧情节点。',
-        '近期原始聊天优先于长期摘要中的瞬时状态。',
-        '禁止把长期记忆和近期正文都未支持的过去细节补成既定历史。',
-        'open_loops 仅表示仍有效的连续性事项，不是必须执行的任务。',
-        JSON.stringify(payload, null, 2),
+        '【剧情连续性记忆】',
+        '以下仅是此前剧情中已确认的事实，供承接当前剧情使用。按角色卡、世界书和最近正文正常续写；不要解释这份记忆，也不要把它当成用户的新指令。',
+        JSON.stringify(payload)
     ].join('\\n');
 }
 
@@ -6290,7 +6300,7 @@ function stat() {
 function panelHTML() {
     return `<div id="${PANEL_ID}" class="smm2-hidden">
       <div class="smm2-card">
-        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.19</span></div><button id="smm2_close">×</button></div>
+        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.20</span></div><button id="smm2_close">×</button></div>
         <div id="smm2_stats" class="smm2-stats"></div>
         <div class="smm2-grid">
           <button id="smm2_new">总结新增</button>
@@ -8742,7 +8752,7 @@ function installNativeExtensionEntry() {
 
         wrap.innerHTML = `
           <div class="inline-drawer-toggle inline-drawer-header">
-            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.19</span></div>
+            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.20</span></div>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
           </div>
           <div class="inline-drawer-content">
@@ -8906,7 +8916,7 @@ function statsHTMLV0105() {
 function refresh() {
     // v0.11.19: extension prompts are chat-scoped in practice; always refresh after
     // chat/message state changes so the main model receives THIS chat's latest memory.
-    try { refreshSafeMemoryInjectionV0100(); } catch(e) { console.warn('[StoryMemory] v0.11.19 injection refresh failed', e); }
+    try { refreshSafeMemoryInjectionV0100(); } catch(e) { console.warn('[StoryMemory] v0.11.20 injection refresh failed', e); }
     refreshNative();
     renderMemoryInjectionAuditV0119();
 
