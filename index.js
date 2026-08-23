@@ -1,4 +1,4 @@
-// Story Memory Manager v0.11.18
+// Story Memory Manager v0.11.19
 // canonical-input purification / character-core preservation / story-arc continuity
 // does not rewrite original chat JSONL
 
@@ -185,6 +185,45 @@ function refreshSafeMemoryInjectionV0100() {
     );
 
     return true;
+}
+
+function memoryInjectionAuditV0119() {
+    const s=S();
+    const mem=M();
+    const gaps=timelineCoverageGapsV0112(mem);
+    const prompt=buildSafeMemoryPromptV0100();
+    return {
+        enabled: !!s.safeMemoryInject,
+        blocked_by_gap: !!gaps.length,
+        first_gap: gaps[0] || null,
+        prompt_chars: prompt.length,
+        current_story_date: mem.current_story_date || null,
+        current_story_time: mem.current_story_time || null,
+        current_scene: currentSceneCoreV0110(mem.current_scene),
+        characters: Object.keys(mem.characters || {}).length,
+        relationships: (mem.relationships || []).length,
+        recent_timeline: (mem.timeline || []).filter(x=>!x?.__coverage_only_v01110).slice(-10).length,
+        open_loops: (mem.open_loops || []).length,
+        prompt
+    };
+}
+
+function renderMemoryInjectionAuditV0119() {
+    const box=document.getElementById('smm119_injection_audit');
+    if(!box) return;
+    const a=memoryInjectionAuditV0119();
+    const state=!a.enabled ? '关闭：主聊天模型不会收到 SMM 长期记忆'
+        : a.blocked_by_gap ? `已开启但被时间线断档保护阻止：#${a.first_gap.start}-#${a.first_gap.end}`
+        : '已开启：SMM 记忆会注入主聊天模型';
+    box.textContent=[
+        `状态：${state}`,
+        `注入长度：${a.prompt_chars} 字符`,
+        `当前日期/时间：${a.current_story_date||'未记录'} / ${a.current_story_time||'未记录'}`,
+        `人物：${a.characters}；关系：${a.relationships}；近期时间线：${a.recent_timeline}；待办：${a.open_loops}`,
+        '',
+        '—— 实际注入文本预览 ——',
+        a.enabled && !a.blocked_by_gap ? a.prompt : '（当前不会注入）'
+    ].join('\n');
 }
 
 
@@ -6251,7 +6290,7 @@ function stat() {
 function panelHTML() {
     return `<div id="${PANEL_ID}" class="smm2-hidden">
       <div class="smm2-card">
-        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.18</span></div><button id="smm2_close">×</button></div>
+        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.19</span></div><button id="smm2_close">×</button></div>
         <div id="smm2_stats" class="smm2-stats"></div>
         <div class="smm2-grid">
           <button id="smm2_new">总结新增</button>
@@ -8043,6 +8082,12 @@ function nativeManagerHTML() {
             <span><b>生成时注入剧情记忆</b><small>把可靠长期记忆提供给主聊天模型</small></span>
           </label>
 
+          <details class="smm107-inline-details">
+            <summary>检查本轮会注入给主模型的记忆</summary>
+            <button id="smm119_refresh_injection_audit" class="menu_button" type="button">刷新注入诊断</button>
+            <pre id="smm119_injection_audit" class="smm2-note" style="white-space:pre-wrap;max-height:320px;overflow:auto"></pre>
+          </details>
+
           <label class="smm107-switch-row">
             <input id="smm100_auto_hide" type="checkbox">
             <span><b>总结后自动隐藏旧楼层</b><small>仅在安全记忆注入开启时生效</small></span>
@@ -8503,6 +8548,12 @@ function bindNativeManager() {
     const autoHideEl = q('smm100_auto_hide');
     const keepRecentEl = q('smm100_keep_recent');
     const unhideBtn = q('smm100_unhide_all');
+    const injectionAuditBtn = document.getElementById('smm119_refresh_injection_audit');
+    if (injectionAuditBtn) injectionAuditBtn.onclick = () => {
+        try { refreshSafeMemoryInjectionV0100(); renderMemoryInjectionAuditV0119(); }
+        catch(e) { toast('注入诊断失败：'+(e?.message||e),'error'); }
+    };
+    renderMemoryInjectionAuditV0119();
 
     if (unhideBtn) {
         unhideBtn.onclick = async () => {
@@ -8546,6 +8597,7 @@ function bindNativeManager() {
             saveSettings();
             refreshSafeMemoryInjectionV0100();
             refreshNative();
+            renderMemoryInjectionAuditV0119();
         };
     }
 
@@ -8690,7 +8742,7 @@ function installNativeExtensionEntry() {
 
         wrap.innerHTML = `
           <div class="inline-drawer-toggle inline-drawer-header">
-            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.18</span></div>
+            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.19</span></div>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
           </div>
           <div class="inline-drawer-content">
@@ -8852,7 +8904,11 @@ function statsHTMLV0105() {
 }
 
 function refresh() {
+    // v0.11.19: extension prompts are chat-scoped in practice; always refresh after
+    // chat/message state changes so the main model receives THIS chat's latest memory.
+    try { refreshSafeMemoryInjectionV0100(); } catch(e) { console.warn('[StoryMemory] v0.11.19 injection refresh failed', e); }
     refreshNative();
+    renderMemoryInjectionAuditV0119();
 
     if (!document.getElementById(PANEL_ID)) return;
 
@@ -8918,7 +8974,7 @@ function initializeExtension() {
     try {
         installUI();
         refresh();
-        console.log('[StoryMemory] v0.11.18 loaded successfully');
+        console.log('[StoryMemory] v0.11.19 loaded successfully');
     } catch (e) {
         console.error('[StoryMemory] UI initialization failed', e);
     }
