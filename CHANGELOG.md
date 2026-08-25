@@ -1,3 +1,13 @@
+# v0.11.21 HYBRID
+- 修复 current_story_date/current_story_time 被旧 timeline 拉回的问题；新增最近正文优先的 current-state resolver。
+- current_scene.location 同步采用“最近可靠正文 > 世界状态元数据 > 旧状态”的保守策略。
+- 自动总结关闭时，生成前仍会轻量检查最近正文并刷新当前剧情状态。
+- 新聊天允许无绝对日期启动；剧情起点不再强制必须填写 YYYY-MM-DD。
+- 重做“本轮注入诊断”移动端 UI：摘要优先、原始 prompt 折叠、刷新按钮横向全宽。
+- 注入 prompt 的分隔符恢复为真实换行。
+- 新增阶段大总结 stage_summaries：基于现有 canonical 长期记忆按剧情阶段压缩，不重扫原聊天、不修改 JSONL。
+- 阶段大总结至少需要 6 条有效 timeline 且无大段断档；失败时保留旧结果；主模型只注入少量高价值阶段摘要。
+
 # v0.11.20
 - 主模型注入改为精简事实包：当前时间/场景、相关人物与关系、近期事件、主线和未完成事项。
 - 移除 character_anchors 等内部机制说明型提示，避免主模型转为说明/防御式回答。

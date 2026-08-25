@@ -958,3 +958,128 @@
   }
 }
 
+
+/* v0.11.21 injection audit: user-facing summary first, raw prompt folded away */
+.smm119-audit-details .smm119-refresh{
+  display:block !important;
+  width:100% !important;
+  max-width:none !important;
+  min-width:0 !important;
+  min-height:40px;
+  box-sizing:border-box;
+  margin:9px 0 0 !important;
+  padding:8px 12px !important;
+  white-space:normal !important;
+  writing-mode:horizontal-tb !important;
+  text-orientation:mixed !important;
+}
+
+.smm119-audit{
+  margin-top:9px;
+  padding:10px;
+  border:1px solid rgba(127,127,127,.22);
+  border-radius:11px;
+  background:rgba(127,127,127,.045);
+  font-size:.9em;
+  line-height:1.5;
+}
+
+.smm119-state{
+  margin-bottom:8px;
+}
+
+.smm119-audit-grid{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:7px;
+}
+
+.smm119-audit-grid > div{
+  min-width:0;
+  padding:7px 8px;
+  border-radius:8px;
+  background:rgba(127,127,127,.065);
+}
+
+.smm119-audit-grid span{
+  display:block;
+  opacity:.62;
+  font-size:.82em;
+  margin-bottom:2px;
+}
+
+.smm119-audit-grid b{
+  display:block;
+  overflow-wrap:anywhere;
+}
+
+.smm119-counts,
+.smm119-note{
+  margin-top:8px;
+  opacity:.78;
+  overflow-wrap:anywhere;
+}
+
+.smm119-raw-details{
+  margin-top:9px;
+  padding-top:8px;
+  border-top:1px solid rgba(127,127,127,.14);
+}
+
+.smm119-raw-details > summary{
+  cursor:pointer;
+  opacity:.72;
+}
+
+.smm119-raw-details > pre{
+  max-height:300px;
+  overflow:auto;
+  white-space:pre-wrap;
+  overflow-wrap:anywhere;
+  word-break:break-word;
+  padding:9px;
+  margin:8px 0 0;
+  border-radius:8px;
+  background:rgba(0,0,0,.12);
+  font-size:.88em;
+  line-height:1.45;
+}
+
+/* v0.11.21 stage-summary browser */
+.smm121-stage-group > .smm121-stage-card{
+  margin:8px 0;
+}
+
+.smm121-stage-card{
+  padding:0 8px 8px;
+  border:1px solid rgba(127,127,127,.18);
+  border-radius:10px;
+  background:rgba(127,127,127,.035);
+}
+
+.smm121-stage-card > summary{
+  padding:9px 0;
+  cursor:pointer;
+  font-weight:700;
+}
+
+.smm121-stage-summary{
+  line-height:1.6;
+  margin:2px 0 7px;
+}
+
+.smm121-stage-meta{
+  opacity:.68;
+  font-size:.88em;
+  margin-bottom:6px;
+}
+
+@media (max-width:700px){
+  .smm119-audit-grid{
+    grid-template-columns:1fr;
+  }
+
+  .smm119-audit-details .smm119-refresh{
+    font-size:15px !important;
+  }
+}

@@ -1,9 +1,22 @@
-# v0.11.19 HYBRID Release Audit
+# v0.11.21 HYBRID Release Audit
 
 - `node --check index.js`: PASS
-- manifest version: 0.11.19
-- visible version badge: 0.11.19
-- Main fix: `refresh()` now calls `refreshSafeMemoryInjectionV0100()` so CHAT_CHANGED / MESSAGE_RECEIVED / MESSAGE_SENT / edit/delete refresh the extension prompt for the current chat.
-- Added injection audit UI: reports switch state, gap blocking, payload counts, prompt length, and the exact SMM continuity prompt that is eligible for injection.
-- Existing legacy `generate_interceptor` remains intentionally no-op; this release continues to use SillyTavern `setExtensionPrompt` and does not mutate/save the chat array.
-- v0.11.18 JSON repair and timeline display behavior retained.
+- manifest version: 0.11.21
+- visible version badge: 0.11.21（经典面板 + 原生扩展面板）
+- current-state resolver VM tests: PASS
+  - recent canonical `2025-09-24 / 正午` overrides stored `2025-09-23 19:45`
+  - no-date opening keeps `current_story_date = null`
+  - world-state metadata fills date/time/location when canonical prose does not
+  - later world-state metadata can advance date/time/location after older canonical evidence without allowing regressions
+  - independent metadata fields are resolved from their latest available rows
+  - an explicitly older flashback date cannot replace current time/location
+  - canonical prose wins over conflicting older world-state metadata
+  - timeline regression from 2025-09-24 back to 2025-09-23 is blocked
+- stage summary VM test: PASS
+  - minimum readiness check works
+  - generated stage summaries persist with source ranges
+  - `stage_summary_last_index` checkpoint updates
+  - injection payload includes compact stage context
+- Original chat JSONL mutation: none added. The new current-state resolver only updates SMM chat metadata.
+- Legacy `generate_interceptor` remains no-op; generation injection continues through SillyTavern `setExtensionPrompt`.
+- Existing v0.11.18 JSON local repair, HYBRID gap tools, entity normalization, and natural timeline display behavior retained.

@@ -1,4 +1,4 @@
-// Story Memory Manager v0.11.20
+// Story Memory Manager v0.11.21
 // canonical-input purification / character-core preservation / story-arc continuity
 // does not rewrite original chat JSONL
 
@@ -68,6 +68,9 @@ function freshMemory() {
         semantic_anchors: [],
         character_anchors: [],
         active_arcs: [],
+        stage_summaries: [],
+        stage_summary_last_index: -1,
+        stage_summary_updated_at: null,
         audit: []
     };
 }
@@ -78,6 +81,9 @@ function M() {
     const mem = c.chatMetadata[META_KEY];
     if (!Array.isArray(mem.character_anchors)) mem.character_anchors = [];
     if (!Array.isArray(mem.active_arcs)) mem.active_arcs = [];
+    if (!Array.isArray(mem.stage_summaries)) mem.stage_summaries = [];
+    if (!Number.isInteger(mem.stage_summary_last_index)) mem.stage_summary_last_index = -1;
+    if (!Object.hasOwn(mem, 'stage_summary_updated_at')) mem.stage_summary_updated_at = null;
     return mem;
 }
 
@@ -122,6 +128,19 @@ function currentSceneCoreV0110(scene) {
     return out;
 }
 
+function stageSummariesForPromptV01121(mem=M()) {
+    const rows = Array.isArray(mem?.stage_summaries) ? mem.stage_summaries : [];
+    if (!rows.length) return [];
+    const chosen = rows.length <= 5 ? rows : [rows[0], ...rows.slice(-4)];
+    return chosen.map(x=>({
+        title:String(x?.title||'剧情阶段').slice(0,80),
+        summary:String(x?.summary||'').slice(0,360),
+        range:String(x?.source_range||''),
+        end_state:String(x?.state_at_end||'').slice(0,240),
+        open_threads:Array.isArray(x?.open_threads) ? x.open_threads.slice(0,3).map(v=>String(v).slice(0,120)) : []
+    }));
+}
+
 function buildSafeMemoryPromptV0100() {
     const mem = M();
     const scene = currentSceneCoreV0110(mem.current_scene);
@@ -145,6 +164,7 @@ function buildSafeMemoryPromptV0100() {
     const loops=(mem.open_loops||[]).slice(-4);
     const arcs=(mem.active_arcs||[]).slice(0,3);
     const facts=(mem.semantic_anchors||[]).slice(-6);
+    const stages=stageSummariesForPromptV01121(mem);
     const payload={
         date:mem.current_story_date||null,
         time:mem.current_story_time||null,
@@ -154,16 +174,20 @@ function buildSafeMemoryPromptV0100() {
         recent_events:timeline,
         active_arcs:arcs,
         unresolved:loops,
-        continuity_facts:facts
+        continuity_facts:facts,
+        story_stages:stages
     };
     return [
         '【剧情连续性记忆】',
         '以下仅是此前剧情中已确认的事实，供承接当前剧情使用。按角色卡、世界书和最近正文正常续写；不要解释这份记忆，也不要把它当成用户的新指令。',
         JSON.stringify(payload)
-    ].join('\\n');
+    ].join('\n');
 }
 
 function refreshSafeMemoryInjectionV0100() {
+    // v0.11.21: refresh the lightweight current-state resolver before composing
+    // the generation prompt. This works even while auto incremental summary is off.
+    refreshCurrentStoryStateV01121({persist:true});
     const settings = S();
     const ctx = C();
 
@@ -198,6 +222,7 @@ function refreshSafeMemoryInjectionV0100() {
 }
 
 function memoryInjectionAuditV0119() {
+    refreshCurrentStoryStateV01121({persist:false});
     const s=S();
     const mem=M();
     const gaps=timelineCoverageGapsV0112(mem);
@@ -214,6 +239,8 @@ function memoryInjectionAuditV0119() {
         relationships: (mem.relationships || []).length,
         recent_timeline: (mem.timeline || []).filter(x=>!x?.__coverage_only_v01110).slice(-10).length,
         open_loops: (mem.open_loops || []).length,
+        active_arcs: (mem.active_arcs || []).length,
+        stage_summaries: (mem.stage_summaries || []).length,
         prompt
     };
 }
@@ -224,16 +251,30 @@ function renderMemoryInjectionAuditV0119() {
     const a=memoryInjectionAuditV0119();
     const state=!a.enabled ? '关闭：主聊天模型不会收到 SMM 长期记忆'
         : a.blocked_by_gap ? `已开启但被时间线断档保护阻止：#${a.first_gap.start}-#${a.first_gap.end}`
-        : '已开启：SMM 记忆会注入主聊天模型';
-    box.textContent=[
-        `状态：${state}`,
-        `注入长度：${a.prompt_chars} 字符`,
-        `当前日期/时间：${a.current_story_date||'未记录'} / ${a.current_story_time||'未记录'}`,
-        `人物：${a.characters}；关系：${a.relationships}；近期时间线：${a.recent_timeline}；待办：${a.open_loops}`,
-        '',
-        '—— 实际注入文本预览 ——',
-        a.enabled && !a.blocked_by_gap ? a.prompt : '（当前不会注入）'
-    ].join('\n');
+        : '已开启：本轮会提供 SMM 长期剧情记忆';
+    const location=a.current_scene?.location || '未建立';
+    const empty=a.characters+a.relationships+a.recent_timeline+a.open_loops+a.active_arcs+a.stage_summaries===0;
+    const note=!a.enabled
+        ? '当前关闭生成时记忆注入。'
+        : a.blocked_by_gap
+            ? '检测到历史时间线断档，为避免把不完整长期记忆提供给主模型，本轮注入已自动阻止。'
+            : empty
+                ? '当前还没有可用的长期剧情记忆；主模型将主要依靠最近原文继续剧情。'
+                : `本轮将注入 ${a.prompt_chars} 字符的连续性事实。`;
+    box.innerHTML=`
+      <div class="smm119-state"><b>状态：</b>${esc(state)}</div>
+      <div class="smm119-audit-grid">
+        <div><span>注入长度</span><b>${a.prompt_chars} 字符</b></div>
+        <div><span>当前剧情日期</span><b>${esc(a.current_story_date||'未建立')}</b></div>
+        <div><span>当前剧情时间</span><b>${esc(a.current_story_time||'未建立')}</b></div>
+        <div><span>当前剧情地点</span><b>${esc(location)}</b></div>
+      </div>
+      <div class="smm119-counts">人物 ${a.characters} · 关系 ${a.relationships} · 近期事件 ${a.recent_timeline} · 主线 ${a.active_arcs} · 阶段总结 ${a.stage_summaries} · 待办 ${a.open_loops}</div>
+      <div class="smm119-note">${esc(note)}</div>
+      <details class="smm119-raw-details">
+        <summary>查看原始注入文本（调试）</summary>
+        <pre>${esc(a.enabled && !a.blocked_by_gap ? a.prompt : '（当前不会注入）')}</pre>
+      </details>`;
 }
 
 
@@ -1115,6 +1156,9 @@ function historicalWorkingMemoryV0112(original, start) {
     // Current/future lifecycle state must never leak backward into a historical repair.
     w.current_scene = {};
     w.active_arcs = [];
+    w.stage_summaries = [];
+    w.stage_summary_last_index = -1;
+    w.stage_summary_updated_at = null;
     w.open_loops = [];
     w.closed_loops = [];
     w.loop_tombstones = [];
@@ -1127,7 +1171,7 @@ function historicalWorkingMemoryV0112(original, start) {
         .at(-1);
 
     const priorDate = normalizeDateInput(prior?.date);
-    w.current_story_date = priorDate?.iso || original.story_start || null;
+    w.current_story_date = priorDate?.iso || normalizeDateInput(original.story_start||'')?.iso || null;
     w.current_story_time = prior?.time || null;
     w.last_processed_index = start - 1;
     return w;
@@ -2321,26 +2365,40 @@ function syncCurrentDateFromTimeline(mem=M(), modelDate=null) {
         current:mem.current_story_date || null
     };
 
-    const before = mem.current_story_date || null;
-    mem.current_story_date = timelineDate;
+    const before = normalizeDateInput(mem.current_story_date || '')?.iso || null;
+    // v0.11.21: timeline is a historical floor, not an authority allowed to drag
+    // a newer current state backwards. Advance from timeline when it is newer;
+    // otherwise preserve the already-established later current date.
+    let next = timelineDate;
+    let blockedRegression = false;
+    if (before && timelineDate < before) {
+        next = before;
+        blockedRegression = true;
+    }
+    mem.current_story_date = next;
 
-    if (before !== timelineDate || (normalizedModel && normalizedModel !== timelineDate)) {
+    if (before !== next || blockedRegression || (normalizedModel && normalizedModel !== timelineDate)) {
         mem.audit = Array.isArray(mem.audit) ? mem.audit : [];
         mem.audit.push({
             at:new Date().toISOString(),
-            type:'current_date_synced_from_timeline',
+            type: blockedRegression ? 'current_date_timeline_regression_blocked_v01121' : 'current_date_synced_from_timeline',
             before,
             model_date:normalizedModel,
             timeline_date:timelineDate,
-            reason:'以 source 最靠后的已校准 timeline 日期同步 current_story_date，避免模型 current_story_date 与时间线脱节'
+            current:next,
+            reason: blockedRegression
+                ? '旧 timeline 日期不得覆盖更新的 current_story_date'
+                : '以 source 最靠后的已校准 timeline 日期推进 current_story_date'
         });
+        if (mem.audit.length > 50) mem.audit = mem.audit.slice(-50);
     }
 
     return {
-        changed:before !== timelineDate,
+        changed:before !== next,
+        blocked_regression:blockedRegression,
         timeline_date:timelineDate,
         model_date:normalizedModel,
-        current:timelineDate
+        current:next
     };
 }
 
@@ -3851,6 +3909,7 @@ function compact(mem) {
         current_scene_core: currentSceneCoreV0110(mem.current_scene),
         character_anchors: (mem.character_anchors || []).slice(-20),
         active_arcs: (mem.active_arcs || []).slice(0, 6),
+        stage_summaries: stageSummariesForPromptV01121(mem),
         semantic_anchors: (mem.semantic_anchors || []).slice(-24),
         timeline: (mem.timeline || []).slice(-16),
         characters: stableCharactersForPromptV0110(mem),
@@ -3982,6 +4041,274 @@ async function smmGenerateV093({
         throw new Error(
             '独立总结 Profile 请求失败：' + (e?.message || e)
         );
+    }
+}
+
+
+// =========================================================
+// v0.11.21 stage / chapter summaries
+// Built from existing canonical long-term memory only; never re-reads or rewrites
+// the original chat JSONL. This is a compression layer above timeline events.
+// =========================================================
+function stageSummarySchemaV01121() {
+    const nullable=()=>({type:['string','null']});
+    return {
+        name:'StoryMemoryStageSummaries',
+        strict:true,
+        value:{
+            '$schema':'http://json-schema.org/draft-04/schema#',
+            type:'object',
+            properties:{
+                stages:{
+                    type:'array', minItems:1, maxItems:4,
+                    items:{
+                        type:'object',
+                        properties:{
+                            title:{type:'string'},
+                            summary:{type:'string'},
+                            start_source:{type:'string'},
+                            end_source:{type:'string'},
+                            start_date:nullable(),
+                            end_date:nullable(),
+                            key_events:{type:'array',items:{type:'string'}},
+                            relationship_changes:{type:'array',items:{type:'string'}},
+                            state_at_end:{type:'string'},
+                            open_threads:{type:'array',items:{type:'string'}}
+                        },
+                        required:['title','summary','start_source','end_source','start_date','end_date','key_events','relationship_changes','state_at_end','open_threads']
+                    }
+                }
+            },
+            required:['stages']
+        }
+    };
+}
+
+function stageTimelineRowsV01121(mem=M()) {
+    return (Array.isArray(mem?.timeline) ? mem.timeline : [])
+        .filter(e=>e && typeof e==='object' && String(e.event||'').trim() && validRealSourceV0112(e.source))
+        .map((e,i)=>({...e,__i:i,__first:sourceFirst(e.source),__last:sourceLast(e.source)}))
+        .filter(e=>Number.isFinite(e.__first) && e.__first>=0 && Number.isFinite(e.__last) && e.__last>=0)
+        .sort((a,b)=>(a.__first-b.__first)||(a.__last-b.__last)||(a.__i-b.__i));
+}
+
+function stageSummaryReadinessV01121(mem=M()) {
+    const rows=stageTimelineRowsV01121(mem);
+    const gaps=timelineCoverageGapsV0112(mem);
+    const last=rows.length ? Math.max(...rows.map(x=>x.__last)) : -1;
+    if(gaps.length) return {ready:false,reason:`时间线仍有断档 #${gaps[0].start}-#${gaps[0].end}`,events:rows.length,last};
+    if(rows.length<6) return {ready:false,reason:`有效时间线只有 ${rows.length} 条；建议至少积累 6 条后再生成`,events:rows.length,last};
+    return {ready:true,reason:'可以生成阶段大总结',events:rows.length,last};
+}
+
+function chunkStageTimelineV01121(rows) {
+    const chunks=[];
+    let cur=[];
+    let first=null;
+    const flush=()=>{ if(cur.length){ chunks.push(cur); cur=[]; first=null; } };
+    for(const row of rows){
+        if(first==null) first=row.__first;
+        const span=row.__last-first;
+        if(cur.length && (cur.length>=44 || (span>420 && cur.length>=12))){ flush(); first=row.__first; }
+        cur.push(row);
+    }
+    flush();
+    return chunks;
+}
+
+function stageRelevantAnchorsV01121(mem,start,end) {
+    const anchors=Array.isArray(mem?.semantic_anchors)?mem.semantic_anchors:[];
+    return anchors.filter(a=>{
+        const f=sourceFirst(a?.source), l=sourceLast(a?.source);
+        return Number.isFinite(f)&&Number.isFinite(l)&&l>=start&&f<=end;
+    }).slice(-20).map(a=>({event:a.event,intent:a.intent,continuity_rule:a.continuity_rule,source:a.source}));
+}
+
+function sanitizeStageTextV01121(v,max=600) {
+    return String(v??'').replace(/[\u0000-\u001F\u007F]/g,' ').replace(/\s+/g,' ').trim().slice(0,max);
+}
+
+function normalizeStageChunkV01121(parsed, chunk, chunkNo) {
+    const raw=Array.isArray(parsed?.stages)?parsed.stages:[];
+    if(!raw.length) throw new Error(`第 ${chunkNo} 组没有返回 stages`);
+    const min=Math.min(...chunk.map(x=>x.__first));
+    const max=Math.max(...chunk.map(x=>x.__last));
+    const out=[];
+    for(let i=0;i<raw.length;i++){
+        const x=raw[i];
+        if(!x||typeof x!=='object') continue;
+        let a=sourceFirst(x.start_source), b=sourceLast(x.end_source);
+        if(!Number.isFinite(a)||a<min||a>max) a=min;
+        if(!Number.isFinite(b)||b<a||b>max) b=max;
+        const inside=chunk.filter(r=>r.__last>=a&&r.__first<=b);
+        const firstDate=inside.map(r=>normalizeDateInput(r.date||'')?.iso).find(Boolean)||null;
+        const lastDate=[...inside].reverse().map(r=>normalizeDateInput(r.date||'')?.iso).find(Boolean)||null;
+        const title=sanitizeStageTextV01121(x.title,90)||`剧情阶段 ${chunkNo}.${i+1}`;
+        const summary=sanitizeStageTextV01121(x.summary,700);
+        if(!summary || isMetaInstructionSignal({title,summary})) continue;
+        out.push({
+            id:`stage_${a}_${b}`,
+            title,
+            summary,
+            start_index:a,
+            end_index:b,
+            source_range:`#${a}-#${b}`,
+            start_date:normalizeDateInput(x.start_date||'')?.iso||firstDate,
+            end_date:normalizeDateInput(x.end_date||'')?.iso||lastDate,
+            key_events:(Array.isArray(x.key_events)?x.key_events:[]).map(v=>sanitizeStageTextV01121(v,180)).filter(Boolean).slice(0,8),
+            relationship_changes:(Array.isArray(x.relationship_changes)?x.relationship_changes:[]).map(v=>sanitizeStageTextV01121(v,180)).filter(Boolean).slice(0,6),
+            state_at_end:sanitizeStageTextV01121(x.state_at_end,360),
+            open_threads:(Array.isArray(x.open_threads)?x.open_threads:[]).map(v=>sanitizeStageTextV01121(v,160)).filter(Boolean).slice(0,5)
+        });
+    }
+    if(!out.length) throw new Error(`第 ${chunkNo} 组返回内容无法形成可靠阶段总结`);
+    out.sort((a,b)=>(a.start_index-b.start_index)||(a.end_index-b.end_index));
+    out[0].start_index=min;
+    for(let i=1;i<out.length;i++){
+        const prev=out[i-1], cur=out[i];
+        if(cur.start_index>prev.end_index+1) prev.end_index=cur.start_index-1;
+    }
+    out[out.length-1].end_index=max;
+    for(const x of out){
+        x.source_range=`#${x.start_index}-#${x.end_index}`;
+        x.id=`stage_${x.start_index}_${x.end_index}`;
+    }
+    return out;
+}
+
+function normalizeAllStageSummariesV01121(rows) {
+    const sorted=[...(rows||[])].sort((a,b)=>(a.start_index-b.start_index)||(a.end_index-b.end_index));
+    const out=[];
+    for(const x of sorted){
+        if(!x||!Number.isInteger(x.start_index)||!Number.isInteger(x.end_index)) continue;
+        const prev=out.at(-1);
+        if(prev && x.start_index<=prev.end_index){
+            // Keep the clearer/larger summary for heavily overlapping model splits.
+            const overlap=Math.min(prev.end_index,x.end_index)-Math.max(prev.start_index,x.start_index)+1;
+            const small=Math.min(prev.end_index-prev.start_index+1,x.end_index-x.start_index+1);
+            if(small>0 && overlap/small>0.7){
+                if(String(x.summary||'').length>String(prev.summary||'').length) out[out.length-1]=x;
+                continue;
+            }
+            x.start_index=prev.end_index+1;
+            if(x.start_index>x.end_index) continue;
+            x.source_range=`#${x.start_index}-#${x.end_index}`;
+            x.id=`stage_${x.start_index}_${x.end_index}`;
+        }
+        out.push(x);
+    }
+    // A long RP should remain navigable. Cap at 15 macro stages; if the model
+    // produced more, merge the oldest adjacent pairs locally without inventing facts.
+    while(out.length>15){
+        let best=0, span=Infinity;
+        for(let i=0;i<out.length-1;i++){
+            const s=(out[i+1].end_index-out[i].start_index);
+            if(s<span){span=s;best=i;}
+        }
+        const a=out[best],b=out[best+1];
+        const merged={
+            ...b,
+            id:`stage_${a.start_index}_${b.end_index}`,
+            title:`${a.title} → ${b.title}`.slice(0,90),
+            summary:`${a.summary}；${b.summary}`.slice(0,900),
+            start_index:a.start_index,
+            source_range:`#${a.start_index}-#${b.end_index}`,
+            start_date:a.start_date||b.start_date||null,
+            key_events:[...(a.key_events||[]),...(b.key_events||[])].slice(0,8),
+            relationship_changes:[...(a.relationship_changes||[]),...(b.relationship_changes||[])].slice(0,6),
+            open_threads:[...(a.open_threads||[]),...(b.open_threads||[])].slice(-5)
+        };
+        out.splice(best,2,merged);
+    }
+    return out;
+}
+
+async function generateStageSummariesV01121() {
+    if(BUSY||HISTORY_RUNNING||GAP_REPAIR_RUNNING_V0112) return toast('当前已有总结/重建任务在运行。','warning');
+    const mem=M();
+    const ready=stageSummaryReadinessV01121(mem);
+    if(!ready.ready) return toast('阶段大总结暂不生成：'+ready.reason,'warning');
+    const rows=stageTimelineRowsV01121(mem);
+    const chunks=chunkStageTimelineV01121(rows);
+    const status=document.getElementById('smm121_stage_status');
+    BUSY=true;
+    const previous=cloneJSONV0112(mem.stage_summaries||[]);
+    try{
+        const collected=[];
+        for(let ci=0;ci<chunks.length;ci++){
+            const chunk=chunks[ci];
+            const start=Math.min(...chunk.map(x=>x.__first));
+            const end=Math.max(...chunk.map(x=>x.__last));
+            if(status) status.textContent=`正在生成阶段大总结：${ci+1}/${chunks.length}（#${start}-#${end}）…`;
+            const payload=chunk.map(x=>({date:x.date||null,time:x.time||null,event:x.event,source:x.source}));
+            const anchors=stageRelevantAnchorsV01121(mem,start,end);
+            const prompt=`你正在为长期角色扮演聊天制作“阶段大总结”。\n\n【输入来源】\n以下只包含 SMM 已经确认并可追溯到真实楼层的长期记忆，不是原始聊天全文。严禁补写输入中不存在的事实。\n\n【本组时间线 #${start}-#${end}】\n${JSON.stringify(payload,null,2)}\n\n【本组关键连续性锚点】\n${JSON.stringify(anchors,null,2)}\n\n【任务】\n- 将本组整理为 1-4 个真正的剧情阶段。只有目标、地点/时间阶段、核心冲突、人物阵容或关系状态发生明显转折时才切段；不要按固定楼层机械切。\n- summary 概括“这一阶段发生了什么、为什么重要、阶段结束后剧情处于什么状态”，不要逐条复述。\n- key_events 只保留会影响后续承接的关键事实。\n- relationship_changes 只写明确发生的关系变化。\n- state_at_end 写阶段结束时的可靠状态。\n- open_threads 只写阶段结束时仍未解决、且输入中确有依据的线索；已经完成/取消/失效的不要保留。\n- start_source/end_source 必须落在本组真实 source 范围内；所有返回 stages 合起来必须覆盖本组 #${start}-#${end}，不要留下未覆盖区间。\n- 不得使用 thinking、幕后说明、写作规则或推测。\n- 只返回 JSON。`;
+            const raw=await withSmmTimeout(
+                smmGenerateV093({systemPrompt:'你是长期剧情记忆压缩器。只压缩已确认事实，不进行文学创作。',prompt,jsonSchema:stageSummarySchemaV01121(),responseLength:2600}),
+                SMM_GENERATE_TIMEOUT_MS,
+                `阶段大总结 #${start}-#${end}`
+            );
+            const parsed=parseJSON(raw);
+            collected.push(...normalizeStageChunkV01121(parsed,chunk,ci+1));
+        }
+        const normalized=normalizeAllStageSummariesV01121(collected);
+        if(!normalized.length) throw new Error('没有生成任何可靠阶段总结');
+        mem.stage_summaries=normalized;
+        mem.stage_summary_last_index=ready.last;
+        mem.stage_summary_updated_at=new Date().toISOString();
+        mem.audit=Array.isArray(mem.audit)?mem.audit:[];
+        mem.audit.push({at:mem.stage_summary_updated_at,type:'stage_summaries_generated_v01121',events:rows.length,chunks:chunks.length,stages:normalized.length,covered_to:ready.last,source:'existing_canonical_memory_only'});
+        if(mem.audit.length>50) mem.audit=mem.audit.slice(-50);
+        await saveMeta();
+        refresh(); refreshNative();
+        const box=document.getElementById('smm2_native_memory_box');
+        if(box?.dataset.open==='1'){
+            box.innerHTML=memoryReadableHTML();
+            if(M().schema===SMM4_SCHEMA) bindHistoryBrowserV4(); else bindHistoryBrowserLegacy();
+        }
+        if(status) status.textContent=`已生成 ${normalized.length} 个阶段大总结，覆盖至 #${ready.last}。来源仅为现有长期记忆，未重扫原聊天。`;
+        toast(`阶段大总结完成：${normalized.length} 段，覆盖至 #${ready.last}。`,'success');
+        return normalized;
+    }catch(e){
+        mem.stage_summaries=previous;
+        console.error('[StoryMemory] v0.11.21 stage summary failed',e);
+        if(status) status.textContent='阶段大总结失败：'+(e?.message||e)+'；旧阶段总结已保留。';
+        toast('阶段大总结失败：'+(e?.message||e),'error');
+        return null;
+    }finally{
+        BUSY=false;
+        refreshNative();
+    }
+}
+
+function stageSummariesHTMLV01121(mem=M()) {
+    const rows=Array.isArray(mem?.stage_summaries)?mem.stage_summaries:[];
+    if(!rows.length) return '<div class="smm2-empty">尚未生成阶段大总结。它会在已有长期记忆之上做章节级压缩，不会修改原聊天。</div>';
+    return rows.map((x,i)=>`
+      <details class="smm2-memory-details smm121-stage-card" ${i===rows.length-1?'open':''}>
+        <summary>${esc(x.title||`剧情阶段 ${i+1}`)} <span class="smm2-day-count">${esc(x.source_range||'')}</span></summary>
+        <div class="smm121-stage-summary">${esc(x.summary||'')}</div>
+        ${(x.start_date||x.end_date)?`<div class="smm121-stage-meta">时间：${esc(x.start_date||'未明确')}${x.end_date&&x.end_date!==x.start_date?` → ${esc(x.end_date)}`:''}</div>`:''}
+        ${x.key_events?.length?`<div><b>关键事件：</b>${esc(x.key_events.join('；'))}</div>`:''}
+        ${x.relationship_changes?.length?`<div><b>关系变化：</b>${esc(x.relationship_changes.join('；'))}</div>`:''}
+        ${x.state_at_end?`<div><b>阶段结束状态：</b>${esc(x.state_at_end)}</div>`:''}
+        ${x.open_threads?.length?`<div><b>仍有效线索：</b>${esc(x.open_threads.join('；'))}</div>`:''}
+      </details>`).join('');
+}
+
+function refreshStageSummaryStatusV01121() {
+    const host=document.getElementById('smm121_stage_status');
+    if(!host) return;
+    const mem=M(), ready=stageSummaryReadinessV01121(mem);
+    const count=(mem.stage_summaries||[]).length;
+    const covered=Number(mem.stage_summary_last_index??-1);
+    if(count){
+        const stale=ready.last>covered;
+        host.textContent=`已有 ${count} 个阶段大总结，覆盖至 #${covered}${stale?`；现有时间线已到 #${ready.last}，可更新`:''}。`;
+    }else{
+        host.textContent=ready.ready
+            ? `当前有 ${ready.events} 条有效时间线，可以生成阶段大总结。`
+            : `尚未满足生成条件：${ready.reason}。`;
     }
 }
 
@@ -5000,6 +5327,332 @@ function syncCurrentStoryStateFromLatestMetaV0116(mem,endInclusive) {
         mem.current_scene.location=latest.location; location=true;
     }
     return {found:true,index:latest.index,date,time,location,meta:{date:latest.date,time:latest.time,location:latest.location}};
+}
+
+
+// =========================================================
+// v0.11.21 current story-state resolver
+// Recent canonical prose > recent world-state metadata > stored timeline/state.
+// This is intentionally conservative: it never edits the chat JSONL and only
+// upgrades current state when the evidence is newer than the stored timeline.
+// =========================================================
+function currentStoryCueFromMessageV01121(m, index) {
+    if (!m) return null;
+    const raw = String(m?.mes || '');
+    const text = cleanMesForSummaryV0110(m);
+    if (!text) return null;
+
+    const flat = String(text).replace(/\s+/g, ' ').trim();
+    const head = flat.slice(0, 520);
+    const lead = flat.slice(0, 280);
+    const out = {index, date:null, time:null, location:null, next_day:false, evidence:[]};
+
+    // Absolute date: prefer explicit <date>, then a canonical date near the start
+    // of the actual story prose. Dates buried deep in a reply are more likely to
+    // be recalled/quoted history and are not promoted to current state here.
+    const tagged = extractDateTagFromMessage(raw);
+    if (tagged) {
+        out.date = tagged;
+        out.evidence.push('正文 <date>');
+    } else {
+        const dm = head.match(/(20\d{2})[年\-\/.](\d{1,2})[月\-\/.](\d{1,2})日?/);
+        if (dm) {
+            const iso = `${dm[1]}-${String(Number(dm[2])).padStart(2,'0')}-${String(Number(dm[3])).padStart(2,'0')}`;
+            out.date = normalizeDateInput(iso)?.iso || null;
+            if (out.date) out.evidence.push('正文绝对日期');
+        } else {
+            const md=head.match(/(?:^|[^\d])(\d{1,2})月\s*(\d{1,2})日/);
+            const base=normalizeDateInput(M()?.current_story_date||'');
+            if(md&&base){
+                const iso=`${base.y}-${String(Number(md[1])).padStart(2,'0')}-${String(Number(md[2])).padStart(2,'0')}`;
+                out.date=normalizeDateInput(iso)?.iso||null;
+                if(out.date) out.evidence.push('正文月日（沿用已建立年份）');
+            }
+        }
+    }
+
+    // Relative day rollover is accepted only as scene-setting narration. USER
+    // future plans such as “第二天我会……” are deliberately not used as current time.
+    if (!out.date && !m.is_user && /^\s*(?:#+\s*)?(?:第二天|次日|翌日|隔天|第二日)(?:[，,。.!！\s]|$)/.test(lead)) {
+        out.next_day = true;
+        out.evidence.push('正文次日推进');
+    }
+
+    // Prefer a time contained in <date> when the preset emits one.
+    const dateBlock = raw.match(/<date\b[^>]*>([\s\S]*?)<\/date>/i)?.[1] || '';
+    const timeSource = String(dateBlock || lead);
+    let tm = timeSource.match(/(?:凌晨|清晨|早晨|早上|上午|中午|下午|傍晚|晚上|晚间|夜间|夜晚|深夜)?\s*([01]?\d|2[0-3])[:：]([0-5]\d)/);
+    if (tm) {
+        const beforeTm=timeSource.slice(Math.max(0,(tm.index||0)-24),tm.index||0);
+        const currentContext=!!dateBlock || (tm.index||0)<42 || /现在|此时|此刻|眼下|已经是|已是|时间来到|时间到了|正值|正是/.test(beforeTm);
+        if(currentContext){
+            let prefix = timeSource.slice(Math.max(0, tm.index - 8), tm.index + tm[0].length);
+            const period = prefix.match(/凌晨|清晨|早晨|早上|上午|中午|下午|傍晚|晚上|晚间|夜间|夜晚|深夜/)?.[0] || '';
+            let h = Number(tm[1]);
+            if (/下午|傍晚|晚上|晚间|夜间|夜晚|深夜/.test(period) && h < 12) h += 12;
+            if (/凌晨/.test(period) && h === 12) h = 0;
+            out.time = `${period ? period+' ' : ''}${String(h).padStart(2,'0')}:${tm[2]}`.trim();
+            out.evidence.push('正文明确时分');
+        }
+    }
+    if(!out.time){
+        const sceneTime = lead.match(/(?:^|[，,。.!！；;：:\s])(?:现在|此时|此刻|眼下|已经是|已是|时间来到|时间到了|正值|正是)?\s*(凌晨|清晨|早晨|早上|上午|中午|正午|下午|傍晚|晚上|晚间|夜间|夜晚|深夜)(?=[，,。.!！；;：:\s]|$)/);
+        if (sceneTime && (sceneTime.index||0)<110) {
+            out.time = sceneTime[1] === '正午' ? '中午' : sceneTime[1];
+            out.evidence.push('正文明确时段');
+        }
+    }
+
+    // Conservative current-location cues. Only explicit arrival/return/enter
+    // transitions near the start of canonical prose are accepted. A bare place
+    // name or “离开 X” is not enough to establish the new current location.
+    const locHeader=lead.match(/(?:^|[\n，,。；;])\s*(?:地点|场景|位置)\s*[:：]\s*([^，。！？!?；;]{2,80})/);
+    const loc = lead.match(/(?:来到|抵达|到达|进入|走进|踏进|回到|返回到?|回了)\s*([^，。！？!?；;]{2,46}?(?:房间|卧室|客厅|办公室|教室|宿舍|走廊|大厅|餐厅|食堂|图书馆|体育馆|医院|诊所|校园|宅邸|公寓|别墅|酒店|酒吧|咖啡馆|会所|车内|车上|楼层|\d+楼|\d+层))/);
+    if (locHeader || loc) {
+        out.location = sanitizeWorldMetaValueV0112((locHeader||loc)[1], 120);
+        if (out.location) out.evidence.push(locHeader?'正文地点标记':'正文明确地点移动');
+    }
+
+    return (out.date || out.time || out.location || out.next_day) ? out : null;
+}
+
+function latestTimelineStateV01121(mem=M()) {
+    const rows = (Array.isArray(mem?.timeline) ? mem.timeline : [])
+        .map((e,i)=>({e,i,last:sourceLast(e?.source),first:sourceFirst(e?.source)}))
+        .filter(x=>Number.isFinite(x.last) && x.last >= 0)
+        .sort((a,b)=>(a.last-b.last)||(a.first-b.first)||(a.i-b.i));
+    const row = rows.at(-1)?.e || null;
+    return {
+        index: rows.at(-1)?.last ?? -1,
+        date: normalizeDateInput(row?.date)?.iso || null,
+        time: row?.time || null,
+        location: row?.location || null
+    };
+}
+
+function latestWorldStateFieldsInRangeV01121(start,endExclusive) {
+    const chat=C().chat||[];
+    const out={date:null,time:null,location:null,date_index:-1,time_index:-1,location_index:-1};
+    for(let i=Math.min(endExclusive,chat.length)-1;i>=Math.max(0,start);i--){
+        const meta=extractWorldStateMetadataV0112(chat[i]);
+        if(!meta) continue;
+        if(!out.date&&meta.date){out.date=meta.date;out.date_index=i;}
+        if(!out.time&&meta.time){out.time=meta.time;out.time_index=i;}
+        if(!out.location&&meta.location){out.location=meta.location;out.location_index=i;}
+        if(out.date&&out.time&&out.location) break;
+    }
+    return (out.date||out.time||out.location)?out:null;
+}
+
+function composeCurrentStoryTimeV01121(date,time,previous='') {
+    const t=String(time||'').trim();
+    if(!t || /周[日一二三四五六天]/.test(t)) return t||null;
+    const d=normalizeDateInput(date||'');
+    if(!d) return t;
+    const weekdays=['周日','周一','周二','周三','周四','周五','周六'];
+    const wd=weekdays[new Date(d.iso+'T00:00:00Z').getUTCDay()];
+    const prev=String(previous||'').trim();
+    const prefix=(prev.match(/^(.{1,24}?)(?=\s*周[日一二三四五六天])/)?.[1]||'').trim();
+    const safePrefix=/学期|春季|夏季|秋季|冬季|第.{0,4}周/.test(prefix)?prefix:'';
+    return [safePrefix,wd,t].filter(Boolean).join(' ');
+}
+
+function resolveCurrentStoryStateV01121(mem=M()) {
+    const chat = C().chat || [];
+    const tl = latestTimelineStateV01121(mem);
+    const end = chat.length - 1;
+    if (end < 0) return {changed:false, source:'none'};
+
+    // Inspect a narrow recent window plus a few messages overlapping the latest
+    // timeline source. This catches a date/time stated in the very source that was
+    // summarized incorrectly without re-scanning a 1700-floor chat every refresh.
+    const scanStart = (!normalizeDateInput(mem?.current_story_date||'') && tl.index<0)
+        ? 0
+        : Math.max(0, end - 79, (tl.index >= 0 ? tl.index - 6 : 0));
+    let rawDate = null, rawDateIndex = -1, rawDateReason = null;
+    let rawTime = null, rawTimeIndex = -1, rawTimeReason = null;
+    let rawLocation = null, rawLocationIndex = -1, rawLocationReason = null;
+
+    let rollingDate = normalizeDateInput(mem?.current_story_date)?.iso || tl.date || null;
+    for (let i=scanStart; i<=end; i++) {
+        const cue = currentStoryCueFromMessageV01121(chat[i], i);
+        if (!cue) continue;
+        let cueRejectedAsPast=false;
+        if (cue.date) {
+            const cur = rollingDate;
+            const diff = cur ? dateDiffDaysLocalV0114(cur, cue.date) : null;
+            // Current story date is monotonic. An older explicit date in recent prose
+            // is treated as recollection unless the memory has no date at all.
+            if (!cur || diff == null || diff >= 0) {
+                rollingDate = cue.date;
+                rawDate = cue.date;
+                rawDateIndex = i;
+                rawDateReason = cue.evidence.join(' / ');
+            } else {
+                cueRejectedAsPast=true;
+            }
+        } else if (cue.next_day && i > tl.index && rollingDate) {
+            rollingDate = addDaysISO(rollingDate, 1) || rollingDate;
+            rawDate = rollingDate;
+            rawDateIndex = i;
+            rawDateReason = cue.evidence.join(' / ');
+        }
+        // If the same canonical cue explicitly points to an older date, its time
+        // and location belong to that recollection, not to the current scene.
+        if (!cueRejectedAsPast && cue.time) {
+            rawTime = cue.time;
+            rawTimeIndex = i;
+            rawTimeReason = cue.evidence.join(' / ');
+        }
+        if (!cueRejectedAsPast && cue.location) {
+            rawLocation = cue.location;
+            rawLocationIndex = i;
+            rawLocationReason = cue.evidence.join(' / ');
+        }
+    }
+
+    const latestMeta = latestWorldStateFieldsInRangeV01121(scanStart, end + 1);
+    const storedDate = normalizeDateInput(mem?.current_story_date)?.iso || null;
+    const metaDate = normalizeDateInput(latestMeta?.date)?.iso || null;
+
+    let nextDate = storedDate || tl.date || null;
+    let dateSource = nextDate ? 'stored/timeline' : 'none';
+    // Canonical prose wins when it is the same/newer evidence. A later variable
+    // snapshot may still ADVANCE the state after that prose; otherwise an explicit
+    // date mentioned 50 floors ago would freeze current_story_date forever.
+    let chosenDate = null, chosenDateIndex = -1, chosenDateKind = 'none';
+    if (rawDate) {
+        chosenDate = rawDate;
+        chosenDateIndex = rawDateIndex;
+        chosenDateKind = 'raw';
+    }
+    if (metaDate) {
+        const metaIsLaterEvidence = latestMeta.date_index > chosenDateIndex;
+        const metaAdvancesDate = !chosenDate || metaDate > chosenDate;
+        if (!chosenDate || (metaIsLaterEvidence && metaAdvancesDate)) {
+            chosenDate = metaDate;
+            chosenDateIndex = latestMeta.date_index;
+            chosenDateKind = 'world_meta';
+        }
+    }
+    if (chosenDate) {
+        const diff = nextDate ? dateDiffDaysLocalV0114(nextDate, chosenDate) : null;
+        if (!nextDate || diff == null || diff >= 0) {
+            nextDate = chosenDate;
+            dateSource = `${chosenDateKind}#${chosenDateIndex}`;
+        }
+    } else if (!nextDate && tl.date) {
+        nextDate = tl.date;
+        dateSource = `timeline#${tl.index}`;
+    }
+
+    let nextTime = mem?.current_story_time || tl.time || null;
+    let timeSource = nextTime ? 'stored/timeline' : 'none';
+    const rawTimeUsable = !!rawTime && rawTimeIndex >= Math.max(scanStart, tl.index - 6);
+    const metaTimeUsable = !!latestMeta?.time;
+    if (rawTimeUsable && (!metaTimeUsable || rawTimeIndex >= latestMeta.time_index)) {
+        nextTime = rawTime;
+        timeSource = `raw#${rawTimeIndex}`;
+    } else if (metaTimeUsable) {
+        nextTime = latestMeta.time;
+        timeSource = `world_meta#${latestMeta.time_index}`;
+    }
+
+    // If the absolute date advanced but no new-day time evidence exists, do not
+    // carry an old precise clock onto the new date. A stale 19:45 on “the next day”
+    // is more harmful than an intentionally unknown time.
+    if (storedDate && nextDate && nextDate > storedDate) {
+        const newestTimeIndex = Math.max(rawTimeIndex, Number(latestMeta?.time ? latestMeta.time_index : -1));
+        const dateEvidenceIndex = rawDateIndex >= 0 ? rawDateIndex : Number(latestMeta?.date ? latestMeta.date_index : -1);
+        if (newestTimeIndex < dateEvidenceIndex) {
+            nextTime = null;
+            timeSource = 'date_advanced_time_unknown';
+        }
+    }
+    if(nextTime && (timeSource.startsWith('raw#') || timeSource.startsWith('world_meta#'))){
+        nextTime=composeCurrentStoryTimeV01121(nextDate,nextTime,mem?.current_story_time||'');
+    }
+
+    let nextLocation = (mem?.current_scene && typeof mem.current_scene === 'object')
+        ? (mem.current_scene.location || tl.location || null)
+        : (tl.location || null);
+    let locationSource = nextLocation ? 'stored/timeline' : 'none';
+    // Same-floor conflicts prefer canonical prose. A later variable snapshot can
+    // update the location once the story has moved on without another prose header.
+    if (rawLocation && (!latestMeta?.location || rawLocationIndex >= latestMeta.location_index)) {
+        nextLocation = rawLocation;
+        locationSource = `raw#${rawLocationIndex}`;
+    } else if (latestMeta?.location) {
+        nextLocation = latestMeta.location;
+        locationSource = `world_meta#${latestMeta.location_index}`;
+    }
+
+    const before = {
+        date: mem.current_story_date || null,
+        time: mem.current_story_time || null,
+        location: mem?.current_scene?.location || null
+    };
+    let changed = false;
+    if ((nextDate || null) !== (before.date || null)) {
+        mem.current_story_date = nextDate || null;
+        changed = true;
+    }
+    if ((nextTime || null) !== (before.time || null)) {
+        mem.current_story_time = nextTime || null;
+        changed = true;
+    }
+    if (!mem.current_scene || typeof mem.current_scene !== 'object' || Array.isArray(mem.current_scene)) mem.current_scene = {};
+    if ((nextLocation || null) !== (before.location || null)) {
+        if (nextLocation) mem.current_scene.location = nextLocation;
+        else delete mem.current_scene.location;
+        changed = true;
+    }
+
+    if (changed) {
+        mem.audit = Array.isArray(mem.audit) ? mem.audit : [];
+        mem.audit.push({
+            at:new Date().toISOString(),
+            type:'current_story_state_resolved_v01121',
+            scan:[scanStart,end],
+            before,
+            after:{date:mem.current_story_date||null,time:mem.current_story_time||null,location:mem.current_scene.location||null},
+            evidence:{
+                date:dateSource,
+                date_reason:rawDateReason,
+                time:timeSource,
+                time_reason:rawTimeReason,
+                location:locationSource,
+                location_reason:rawLocationReason
+            }
+        });
+        if (mem.audit.length > 50) mem.audit = mem.audit.slice(-50);
+    }
+
+    return {
+        changed,
+        date:mem.current_story_date||null,
+        time:mem.current_story_time||null,
+        location:mem.current_scene.location||null,
+        evidence:{date:dateSource,time:timeSource,location:locationSource},
+        scan:[scanStart,end]
+    };
+}
+
+let CURRENT_STATE_SAVE_PENDING_V01121 = false;
+function refreshCurrentStoryStateV01121({persist=true}={}) {
+    let result;
+    try { result = resolveCurrentStoryStateV01121(M()); }
+    catch (e) {
+        console.warn('[StoryMemory] v0.11.21 current-state resolver failed', e);
+        return {changed:false,error:String(e?.message||e)};
+    }
+    if (result.changed && persist && !CURRENT_STATE_SAVE_PENDING_V01121) {
+        CURRENT_STATE_SAVE_PENDING_V01121 = true;
+        Promise.resolve(saveMeta())
+            .catch(e=>console.warn('[StoryMemory] v0.11.21 current-state save failed',e))
+            .finally(()=>{ CURRENT_STATE_SAVE_PENDING_V01121=false; });
+    }
+    return result;
 }
 
 function makeLocalTimelineNodesV0116(start,endInclusive,mem=M()) {
@@ -6300,7 +6953,7 @@ function stat() {
 function panelHTML() {
     return `<div id="${PANEL_ID}" class="smm2-hidden">
       <div class="smm2-card">
-        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.20</span></div><button id="smm2_close">×</button></div>
+        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.21</span></div><button id="smm2_close">×</button></div>
         <div id="smm2_stats" class="smm2-stats"></div>
         <div class="smm2-grid">
           <button id="smm2_new">总结新增</button>
@@ -6316,7 +6969,7 @@ function panelHTML() {
         <label><input id="smm2_auto" type="checkbox"> 自动增量总结</label>
         <label>每 <input id="smm2_trigger" type="number" min="1" max="50"> 条新消息总结一次</label>
         <label>每批最多 <input id="smm2_batch" type="number" min="4" max="60"> 条消息</label>
-        <label>剧情起点（建立记忆后自动锁定）<input id="smm2_start" type="text" placeholder="如 2026-01-01"></label>
+        <label>剧情起点（可无日期；建立记忆后自动锁定）<input id="smm2_start" type="text" placeholder="可留空，或填写 YYYY-MM-DD / 本聊天剧情正式起点"></label>
         <div class="smm2-note">记忆按“聊天”隔离。同一角色开新聊天，也会得到另一套记忆。酒馆楼层时间不会作为剧情时间。</div>
       </div>
     </div>`;
@@ -7636,6 +8289,7 @@ function legacyReadableHTML(mem=M()) {
           <div><b>剧情起点：</b>${esc(mem.story_start||S().storyStart||'未建立')}</div>
           <div><b>当前绝对日期：</b>${esc(date)}</div>
           <div><b>显示时间：</b>${esc(mem.current_story_time||'未建立')}</div>
+          <div><b>当前地点：</b>${esc(mem.current_scene?.location||'未建立')}</div>
           <div><b>安全断点：</b>${esc(checkpointText)}</div>
           <div class="smm2-note">这里只展示适合人工核对的长期剧情记忆。待办、隔离、冲突和内部审计仍在后台工作，不占用日常查看界面。</div>
         </div>
@@ -7667,6 +8321,11 @@ function legacyReadableHTML(mem=M()) {
         <details class="smm2-memory-details">
           <summary>人物关系（${(mem.relationships||[]).length}）</summary>
           ${legacyRelationshipsHTML(mem)}
+        </details>
+
+        <details open class="smm2-memory-details smm121-stage-group">
+          <summary>阶段大总结（${(mem.stage_summaries||[]).length}）</summary>
+          ${stageSummariesHTMLV01121(mem)}
         </details>
 
         <details open class="smm2-memory-details">
@@ -7711,6 +8370,7 @@ function memoryReadableHTML() {
           <div><b>剧情起点：</b>${esc(mem.story_start || '未建立')} <span class="smm2-lock">🔒</span></div>
           <div><b>当前剧情日期：</b>${esc(effectiveCurrentDate(mem) || '未建立')}</div>
           <div><b>显示时间：</b>${esc(mem.current_story_time || '未建立')}</div>
+          <div><b>当前地点：</b>${esc(mem.current_scene?.location||'未建立')}</div>
           <div><b>计算时间基准：</b>${esc(combinedStoryTime(mem))}</div>
           <div><b>已处理到：</b>${Math.max(0, Number(mem.last_processed_index ?? -1)+1)} 条</div>
           ${auditHtml}
@@ -7728,6 +8388,11 @@ function memoryReadableHTML() {
             </select>
           </div>
           <div id="smm4_history_results"></div>
+        </details>
+
+        <details open class="smm2-memory-details smm121-stage-group">
+          <summary>阶段大总结（${(mem.stage_summaries||[]).length}）</summary>
+          ${stageSummariesHTMLV01121(mem)}
         </details>
 
         <details open class="smm2-memory-details">
@@ -7805,12 +8470,14 @@ function exportRawChat() {
 
 function safeRebuildFreshMemory(anchor, currentDate) {
     const m=freshMemory();
-    m.story_start=anchor;
-    m.current_story_date=anchor;
+    m.story_start=String(anchor||'').trim() || null;
+    // v0.11.21: a story may begin without an absolute date. Only a parseable
+    // YYYY-MM-DD anchor is allowed to seed current_story_date.
+    m.current_story_date=normalizeDateInput(anchor||'')?.iso || null;
     m.current_story_time=null;
     m.rebuild_target_date=currentDate || null;
     m.rebuild_mode='safe_v062';
-    m.audit.push({at:new Date().toISOString(),type:'safe_rebuild_started',anchor,target_date:currentDate||null});
+    m.audit.push({at:new Date().toISOString(),type:'safe_rebuild_started',anchor:m.story_start,target_date:currentDate||null});
     return m;
 }
 
@@ -7821,11 +8488,11 @@ async function safeHistoryRun({fresh=false}={}) {
 
     const existing=M();
     const anchor=(existing.story_start || S().storyStart || '').trim();
-    if (!anchor) return toast('请先设置并保存剧情起点（YYYY-MM-DD），再开始安全重建。','warning');
+    const anchorDate=normalizeDateInput(anchor)?.iso || null;
     const target=existing.current_story_date || detectCurrentDateFromRecentChat()?.date || null;
 
     if (fresh) {
-        if (!confirm(`将从第1条原始聊天重新开始安全重建。\\n剧情起点锁定：${anchor}\\n\\n现有记忆会备份，然后重新从0开始。继续吗？`)) return;
+        if (!confirm(`将从第1条原始聊天重新开始安全重建。\\n剧情起点：${anchor||'本聊天剧情正式起点（日期未明确）'}\\n\\n现有记忆会备份，然后重新从0开始。继续吗？`)) return;
         const old=JSON.parse(JSON.stringify(existing));
         c.chatMetadata[META_KEY+'_backup_v062_'+Date.now()]=old;
         c.chatMetadata[META_KEY]=safeRebuildFreshMemory(anchor,target);
@@ -7868,7 +8535,7 @@ async function safeHistoryRun({fresh=false}={}) {
                     reason:'v0.6.0 单向时间守卫：当前主线日期禁止倒退',source:`#${start+1}-#${end}`});
                 M().current_story_date=beforeDate;
             }
-            if (M().current_story_date && M().current_story_date < anchor) M().current_story_date=anchor;
+            if (anchorDate && M().current_story_date && M().current_story_date < anchorDate) M().current_story_date=anchorDate;
 
             calibrateTimeline(M(), {allowCrossMidnight:true});
             // 二次校准后再次同步 current_story_date，确保顶部日期与 timeline 最新 source 一致。
@@ -8092,10 +8759,10 @@ function nativeManagerHTML() {
             <span><b>生成时注入剧情记忆</b><small>把可靠长期记忆提供给主聊天模型</small></span>
           </label>
 
-          <details class="smm107-inline-details">
+          <details class="smm107-inline-details smm119-audit-details">
             <summary>检查本轮会注入给主模型的记忆</summary>
-            <button id="smm119_refresh_injection_audit" class="menu_button" type="button">刷新注入诊断</button>
-            <pre id="smm119_injection_audit" class="smm2-note" style="white-space:pre-wrap;max-height:320px;overflow:auto"></pre>
+            <button id="smm119_refresh_injection_audit" class="menu_button smm119-refresh" type="button">刷新诊断</button>
+            <div id="smm119_injection_audit" class="smm119-audit"></div>
           </details>
 
           <label class="smm107-switch-row">
@@ -8168,6 +8835,20 @@ function nativeManagerHTML() {
 
         <details class="smm2-tool-card smm107-settings-card">
           <summary>
+            <span class="smm2-tool-title">阶段大总结</span>
+            <span class="smm2-tool-subtitle">把零散长期记忆压缩为章节级剧情阶段</span>
+          </summary>
+          <div class="smm2-tool-body">
+            <div class="smm2-note">
+              只读取当前 SMM 已确认的长期记忆，不重新扫描原始聊天，也不会修改 JSONL。新聊天建议至少积累 6 条有效时间线后再生成；长聊天可随时手动更新。
+            </div>
+            <button id="smm121_build_stages" class="menu_button smm2-primary-tool">生成 / 更新阶段大总结</button>
+            <div id="smm121_stage_status" class="smm2-note smm107-status-note"></div>
+          </div>
+        </details>
+
+        <details class="smm2-tool-card smm107-settings-card">
+          <summary>
             <span class="smm2-tool-title">总结节奏与剧情起点</span>
             <span class="smm2-tool-subtitle">一般无需频繁调整</span>
           </summary>
@@ -8183,12 +8864,12 @@ function nativeManagerHTML() {
             </label>
 
             <label class="smm107-span-all">
-              剧情起点（建立记忆后自动锁定）
-              <input id="smm2_native_start" type="text" placeholder="如 2026-01-01">
+              剧情起点（可无日期；建立记忆后自动锁定）
+              <input id="smm2_native_start" type="text" placeholder="可留空，或填写 YYYY-MM-DD / 本聊天剧情正式起点">
             </label>
 
             <div class="smm2-note smm107-span-all">
-              记忆按“聊天”隔离。同一角色开新聊天，也会得到另一套记忆。酒馆楼层发送时间不作为剧情时间。
+              记忆按“聊天”隔离。同一角色开新聊天，也会得到另一套记忆。开场没有绝对日期时可留空；SMM 会在正文首次出现可靠日期后建立 current_story_date。酒馆楼层发送时间不作为剧情时间。
             </div>
           </div>
         </details>
@@ -8201,6 +8882,9 @@ function bindNativeManager() {
     if (!q('smm2_native_new')) return;
 
     q('smm2_native_new').onclick = () => summarizeNew(true);
+    const stageBuildBtn=q('smm121_build_stages');
+    if(stageBuildBtn) stageBuildBtn.onclick=generateStageSummariesV01121;
+    refreshStageSummaryStatusV01121();
 
     // v0.9.4：总结专用 Connection Profile UI
     const providerEl=q('smm93_summary_provider');
@@ -8674,6 +9358,7 @@ function refreshNative() {
     const s = S();
 
     stats.innerHTML = statsHTMLV0105();
+    refreshStageSummaryStatusV01121();
 
     const setChecked = (id, val) => {
         const el = document.getElementById(id);
@@ -8752,7 +9437,7 @@ function installNativeExtensionEntry() {
 
         wrap.innerHTML = `
           <div class="inline-drawer-toggle inline-drawer-header">
-            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.20</span></div>
+            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.21</span></div>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
           </div>
           <div class="inline-drawer-content">
@@ -8906,7 +9591,7 @@ function statsHTMLV0105() {
     return [
         `<div class="smm105-stat-line"><b>剧情：</b>${esc(date)}　${esc(st.time)}</div>`,
         `<div class="smm105-stat-line"><b>处理：</b>${st.done}/${st.total}　待总结 ${st.pending}　已隐藏 ${hidden.count}</div>`,
-        `<div class="smm105-stat-line"><b>记忆：</b>事件 ${st.events}　人物 ${people}　关系 ${relations}　锚点 ${anchors}</div>`,
+        `<div class="smm105-stat-line"><b>记忆：</b>事件 ${st.events}　人物 ${people}　关系 ${relations}　锚点 ${anchors}　阶段 ${(mem.stage_summaries||[]).length}</div>`,
         `<div class="smm105-stat-line"><b>连续性：</b>${coverageGapsV0112.length ? `⚠ 时间线断档 #${coverageGapsV0112[0].start}-#${coverageGapsV0112[0].end}` : (continuityNeedsReview ? '后台有待核查项' : '正常')}</div>`,
         `<div class="smm105-stat-line"><b>历史重建：</b>${esc(rebuildStatusLabelV0105(mem))}</div>`,
         rebuildCheckpointHTMLV0105(mem, st.total)
@@ -8916,7 +9601,7 @@ function statsHTMLV0105() {
 function refresh() {
     // v0.11.19: extension prompts are chat-scoped in practice; always refresh after
     // chat/message state changes so the main model receives THIS chat's latest memory.
-    try { refreshSafeMemoryInjectionV0100(); } catch(e) { console.warn('[StoryMemory] v0.11.20 injection refresh failed', e); }
+    try { refreshSafeMemoryInjectionV0100(); } catch(e) { console.warn('[StoryMemory] v0.11.21 injection refresh failed', e); }
     refreshNative();
     renderMemoryInjectionAuditV0119();
 
@@ -8984,7 +9669,7 @@ function initializeExtension() {
     try {
         installUI();
         refresh();
-        console.log('[StoryMemory] v0.11.19 loaded successfully');
+        console.log('[StoryMemory] v0.11.21 loaded successfully');
     } catch (e) {
         console.error('[StoryMemory] UI initialization failed', e);
     }
