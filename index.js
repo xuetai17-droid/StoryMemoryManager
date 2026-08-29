@@ -1,4 +1,4 @@
-// Story Memory Manager v0.11.22
+// Story Memory Manager v0.11.23
 // canonical-input purification / character-core preservation / story-arc continuity
 // does not rewrite original chat JSONL
 
@@ -4037,14 +4037,64 @@ async function smmGenerateV093({
             }
         );
 
-        const text =
-            response?.content ??
-            response?.text ??
-            response?.message ??
-            '';
+        // v0.11.23: ConnectionManager's extracted response may legally separate
+        // final content and reasoning. Some reasoning-capable profiles occasionally
+        // return an empty `content` while putting the requested JSON in `reasoning`.
+        // Prefer final content, but recover a JSON payload from reasoning instead of
+        // treating a successful request as an empty response.
+        const pickString = (...xs) => {
+            for (const x of xs) {
+                if (typeof x === 'string' && x.trim()) return x;
+            }
+            return '';
+        };
+
+        let text = pickString(
+            typeof response === 'string' ? response : '',
+            response?.content,
+            response?.text,
+            typeof response?.message === 'string' ? response.message : '',
+            response?.message?.content,
+            response?.data?.content,
+            response?.data?.text,
+            response?.choices?.[0]?.message?.content,
+            response?.choices?.[0]?.text
+        );
+
+        if (!text) {
+            const reasoning = pickString(
+                response?.reasoning,
+                response?.message?.reasoning,
+                response?.message?.reasoning_content,
+                response?.state?.reasoning,
+                response?.choices?.[0]?.message?.reasoning,
+                response?.choices?.[0]?.message?.reasoning_content
+            );
+
+            if (reasoning) {
+                let usable = false;
+                try {
+                    // Summary requests are JSON-oriented. Only consume reasoning when
+                    // it actually contains a recoverable JSON object; do not promote
+                    // arbitrary chain-of-thought prose into canonical memory.
+                    parseJSON(reasoning);
+                    usable = true;
+                } catch (_) {}
+
+                if (usable) {
+                    console.warn('[StoryMemory] v0.11.23 profile content empty; recovered JSON from reasoning channel');
+                    text = reasoning;
+                }
+            }
+        }
 
         if (!String(text).trim()) {
-            throw new Error('独立总结 Profile 返回为空');
+            const contentLen = typeof response?.content === 'string' ? response.content.length : 0;
+            const reasoningLen = typeof response?.reasoning === 'string' ? response.reasoning.length : 0;
+            console.warn('[StoryMemory] v0.11.23 empty profile response', {
+                contentLen, reasoningLen, responseKeys: response && typeof response === 'object' ? Object.keys(response) : []
+            });
+            throw new Error('独立总结 Profile 正文为空，且未找到可恢复的 JSON 输出');
         }
 
         return String(text);
@@ -4299,7 +4349,7 @@ async function generateStageSummariesV01121() {
         return normalized;
     }catch(e){
         mem.stage_summaries=previous;
-        console.error('[StoryMemory] v0.11.22 stage summary failed',e);
+        console.error('[StoryMemory] v0.11.23 stage summary failed',e);
         const fullErr=String(e?.message||e||'未知错误');
         const shortErr=fullErr.length>180 ? fullErr.slice(0,180)+'…' : fullErr;
         if(status) status.textContent='阶段大总结失败：'+shortErr+'；旧阶段总结已保留。详细错误见浏览器控制台。';
@@ -5673,13 +5723,13 @@ function refreshCurrentStoryStateV01121({persist=true}={}) {
     let result;
     try { result = resolveCurrentStoryStateV01121(M()); }
     catch (e) {
-        console.warn('[StoryMemory] v0.11.22 current-state resolver failed', e);
+        console.warn('[StoryMemory] v0.11.23 current-state resolver failed', e);
         return {changed:false,error:String(e?.message||e)};
     }
     if (result.changed && persist && !CURRENT_STATE_SAVE_PENDING_V01121) {
         CURRENT_STATE_SAVE_PENDING_V01121 = true;
         Promise.resolve(saveMeta())
-            .catch(e=>console.warn('[StoryMemory] v0.11.22 current-state save failed',e))
+            .catch(e=>console.warn('[StoryMemory] v0.11.23 current-state save failed',e))
             .finally(()=>{ CURRENT_STATE_SAVE_PENDING_V01121=false; });
     }
     return result;
@@ -6983,7 +7033,7 @@ function stat() {
 function panelHTML() {
     return `<div id="${PANEL_ID}" class="smm2-hidden">
       <div class="smm2-card">
-        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.22</span></div><button id="smm2_close">×</button></div>
+        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.23</span></div><button id="smm2_close">×</button></div>
         <div id="smm2_stats" class="smm2-stats"></div>
         <div class="smm2-grid">
           <button id="smm2_new">总结新增</button>
@@ -9467,7 +9517,7 @@ function installNativeExtensionEntry() {
 
         wrap.innerHTML = `
           <div class="inline-drawer-toggle inline-drawer-header">
-            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.22</span></div>
+            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.23</span></div>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
           </div>
           <div class="inline-drawer-content">
@@ -9631,7 +9681,7 @@ function statsHTMLV0105() {
 function refresh() {
     // v0.11.19: extension prompts are chat-scoped in practice; always refresh after
     // chat/message state changes so the main model receives THIS chat's latest memory.
-    try { refreshSafeMemoryInjectionV0100(); } catch(e) { console.warn('[StoryMemory] v0.11.22 injection refresh failed', e); }
+    try { refreshSafeMemoryInjectionV0100(); } catch(e) { console.warn('[StoryMemory] v0.11.23 injection refresh failed', e); }
     refreshNative();
     renderMemoryInjectionAuditV0119();
 
@@ -9699,7 +9749,7 @@ function initializeExtension() {
     try {
         installUI();
         refresh();
-        console.log('[StoryMemory] v0.11.22 loaded successfully');
+        console.log('[StoryMemory] v0.11.23 loaded successfully');
     } catch (e) {
         console.error('[StoryMemory] UI initialization failed', e);
     }

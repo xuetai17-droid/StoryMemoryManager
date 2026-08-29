@@ -1,8 +1,8 @@
-# v0.11.22 HYBRID Release Audit
+# v0.11.23 HYBRID Release Audit
 
 - `node --check index.js`: PASS
-- manifest version: 0.11.22
-- visible version badge: 0.11.22（经典面板 + 原生扩展面板）
+- manifest version: 0.11.23
+- visible version badge: 0.11.23（经典面板 + 原生扩展面板）
 - JSON local repair regression tests: PASS
   - valid JSON containing Chinese curly quotes `“ ”` remains valid and unchanged
   - malformed stage JSON containing unescaped ASCII quotes around Chinese phrases is repaired locally
@@ -13,3 +13,10 @@
 - Stage summary failure safety retained: previous `stage_summaries` are restored on failure; no partial stage result is persisted.
 - v0.11.21 current-state resolver, injection audit UI and stage-summary schema are unchanged except for this JSON/output hardening.
 - Original chat JSONL mutation: none added.
+
+
+## v0.11.23 targeted regression
+- Connection Profile `{content:"", reasoning:"{\"stages\":[...]}"}`: recover JSON from reasoning.
+- Connection Profile with non-empty content: content remains authoritative.
+- Empty content + non-JSON reasoning: fail closed; do not promote reasoning to memory.
+- Object-shaped `message.content` and OpenAI-style `choices[0].message.content`: recognized.

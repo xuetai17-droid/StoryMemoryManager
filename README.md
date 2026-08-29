@@ -1,6 +1,15 @@
-# Story Memory Manager v0.11.22 HYBRID
+# Story Memory Manager v0.11.23 HYBRID
 
 本版集中更新三项：当前剧情时间追踪、移动端注入诊断界面、阶段大总结。
+
+
+## v0.11.23 独立总结 Profile 空正文热修复
+
+- 修复独立总结 Profile 请求成功、但 SillyTavern 将结果放在 `reasoning` 而 `content` 为空时，SMM 误报“Profile 返回为空”的问题。
+- SMM 仍优先读取最终 `content`；只有最终正文为空、且 reasoning 中存在可本地解析/修复的 JSON 对象时，才将 reasoning 作为恢复来源。
+- 不会把普通推理 prose 直接写进 canonical memory；reasoning 不能解析为 JSON 时仍按失败处理并保留旧结果。
+- 同时兼容 `message.content`、`choices[0].message.content` 等非标准包装，避免对象型 `message` 被错误转换成 `[object Object]`。
+- 不改 v0.11.22 已通过的时间/地点追踪、界面和阶段总结结构。
 
 ## v0.11.22 阶段大总结 JSON 热修复
 

@@ -1,3 +1,9 @@
+# v0.11.23 HYBRID
+- 修复独立总结 Connection Profile 成功返回但 `content` 为空、有效 JSON 落在 `reasoning` 时被误判为空响应。
+- 仅在 reasoning 可解析/本地修复为 JSON 时启用恢复，避免把普通推理内容写入长期记忆。
+- 增强 Connection Profile 响应包装兼容：支持 `message.content` / `data.content` / `choices[0].message.content` 等。
+- 保持 v0.11.22 的 JSON 裸双引号修复、时间/地点追踪、注入诊断 UI 和阶段大总结结构不变。
+
 # v0.11.22 HYBRID
 - 修复阶段大总结返回“几乎正确但字符串内含未转义 ASCII 双引号”时的 JSON 解析失败。
 - JSON 本地修复器不再全局替换中文弯引号；新增字符串内裸双引号的结构感知修复。
