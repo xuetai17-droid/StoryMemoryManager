@@ -1,22 +1,15 @@
-# v0.11.21 HYBRID Release Audit
+# v0.11.22 HYBRID Release Audit
 
 - `node --check index.js`: PASS
-- manifest version: 0.11.21
-- visible version badge: 0.11.21（经典面板 + 原生扩展面板）
-- current-state resolver VM tests: PASS
-  - recent canonical `2025-09-24 / 正午` overrides stored `2025-09-23 19:45`
-  - no-date opening keeps `current_story_date = null`
-  - world-state metadata fills date/time/location when canonical prose does not
-  - later world-state metadata can advance date/time/location after older canonical evidence without allowing regressions
-  - independent metadata fields are resolved from their latest available rows
-  - an explicitly older flashback date cannot replace current time/location
-  - canonical prose wins over conflicting older world-state metadata
-  - timeline regression from 2025-09-24 back to 2025-09-23 is blocked
-- stage summary VM test: PASS
-  - minimum readiness check works
-  - generated stage summaries persist with source ranges
-  - `stage_summary_last_index` checkpoint updates
-  - injection payload includes compact stage context
-- Original chat JSONL mutation: none added. The new current-state resolver only updates SMM chat metadata.
-- Legacy `generate_interceptor` remains no-op; generation injection continues through SillyTavern `setExtensionPrompt`.
-- Existing v0.11.18 JSON local repair, HYBRID gap tools, entity normalization, and natural timeline display behavior retained.
+- manifest version: 0.11.22
+- visible version badge: 0.11.22（经典面板 + 原生扩展面板）
+- JSON local repair regression tests: PASS
+  - valid JSON containing Chinese curly quotes `“ ”` remains valid and unchanged
+  - malformed stage JSON containing unescaped ASCII quotes around Chinese phrases is repaired locally
+  - malformed English quoted phrase followed by prose comma is repaired locally
+  - already escaped ASCII quotes remain valid
+  - trailing commas and bare property names continue to be repaired
+  - screenshot-shaped `stages[]` payload with multiple naked quoted phrases parses successfully after local repair
+- Stage summary failure safety retained: previous `stage_summaries` are restored on failure; no partial stage result is persisted.
+- v0.11.21 current-state resolver, injection audit UI and stage-summary schema are unchanged except for this JSON/output hardening.
+- Original chat JSONL mutation: none added.

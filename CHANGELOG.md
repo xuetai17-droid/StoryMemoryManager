@@ -1,3 +1,10 @@
+# v0.11.22 HYBRID
+- 修复阶段大总结返回“几乎正确但字符串内含未转义 ASCII 双引号”时的 JSON 解析失败。
+- JSON 本地修复器不再全局替换中文弯引号；新增字符串内裸双引号的结构感知修复。
+- 阶段大总结 prompt 明确要求标准 JSON，并建议正文引用使用中文引号。
+- 阶段大总结错误 toast 改为短摘要，完整错误继续写入控制台。
+- 不改变 v0.11.21 的时间/地点追踪、注入诊断 UI 与 stage_summaries 数据结构。
+
 # v0.11.21 HYBRID
 - 修复 current_story_date/current_story_time 被旧 timeline 拉回的问题；新增最近正文优先的 current-state resolver。
 - current_scene.location 同步采用“最近可靠正文 > 世界状态元数据 > 旧状态”的保守策略。

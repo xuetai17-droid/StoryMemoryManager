@@ -1,4 +1,4 @@
-// Story Memory Manager v0.11.21
+// Story Memory Manager v0.11.22
 // canonical-input purification / character-core preservation / story-arc continuity
 // does not rewrite original chat JSONL
 
@@ -705,21 +705,49 @@ function messagesText(start, end) {
 function repairJSONStringLocalV01118(input) {
     let s=String(input??'').replace(/^\uFEFF/,'').trim();
     s=s.replace(/^```(?:json|javascript|js)?\s*/i,'').replace(/\s*```$/,'').trim();
-    // Curly double quotes are a common model formatting leak. Apostrophes are left untouched.
-    s=s.replace(/[“”]/g,'"');
 
     const a=s.indexOf('{'), b=s.lastIndexOf('}');
     if(a<0||b<=a) return s;
     s=s.slice(a,b+1);
 
-    // Escape literal line breaks/tabs inside quoted strings while preserving JSON structure.
+    // v0.11.22: repair unescaped ASCII double quotes inside JSON string values.
+    // Example model leak: "summary":"被称为"新女王蜂"，随后……"
+    // A real JSON closing quote must be followed by structural punctuation; a quote
+    // followed by ordinary prose is treated as content and escaped locally.
+    // IMPORTANT: Chinese curly quotes “ ” are valid string content and must NOT be
+    // globally converted to ASCII quotes (the old conversion could corrupt valid JSON).
+    const isWs=(ch)=>ch===' '||ch==='\n'||ch==='\r'||ch==='\t';
+    const looksLikeStructuralClose=(quoteIndex)=>{
+        let j=quoteIndex+1;
+        while(j<s.length && isWs(s[j])) j++;
+        if(j>=s.length) return true;
+        const nx=s[j];
+        if(nx===':' || nx==='}' || nx===']') return true;
+        if(nx!==',') return false;
+
+        let k=j+1;
+        while(k<s.length && isWs(s[k])) k++;
+        if(k>=s.length) return true;
+        const c=s[k];
+        if(c==='"' || c==='{' || c==='[' || c==='}' || c===']' || c==='-' || /[0-9]/.test(c)) return true;
+        if(s.startsWith('true',k) || s.startsWith('false',k) || s.startsWith('null',k)) return true;
+        // Also allow a bare property name here; a later repair step will quote it.
+        const tail=s.slice(k,k+160);
+        if(/^[A-Za-z_$\u4e00-\u9fff][A-Za-z0-9_$\u4e00-\u9fff]*\s*:/.test(tail)) return true;
+        return false;
+    };
+
     let out='', inStr=false, escp=false;
     for(let i=0;i<s.length;i++){
         const ch=s[i];
         if(inStr){
             if(escp){ out+=ch; escp=false; continue; }
             if(ch==='\\'){ out+=ch; escp=true; continue; }
-            if(ch==='"'){ out+=ch; inStr=false; continue; }
+            if(ch==='"'){
+                if(looksLikeStructuralClose(i)){ out+=ch; inStr=false; }
+                else out+='\\"';
+                continue;
+            }
             if(ch==='\n'){ out+='\\n'; continue; }
             if(ch==='\r'){ continue; }
             if(ch==='\t'){ out+='\\t'; continue; }
@@ -4242,7 +4270,7 @@ async function generateStageSummariesV01121() {
             if(status) status.textContent=`正在生成阶段大总结：${ci+1}/${chunks.length}（#${start}-#${end}）…`;
             const payload=chunk.map(x=>({date:x.date||null,time:x.time||null,event:x.event,source:x.source}));
             const anchors=stageRelevantAnchorsV01121(mem,start,end);
-            const prompt=`你正在为长期角色扮演聊天制作“阶段大总结”。\n\n【输入来源】\n以下只包含 SMM 已经确认并可追溯到真实楼层的长期记忆，不是原始聊天全文。严禁补写输入中不存在的事实。\n\n【本组时间线 #${start}-#${end}】\n${JSON.stringify(payload,null,2)}\n\n【本组关键连续性锚点】\n${JSON.stringify(anchors,null,2)}\n\n【任务】\n- 将本组整理为 1-4 个真正的剧情阶段。只有目标、地点/时间阶段、核心冲突、人物阵容或关系状态发生明显转折时才切段；不要按固定楼层机械切。\n- summary 概括“这一阶段发生了什么、为什么重要、阶段结束后剧情处于什么状态”，不要逐条复述。\n- key_events 只保留会影响后续承接的关键事实。\n- relationship_changes 只写明确发生的关系变化。\n- state_at_end 写阶段结束时的可靠状态。\n- open_threads 只写阶段结束时仍未解决、且输入中确有依据的线索；已经完成/取消/失效的不要保留。\n- start_source/end_source 必须落在本组真实 source 范围内；所有返回 stages 合起来必须覆盖本组 #${start}-#${end}，不要留下未覆盖区间。\n- 不得使用 thinking、幕后说明、写作规则或推测。\n- 只返回 JSON。`;
+            const prompt=`你正在为长期角色扮演聊天制作“阶段大总结”。\n\n【输入来源】\n以下只包含 SMM 已经确认并可追溯到真实楼层的长期记忆，不是原始聊天全文。严禁补写输入中不存在的事实。\n\n【本组时间线 #${start}-#${end}】\n${JSON.stringify(payload,null,2)}\n\n【本组关键连续性锚点】\n${JSON.stringify(anchors,null,2)}\n\n【任务】\n- 将本组整理为 1-4 个真正的剧情阶段。只有目标、地点/时间阶段、核心冲突、人物阵容或关系状态发生明显转折时才切段；不要按固定楼层机械切。\n- summary 概括“这一阶段发生了什么、为什么重要、阶段结束后剧情处于什么状态”，不要逐条复述。\n- key_events 只保留会影响后续承接的关键事实。\n- relationship_changes 只写明确发生的关系变化。\n- state_at_end 写阶段结束时的可靠状态。\n- open_threads 只写阶段结束时仍未解决、且输入中确有依据的线索；已经完成/取消/失效的不要保留。\n- start_source/end_source 必须落在本组真实 source 范围内；所有返回 stages 合起来必须覆盖本组 #${start}-#${end}，不要留下未覆盖区间。\n- 不得使用 thinking、幕后说明、写作规则或推测。\n- 必须返回可被 JSON.parse 直接解析的标准 JSON；正文里需要引用称呼或原话时优先使用中文直角引号「」或中文弯引号“”，不要输出未转义的 ASCII 双引号。\n- 只返回 JSON。`;
             const raw=await withSmmTimeout(
                 smmGenerateV093({systemPrompt:'你是长期剧情记忆压缩器。只压缩已确认事实，不进行文学创作。',prompt,jsonSchema:stageSummarySchemaV01121(),responseLength:2600}),
                 SMM_GENERATE_TIMEOUT_MS,
@@ -4271,9 +4299,11 @@ async function generateStageSummariesV01121() {
         return normalized;
     }catch(e){
         mem.stage_summaries=previous;
-        console.error('[StoryMemory] v0.11.21 stage summary failed',e);
-        if(status) status.textContent='阶段大总结失败：'+(e?.message||e)+'；旧阶段总结已保留。';
-        toast('阶段大总结失败：'+(e?.message||e),'error');
+        console.error('[StoryMemory] v0.11.22 stage summary failed',e);
+        const fullErr=String(e?.message||e||'未知错误');
+        const shortErr=fullErr.length>180 ? fullErr.slice(0,180)+'…' : fullErr;
+        if(status) status.textContent='阶段大总结失败：'+shortErr+'；旧阶段总结已保留。详细错误见浏览器控制台。';
+        toast('阶段大总结失败：'+shortErr+'；旧结果已保留。','error');
         return null;
     }finally{
         BUSY=false;
@@ -5643,13 +5673,13 @@ function refreshCurrentStoryStateV01121({persist=true}={}) {
     let result;
     try { result = resolveCurrentStoryStateV01121(M()); }
     catch (e) {
-        console.warn('[StoryMemory] v0.11.21 current-state resolver failed', e);
+        console.warn('[StoryMemory] v0.11.22 current-state resolver failed', e);
         return {changed:false,error:String(e?.message||e)};
     }
     if (result.changed && persist && !CURRENT_STATE_SAVE_PENDING_V01121) {
         CURRENT_STATE_SAVE_PENDING_V01121 = true;
         Promise.resolve(saveMeta())
-            .catch(e=>console.warn('[StoryMemory] v0.11.21 current-state save failed',e))
+            .catch(e=>console.warn('[StoryMemory] v0.11.22 current-state save failed',e))
             .finally(()=>{ CURRENT_STATE_SAVE_PENDING_V01121=false; });
     }
     return result;
@@ -6953,7 +6983,7 @@ function stat() {
 function panelHTML() {
     return `<div id="${PANEL_ID}" class="smm2-hidden">
       <div class="smm2-card">
-        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.21</span></div><button id="smm2_close">×</button></div>
+        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.22</span></div><button id="smm2_close">×</button></div>
         <div id="smm2_stats" class="smm2-stats"></div>
         <div class="smm2-grid">
           <button id="smm2_new">总结新增</button>
@@ -9437,7 +9467,7 @@ function installNativeExtensionEntry() {
 
         wrap.innerHTML = `
           <div class="inline-drawer-toggle inline-drawer-header">
-            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.21</span></div>
+            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.22</span></div>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
           </div>
           <div class="inline-drawer-content">
@@ -9601,7 +9631,7 @@ function statsHTMLV0105() {
 function refresh() {
     // v0.11.19: extension prompts are chat-scoped in practice; always refresh after
     // chat/message state changes so the main model receives THIS chat's latest memory.
-    try { refreshSafeMemoryInjectionV0100(); } catch(e) { console.warn('[StoryMemory] v0.11.21 injection refresh failed', e); }
+    try { refreshSafeMemoryInjectionV0100(); } catch(e) { console.warn('[StoryMemory] v0.11.22 injection refresh failed', e); }
     refreshNative();
     renderMemoryInjectionAuditV0119();
 
@@ -9669,7 +9699,7 @@ function initializeExtension() {
     try {
         installUI();
         refresh();
-        console.log('[StoryMemory] v0.11.21 loaded successfully');
+        console.log('[StoryMemory] v0.11.22 loaded successfully');
     } catch (e) {
         console.error('[StoryMemory] UI initialization failed', e);
     }
