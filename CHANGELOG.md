@@ -1,3 +1,13 @@
+# Changelog
+
+## v0.11.25 HYBRID
+
+- 修复独立 Connection Profile 的结构化输出识别：不再只依赖 `profile.mode`，改用 SillyTavern `validateProfile()` 的实际 API 映射判断 Chat Completion。
+- 对旧/迁移 Profile 即使缺少或残留错误的 `mode`，只要实际走 Chat Completion，也会正确传入 `json_schema`。
+- 阶段大总结单组输出从 2600 提升到 4200 tokens，并把单组切分收紧为最多 36 条时间线、1–3 个阶段，降低长输出被截断的概率。
+- 强化 JSON-only 输出约束；兼容 `stage_summaries` / `chapters` / `value.stages` 等无害包装别名。
+- 保持失败关闭：仍未得到可靠阶段数组时不写入长期记忆，旧阶段结果继续保留。
+
 # v0.11.24 HYBRID
 - 独立总结 Profile 请求改为 `includePreset:false`，隔离 RP/聊天 generation preset 对总结任务的干扰。
 - Chat Completion Profile 现在会把 SMM 的 `jsonSchema` 作为 `json_schema` 透传给 SillyTavern Connection Manager 的 override payload，使用原生结构化输出。
