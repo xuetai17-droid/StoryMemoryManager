@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.11.26 HYBRID
+
+- 重构阶段大总结为单窗口单阶段输出，取消对 `stages` 数组根结构的硬依赖。
+- 单组最大 30 条 timeline；阶段 source/date 边界由本地 canonical 数据确定。
+- 新增 direct-stage / array / wrapper 多形态兼容。
+- 新增逐组本地事实保底：AI/Profile/JSON 任一异常只影响该组，不再使整个大总结失败。
+- 连续两组 AI 异常后触发本轮熔断，剩余组直接本地保底，减少无效 Token 消耗。
+- 本地保底只抽取已有 timeline/open_loops，标记 `generation_mode=local_fallback`，不把异常模型 prose 写入 canonical memory。
+- 阶段浏览器显示本地保底标记；重新生成时会重新尝试 AI。
+- 不修改原聊天 JSONL，不重扫 1700+ 楼，不改变已通过的时间/地点、注入诊断和普通增量总结逻辑。
+
 ## v0.11.25 HYBRID
 
 - 修复独立 Connection Profile 的结构化输出识别：不再只依赖 `profile.mode`，改用 SillyTavern `validateProfile()` 的实际 API 映射判断 Chat Completion。

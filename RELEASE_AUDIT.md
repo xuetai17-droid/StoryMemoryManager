@@ -1,13 +1,16 @@
-# v0.11.25 HYBRID Release Audit
+# v0.11.26 HYBRID Release Audit
 
-- `node --check index.js`: PASS
-- manifest version: 0.11.25
-- visible version badge: 0.11.25（经典面板 + 原生扩展面板）
-- 基线：v0.11.24 HYBRID；本版仅针对阶段大总结独立 Profile 输出链做兼容收口。
-- Chat Completion 判定：优先使用 `ConnectionManagerRequestService.validateProfile(profile).selected === "openai"`，`profile.mode === "cc"` 仅作兼容兜底。
-- `json_schema`：实际 Chat Completion Profile 会经 `sendRequest` 第五参数 `overridePayload` 透传。
-- 阶段分组：单组最多 36 条有效 timeline；schema 单组最多 3 阶段；单组输出上限 4200 tokens。
-- JSON 根包装兼容：`stages`、`stage_summaries`、`chapters`、`value.stages`、`data.stages`、`result.stages`。
-- 失败安全：任何一组仍无法得到可靠阶段数组时，恢复旧 `stage_summaries`，不持久化半成品。
-- 原聊天 JSONL：未新增写入、删除或重建路径。
-- v0.11.21 已通过的 current date/time/location resolver 与 v0.11.22–0.11.24 的 JSON 修复/response 兼容逻辑保留。
+- 基线：v0.11.25 HYBRID。
+- manifest version：0.11.26。
+- 可见版本徽标：0.11.26（经典面板 + 原生扩展面板）。
+- 阶段大总结：一个 deterministic timeline window 生成一个 stage；单组最多 30 条 timeline。
+- AI 返回兼容：direct stage object、stages/stage_summaries/chapters arrays、value/data/result wrappers。
+- 逐组失败策略：任何 Profile/timeout/JSON/shape 错误转为 local canonical fallback，不中止整次生成。
+- 熔断：连续 2 组 AI 失败后，本轮剩余组不再调用 AI，避免重复失败和 Token 浪费。
+- 本地 fallback 仅使用现有 canonical timeline 与 open_loops；异常模型 prose 不写入 canonical memory。
+- 写入策略：先在内存中构建完整 stage 集合，最后统一 saveMeta；若最终持久化失败仍恢复旧 stage_summaries。
+- 原聊天 JSONL：无写入/删除/重建路径新增。
+- 旧 memory：兼容；stage_summaries 新增可选 generation_mode/fallback_reason 字段，不影响旧数据读取。
+- JS syntax：node --check 通过。
+- helper regression：direct object / array merge / wrapper / local fallback 通过。
+- ZIP：打包后需再次解压并执行 node --check 与 manifest/版本一致性检查。

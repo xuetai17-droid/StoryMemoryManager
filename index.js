@@ -1,4 +1,4 @@
-// Story Memory Manager v0.11.25
+// Story Memory Manager v0.11.26
 // canonical-input purification / character-core preservation / story-arc continuity
 // does not rewrite original chat JSONL
 
@@ -4039,7 +4039,7 @@ async function smmGenerateV093({
             ? { json_schema: jsonSchema }
             : {};
         if (jsonSchema) {
-            console.debug('[StoryMemory] v0.11.25 summary transport', {
+            console.debug('[StoryMemory] v0.11.26 summary transport', {
                 profileId,
                 profileMode: profile?.mode || null,
                 selected: selectedApiMap?.selected || null,
@@ -4121,7 +4121,7 @@ async function smmGenerateV093({
                 } catch (_) {}
 
                 if (usable) {
-                    console.warn('[StoryMemory] v0.11.25 profile content empty; recovered JSON from reasoning channel');
+                    console.warn('[StoryMemory] v0.11.26 profile content empty; recovered JSON from reasoning channel');
                     text = reasoning;
                 }
             }
@@ -4130,7 +4130,7 @@ async function smmGenerateV093({
         if (!String(text).trim()) {
             const contentLen = typeof response?.content === 'string' ? response.content.length : 0;
             const reasoningLen = typeof response?.reasoning === 'string' ? response.reasoning.length : 0;
-            console.warn('[StoryMemory] v0.11.25 empty profile response', {
+            console.warn('[StoryMemory] v0.11.26 empty profile response', {
                 contentLen, reasoningLen, responseKeys: response && typeof response === 'object' ? Object.keys(response) : []
             });
             throw new Error('独立总结 Profile 正文为空，且未找到可恢复的 JSON 输出');
@@ -4219,6 +4219,9 @@ function stageSummaryReadinessV01121(mem=M()) {
 }
 
 function chunkStageTimelineV01121(rows) {
+    // v0.11.26: deterministic macro-stage input windows. One AI result is requested
+    // per window, so we keep each request small enough to avoid long-form drift while
+    // still producing roughly 8-15 macro stages for a very long RP.
     const chunks=[];
     let cur=[];
     let first=null;
@@ -4226,7 +4229,7 @@ function chunkStageTimelineV01121(rows) {
     for(const row of rows){
         if(first==null) first=row.__first;
         const span=row.__last-first;
-        if(cur.length && (cur.length>=36 || (span>360 && cur.length>=12))){ flush(); first=row.__first; }
+        if(cur.length && (cur.length>=30 || (span>300 && cur.length>=10))){ flush(); first=row.__first; }
         cur.push(row);
     }
     flush();
@@ -4257,6 +4260,137 @@ function stageArrayFromParsedV01125(parsed) {
     ];
     for(const x of candidates) if(Array.isArray(x)) return x;
     return [];
+}
+
+
+function stageSummarySchemaV01126() {
+    const nullable=()=>({type:['string','null']});
+    return {
+        name:'StoryMemorySingleStage',
+        strict:true,
+        value:{
+            '$schema':'http://json-schema.org/draft-04/schema#',
+            type:'object',
+            additionalProperties:false,
+            properties:{
+                title:{type:'string'},
+                summary:{type:'string'},
+                key_events:{type:'array',maxItems:6,items:{type:'string'}},
+                relationship_changes:{type:'array',maxItems:4,items:{type:'string'}},
+                state_at_end:{type:'string'},
+                open_threads:{type:'array',maxItems:4,items:{type:'string'}}
+            },
+            required:['title','summary','key_events','relationship_changes','state_at_end','open_threads']
+        }
+    };
+}
+
+function stageObjectFromParsedV01126(parsed) {
+    if(!parsed || typeof parsed!=='object') return null;
+    const directCandidates=[
+        parsed,
+        parsed.stage,
+        parsed.chapter,
+        parsed.value,
+        parsed.data,
+        parsed.result,
+        parsed.value?.stage,
+        parsed.data?.stage,
+        parsed.result?.stage
+    ];
+    for(const x of directCandidates){
+        if(x && typeof x==='object' && !Array.isArray(x) && String(x.summary||'').trim()) return x;
+    }
+    const arr=stageArrayFromParsedV01125(parsed);
+    if(!arr.length) return null;
+    const valid=arr.filter(x=>x&&typeof x==='object'&&String(x.summary||'').trim());
+    if(!valid.length) return null;
+    if(valid.length===1) return valid[0];
+    // A provider may ignore the requested single-stage schema and still return an
+    // array. Merge it locally instead of failing the entire long-chat job.
+    return {
+        title:valid.map(x=>sanitizeStageTextV01121(x.title,45)).filter(Boolean).join(' → ').slice(0,90),
+        summary:valid.map(x=>sanitizeStageTextV01121(x.summary,420)).filter(Boolean).join('；').slice(0,900),
+        key_events:valid.flatMap(x=>Array.isArray(x.key_events)?x.key_events:[]).slice(0,8),
+        relationship_changes:valid.flatMap(x=>Array.isArray(x.relationship_changes)?x.relationship_changes:[]).slice(0,6),
+        state_at_end:sanitizeStageTextV01121(valid.at(-1)?.state_at_end,360),
+        open_threads:valid.flatMap(x=>Array.isArray(x.open_threads)?x.open_threads:[]).slice(-5)
+    };
+}
+
+function representativeStageRowsV01126(chunk, max=6) {
+    if(!Array.isArray(chunk)||!chunk.length) return [];
+    if(chunk.length<=max) return [...chunk];
+    const idx=new Set([0,chunk.length-1]);
+    for(let i=1;i<max-1;i++) idx.add(Math.round(i*(chunk.length-1)/(max-1)));
+    return [...idx].sort((a,b)=>a-b).slice(0,max).map(i=>chunk[i]).filter(Boolean);
+}
+
+function stageOpenThreadsLocalV01126(mem,start,end) {
+    const loops=Array.isArray(mem?.open_loops)?mem.open_loops:[];
+    return loops.filter(x=>{
+        if(!x||typeof x!=='object') return false;
+        const f=sourceFirst(x.source), l=sourceLast(x.source);
+        if(!Number.isFinite(f)||!Number.isFinite(l)) return false;
+        return l>=start && f<=end;
+    }).map(x=>sanitizeStageTextV01121(x.description,160)).filter(Boolean).slice(0,4);
+}
+
+function localStageFallbackV01126(chunk, mem=M(), chunkNo=1, reason='') {
+    const start=Math.min(...chunk.map(x=>x.__first));
+    const end=Math.max(...chunk.map(x=>x.__last));
+    const reps=representativeStageRowsV01126(chunk,6);
+    const firstDate=chunk.map(r=>normalizeDateInput(r.date||'')?.iso).find(Boolean)||null;
+    const lastDate=[...chunk].reverse().map(r=>normalizeDateInput(r.date||'')?.iso).find(Boolean)||null;
+    const keyEvents=reps.map(r=>sanitizeStageTextV01121(r.event,180)).filter(Boolean);
+    const relationshipChanges=chunk
+        .filter(r=>/(关系|承诺|约定|信任|暧昧|恋|婚|亲吻|冲突|决裂|同盟|伴侣|背叛|和解|好感)/.test(String(r.event||'')))
+        .map(r=>sanitizeStageTextV01121(r.event,180)).filter(Boolean).slice(0,4);
+    const tail=chunk.slice(-2).map(r=>sanitizeStageTextV01121(r.event,180)).filter(Boolean);
+    const dateLabel=firstDate ? (lastDate&&lastDate!==firstDate?`${firstDate} → ${lastDate}`:firstDate) : `#${start}-#${end}`;
+    return {
+        id:`stage_${start}_${end}`,
+        title:`剧情阶段 ${chunkNo} · ${dateLabel}`.slice(0,90),
+        summary:keyEvents.join('；').slice(0,850) || `该阶段覆盖已确认长期记忆 #${start}-#${end}。`,
+        start_index:start,
+        end_index:end,
+        source_range:`#${start}-#${end}`,
+        start_date:firstDate,
+        end_date:lastDate,
+        key_events:keyEvents.slice(0,6),
+        relationship_changes:relationshipChanges,
+        state_at_end:tail.join('；').slice(0,360),
+        open_threads:stageOpenThreadsLocalV01126(mem,start,end),
+        generation_mode:'local_fallback',
+        fallback_reason:sanitizeStageTextV01121(reason,180)
+    };
+}
+
+function normalizeSingleStageV01126(parsed, chunk, chunkNo) {
+    const x=stageObjectFromParsedV01126(parsed);
+    if(!x) throw new Error(`第 ${chunkNo} 组没有返回可识别的阶段对象`);
+    const start=Math.min(...chunk.map(r=>r.__first));
+    const end=Math.max(...chunk.map(r=>r.__last));
+    const firstDate=chunk.map(r=>normalizeDateInput(r.date||'')?.iso).find(Boolean)||null;
+    const lastDate=[...chunk].reverse().map(r=>normalizeDateInput(r.date||'')?.iso).find(Boolean)||null;
+    const title=sanitizeStageTextV01121(x.title,90)||`剧情阶段 ${chunkNo}`;
+    const summary=sanitizeStageTextV01121(x.summary,850);
+    if(!summary || isMetaInstructionSignal({title,summary})) throw new Error(`第 ${chunkNo} 组阶段正文为空或含元指令`);
+    return {
+        id:`stage_${start}_${end}`,
+        title,
+        summary,
+        start_index:start,
+        end_index:end,
+        source_range:`#${start}-#${end}`,
+        start_date:firstDate,
+        end_date:lastDate,
+        key_events:(Array.isArray(x.key_events)?x.key_events:[]).map(v=>sanitizeStageTextV01121(v,180)).filter(Boolean).slice(0,6),
+        relationship_changes:(Array.isArray(x.relationship_changes)?x.relationship_changes:[]).map(v=>sanitizeStageTextV01121(v,180)).filter(Boolean).slice(0,4),
+        state_at_end:sanitizeStageTextV01121(x.state_at_end,360),
+        open_threads:(Array.isArray(x.open_threads)?x.open_threads:[]).map(v=>sanitizeStageTextV01121(v,160)).filter(Boolean).slice(0,4),
+        generation_mode:'ai'
+    };
 }
 
 function normalizeStageChunkV01121(parsed, chunk, chunkNo) {
@@ -4347,7 +4481,9 @@ function normalizeAllStageSummariesV01121(rows) {
             start_date:a.start_date||b.start_date||null,
             key_events:[...(a.key_events||[]),...(b.key_events||[])].slice(0,8),
             relationship_changes:[...(a.relationship_changes||[]),...(b.relationship_changes||[])].slice(0,6),
-            open_threads:[...(a.open_threads||[]),...(b.open_threads||[])].slice(-5)
+            open_threads:[...(a.open_threads||[]),...(b.open_threads||[])].slice(-5),
+            generation_mode:(a.generation_mode==='local_fallback'||b.generation_mode==='local_fallback')?'local_fallback':'ai',
+            fallback_reason:[a.fallback_reason,b.fallback_reason].filter(Boolean).join('；').slice(0,180)
         };
         out.splice(best,2,merged);
     }
@@ -4366,21 +4502,53 @@ async function generateStageSummariesV01121() {
     const previous=cloneJSONV0112(mem.stage_summaries||[]);
     try{
         const collected=[];
+        let aiCount=0, fallbackCount=0, consecutiveAiFailures=0, aiDisabledForRun=false;
         for(let ci=0;ci<chunks.length;ci++){
             const chunk=chunks[ci];
             const start=Math.min(...chunk.map(x=>x.__first));
             const end=Math.max(...chunk.map(x=>x.__last));
             if(status) status.textContent=`正在生成阶段大总结：${ci+1}/${chunks.length}（#${start}-#${end}）…`;
             const payload=chunk.map(x=>({date:x.date||null,time:x.time||null,event:x.event,source:x.source}));
-            const anchors=stageRelevantAnchorsV01121(mem,start,end);
-            const prompt=`你正在为长期角色扮演聊天制作“阶段大总结”。\n\n【输入来源】\n以下只包含 SMM 已经确认并可追溯到真实楼层的长期记忆，不是原始聊天全文。严禁补写输入中不存在的事实。\n\n【本组时间线 #${start}-#${end}】\n${JSON.stringify(payload,null,2)}\n\n【本组关键连续性锚点】\n${JSON.stringify(anchors,null,2)}\n\n【任务】\n- 将本组整理为 1-3 个真正的剧情阶段。只有目标、地点/时间阶段、核心冲突、人物阵容或关系状态发生明显转折时才切段；不要按固定楼层机械切。\n- summary 概括“这一阶段发生了什么、为什么重要、阶段结束后剧情处于什么状态”，不要逐条复述。\n- key_events 只保留会影响后续承接的关键事实。\n- relationship_changes 只写明确发生的关系变化。\n- state_at_end 写阶段结束时的可靠状态。\n- open_threads 只写阶段结束时仍未解决、且输入中确有依据的线索；已经完成/取消/失效的不要保留。\n- start_source/end_source 必须落在本组真实 source 范围内；所有返回 stages 合起来必须覆盖本组 #${start}-#${end}，不要留下未覆盖区间。\n- 不得使用 thinking、幕后说明、写作规则或推测。\n- 必须返回可被 JSON.parse 直接解析的标准 JSON；正文里需要引用称呼或原话时优先使用中文直角引号「」或中文弯引号“”，不要输出未转义的 ASCII 双引号。\n- 输出必须直接以 { 开始、以 } 结束；不要 Markdown、不要代码围栏、不要前言或解释。\n- 只返回 JSON。`;
-            const raw=await withSmmTimeout(
-                smmGenerateV093({systemPrompt:'你是长期剧情记忆压缩器。只压缩已确认事实，不进行文学创作。',prompt,jsonSchema:stageSummarySchemaV01121(),responseLength:4200}),
-                SMM_GENERATE_TIMEOUT_MS,
-                `阶段大总结 #${start}-#${end}`
-            );
-            const parsed=parseJSON(raw);
-            collected.push(...normalizeStageChunkV01121(parsed,chunk,ci+1));
+            const anchors=stageRelevantAnchorsV01121(mem,start,end).slice(-12);
+            const prompt=`你正在为长期角色扮演聊天制作一个“阶段大总结”。\n\n【输入来源】\n以下只包含 SMM 已确认并可追溯到真实楼层的长期记忆，不是原始聊天全文。不得补写输入中不存在的事实。\n\n【本阶段时间线 #${start}-#${end}】\n${JSON.stringify(payload,null,2)}\n\n【关键连续性锚点】\n${JSON.stringify(anchors,null,2)}\n\n【任务】\n只总结这一个阶段窗口，不再自行切分。\n- title：简短阶段名称。\n- summary：概括发生了什么、为什么重要、结束后剧情处于什么状态；控制在约 250-500 中文字，不逐条复述。\n- key_events：最多 6 条，只保留影响后续承接的关键事实。\n- relationship_changes：最多 4 条，只写输入中明确发生的关系变化；没有则空数组。\n- state_at_end：阶段结束时的可靠状态。\n- open_threads：最多 4 条，只写输入中确有依据且仍未解决的事项；没有则空数组。\n- 不得输出 source 范围，范围由 SMM 本地确定。\n- 不得输出 thinking、幕后说明、写作规则或推测。\n- 必须返回标准 JSON 对象；不要 Markdown、代码围栏、前言或解释。\n- 只返回 JSON。`;
+
+            let stage=null;
+            let failReason='';
+            if(!aiDisabledForRun){
+                try{
+                    const raw=await withSmmTimeout(
+                        smmGenerateV093({
+                            systemPrompt:'你是长期剧情记忆压缩器。只压缩已确认事实。输出一个紧凑 JSON 对象，不做文学创作。',
+                            prompt,
+                            jsonSchema:stageSummarySchemaV01126(),
+                            responseLength:3600
+                        }),
+                        SMM_GENERATE_TIMEOUT_MS,
+                        `阶段大总结 #${start}-#${end}`
+                    );
+                    const parsed=parseJSON(raw);
+                    stage=normalizeSingleStageV01126(parsed,chunk,ci+1);
+                    consecutiveAiFailures=0;
+                }catch(e){
+                    consecutiveAiFailures++;
+                    failReason=String(e?.message||e||'未知错误');
+                    console.warn(`[StoryMemory] v0.11.26 stage chunk ${ci+1} AI output unusable; local canonical fallback`,e);
+                    if(consecutiveAiFailures>=2){
+                        aiDisabledForRun=true;
+                        console.warn('[StoryMemory] v0.11.26 stage AI circuit breaker opened; remaining chunks use canonical local fallback');
+                    }
+                }
+            }else{
+                failReason='本轮连续两组模型输出异常，已启用本地事实保底以避免重复失败和额外 Token 消耗';
+            }
+
+            if(!stage){
+                stage=localStageFallbackV01126(chunk,mem,ci+1,failReason);
+                fallbackCount++;
+            }else{
+                aiCount++;
+            }
+            collected.push(stage);
         }
         const normalized=normalizeAllStageSummariesV01121(collected);
         if(!normalized.length) throw new Error('没有生成任何可靠阶段总结');
@@ -4388,7 +4556,17 @@ async function generateStageSummariesV01121() {
         mem.stage_summary_last_index=ready.last;
         mem.stage_summary_updated_at=new Date().toISOString();
         mem.audit=Array.isArray(mem.audit)?mem.audit:[];
-        mem.audit.push({at:mem.stage_summary_updated_at,type:'stage_summaries_generated_v01121',events:rows.length,chunks:chunks.length,stages:normalized.length,covered_to:ready.last,source:'existing_canonical_memory_only'});
+        mem.audit.push({
+            at:mem.stage_summary_updated_at,
+            type:'stage_summaries_generated_v01126',
+            events:rows.length,
+            chunks:chunks.length,
+            stages:normalized.length,
+            ai_chunks:aiCount,
+            local_fallback_chunks:fallbackCount,
+            covered_to:ready.last,
+            source:'existing_canonical_memory_only'
+        });
         if(mem.audit.length>50) mem.audit=mem.audit.slice(-50);
         await saveMeta();
         refresh(); refreshNative();
@@ -4397,12 +4575,13 @@ async function generateStageSummariesV01121() {
             box.innerHTML=memoryReadableHTML();
             if(M().schema===SMM4_SCHEMA) bindHistoryBrowserV4(); else bindHistoryBrowserLegacy();
         }
-        if(status) status.textContent=`已生成 ${normalized.length} 个阶段大总结，覆盖至 #${ready.last}。来源仅为现有长期记忆，未重扫原聊天。`;
-        toast(`阶段大总结完成：${normalized.length} 段，覆盖至 #${ready.last}。`,'success');
+        const fallbackNote=fallbackCount?`；其中 ${fallbackCount} 组使用本地事实保底，可日后再次更新升级`:'；全部由总结模型生成';
+        if(status) status.textContent=`已生成 ${normalized.length} 个阶段大总结，覆盖至 #${ready.last}${fallbackNote}。未重扫原聊天。`;
+        toast(`阶段大总结完成：${normalized.length} 段${fallbackCount?`（本地保底 ${fallbackCount} 组）`:''}。`,'success');
         return normalized;
     }catch(e){
         mem.stage_summaries=previous;
-        console.error('[StoryMemory] v0.11.25 stage summary failed',e);
+        console.error('[StoryMemory] v0.11.26 stage summary failed',e);
         const fullErr=String(e?.message||e||'未知错误');
         const shortErr=fullErr.length>180 ? fullErr.slice(0,180)+'…' : fullErr;
         if(status) status.textContent='阶段大总结失败：'+shortErr+'；旧阶段总结已保留。详细错误见浏览器控制台。';
@@ -4414,6 +4593,7 @@ async function generateStageSummariesV01121() {
     }
 }
 
+
 function stageSummariesHTMLV01121(mem=M()) {
     const rows=Array.isArray(mem?.stage_summaries)?mem.stage_summaries:[];
     if(!rows.length) return '<div class="smm2-empty">尚未生成阶段大总结。它会在已有长期记忆之上做章节级压缩，不会修改原聊天。</div>';
@@ -4422,6 +4602,7 @@ function stageSummariesHTMLV01121(mem=M()) {
         <summary>${esc(x.title||`剧情阶段 ${i+1}`)} <span class="smm2-day-count">${esc(x.source_range||'')}</span></summary>
         <div class="smm121-stage-summary">${esc(x.summary||'')}</div>
         ${(x.start_date||x.end_date)?`<div class="smm121-stage-meta">时间：${esc(x.start_date||'未明确')}${x.end_date&&x.end_date!==x.start_date?` → ${esc(x.end_date)}`:''}</div>`:''}
+        ${x.generation_mode==='local_fallback'?`<div class="smm121-stage-meta">生成方式：本地事实保底（未采用异常模型输出）</div>`:''}
         ${x.key_events?.length?`<div><b>关键事件：</b>${esc(x.key_events.join('；'))}</div>`:''}
         ${x.relationship_changes?.length?`<div><b>关系变化：</b>${esc(x.relationship_changes.join('；'))}</div>`:''}
         ${x.state_at_end?`<div><b>阶段结束状态：</b>${esc(x.state_at_end)}</div>`:''}
@@ -5776,13 +5957,13 @@ function refreshCurrentStoryStateV01121({persist=true}={}) {
     let result;
     try { result = resolveCurrentStoryStateV01121(M()); }
     catch (e) {
-        console.warn('[StoryMemory] v0.11.25 current-state resolver failed', e);
+        console.warn('[StoryMemory] v0.11.26 current-state resolver failed', e);
         return {changed:false,error:String(e?.message||e)};
     }
     if (result.changed && persist && !CURRENT_STATE_SAVE_PENDING_V01121) {
         CURRENT_STATE_SAVE_PENDING_V01121 = true;
         Promise.resolve(saveMeta())
-            .catch(e=>console.warn('[StoryMemory] v0.11.25 current-state save failed',e))
+            .catch(e=>console.warn('[StoryMemory] v0.11.26 current-state save failed',e))
             .finally(()=>{ CURRENT_STATE_SAVE_PENDING_V01121=false; });
     }
     return result;
@@ -7086,7 +7267,7 @@ function stat() {
 function panelHTML() {
     return `<div id="${PANEL_ID}" class="smm2-hidden">
       <div class="smm2-card">
-        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.25</span></div><button id="smm2_close">×</button></div>
+        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.26</span></div><button id="smm2_close">×</button></div>
         <div id="smm2_stats" class="smm2-stats"></div>
         <div class="smm2-grid">
           <button id="smm2_new">总结新增</button>
@@ -8973,7 +9154,7 @@ function nativeManagerHTML() {
           </summary>
           <div class="smm2-tool-body">
             <div class="smm2-note">
-              只读取当前 SMM 已确认的长期记忆，不重新扫描原始聊天，也不会修改 JSONL。新聊天建议至少积累 6 条有效时间线后再生成；长聊天可随时手动更新。
+              只读取当前 SMM 已确认的长期记忆，不重新扫描原始聊天，也不会修改 JSONL。每个阶段窗口独立生成；若某一组模型输出异常，会改用本地已确认事实保底，不再让整次长聊天大总结报废。
             </div>
             <button id="smm121_build_stages" class="menu_button smm2-primary-tool">生成 / 更新阶段大总结</button>
             <div id="smm121_stage_status" class="smm2-note smm107-status-note"></div>
@@ -9570,7 +9751,7 @@ function installNativeExtensionEntry() {
 
         wrap.innerHTML = `
           <div class="inline-drawer-toggle inline-drawer-header">
-            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.25</span></div>
+            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.26</span></div>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
           </div>
           <div class="inline-drawer-content">
@@ -9734,7 +9915,7 @@ function statsHTMLV0105() {
 function refresh() {
     // v0.11.19: extension prompts are chat-scoped in practice; always refresh after
     // chat/message state changes so the main model receives THIS chat's latest memory.
-    try { refreshSafeMemoryInjectionV0100(); } catch(e) { console.warn('[StoryMemory] v0.11.25 injection refresh failed', e); }
+    try { refreshSafeMemoryInjectionV0100(); } catch(e) { console.warn('[StoryMemory] v0.11.26 injection refresh failed', e); }
     refreshNative();
     renderMemoryInjectionAuditV0119();
 
@@ -9802,7 +9983,7 @@ function initializeExtension() {
     try {
         installUI();
         refresh();
-        console.log('[StoryMemory] v0.11.25 loaded successfully');
+        console.log('[StoryMemory] v0.11.26 loaded successfully');
     } catch (e) {
         console.error('[StoryMemory] UI initialization failed', e);
     }
