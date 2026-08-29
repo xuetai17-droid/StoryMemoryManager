@@ -1,4 +1,4 @@
-# v0.11.23 HYBRID Release Audit
+# v0.11.24 HYBRID Release Audit
 
 - `node --check index.js`: PASS
 - manifest version: 0.11.23
@@ -15,8 +15,15 @@
 - Original chat JSONL mutation: none added.
 
 
-## v0.11.23 targeted regression
+## v0.11.24 targeted regression
 - Connection Profile `{content:"", reasoning:"{\"stages\":[...]}"}`: recover JSON from reasoning.
 - Connection Profile with non-empty content: content remains authoritative.
 - Empty content + non-JSON reasoning: fail closed; do not promote reasoning to memory.
 - Object-shaped `message.content` and OpenAI-style `choices[0].message.content`: recognized.
+
+
+## v0.11.24 transport audit
+- Connection Profile summary request uses `includePreset:false`.
+- Chat Completion summary requests with a schema pass `json_schema` via the official fifth `overridePayload` parameter.
+- Structured object content is serialized safely before the existing JSON parser/repairer.
+- No JSONL write/delete path added.

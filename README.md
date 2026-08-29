@@ -1,7 +1,16 @@
-# Story Memory Manager v0.11.23 HYBRID
+# Story Memory Manager v0.11.24 HYBRID
 
 本版集中更新三项：当前剧情时间追踪、移动端注入诊断界面、阶段大总结。
 
+
+
+## v0.11.24 独立总结结构化输出与预设隔离
+
+- 独立总结 Profile 请求不再加载保存的聊天/RP generation preset，避免角色扮演预设干扰 JSON-only 总结任务。
+- Chat Completion Profile 在提供 `jsonSchema` 时把 schema 透传给 SillyTavern `ConnectionManagerRequestService.sendRequest(..., overridePayload)`，启用原生结构化 JSON 请求。
+- 兼容 SillyTavern 在结构化输出时把 `response.content` 直接返回为对象的情况，会安全序列化后交给现有 JSON 校验链。
+- 保留 v0.11.23 的 reasoning JSON 恢复作为兜底；reasoning 只有普通推理文本时仍不会写入长期记忆。
+- 不改动原聊天 JSONL，不重建旧记忆，不改变 v0.11.21 已通过的剧情时间/地点解析。
 
 ## v0.11.23 独立总结 Profile 空正文热修复
 

@@ -1,4 +1,4 @@
-// Story Memory Manager v0.11.23
+// Story Memory Manager v0.11.24
 // canonical-input purification / character-core preservation / story-arc continuity
 // does not rewrite original chat JSONL
 
@@ -4026,17 +4026,31 @@ async function smmGenerateV093({
             Number(responseLength || s.summaryMaxTokens || 4096)
         );
 
+        const profile = typeof Service.getProfile === 'function' ? Service.getProfile(profileId) : null;
+        const isChatCompletionProfile = String(profile?.mode || '').toLowerCase() === 'cc';
+        const overridePayload = (jsonSchema && isChatCompletionProfile)
+            ? { json_schema: jsonSchema }
+            : {};
+
         const response = await Service.sendRequest(
             profileId,
             messages,
             maxTokens,
             {
                 extractData:true,
-                includePreset:true,
+                // A summary profile should provide its API/model connection only.
+                // Loading the saved RP/chat preset can inject unrelated generation
+                // behavior and make JSON-only summary jobs drift into prose.
+                includePreset:false,
+                // Keep instruct formatting for text-completion profiles; chat-completion
+                // profiles ignore this setting.
+                includeInstruct:true,
                 stream:false
-            }
+            },
+            overridePayload
         );
 
+        // v0.11.24: independent summary profiles use isolated requests and structured JSON when available.
         // v0.11.23: ConnectionManager's extracted response may legally separate
         // final content and reasoning. Some reasoning-capable profiles occasionally
         // return an empty `content` while putting the requested JSON in `reasoning`.
@@ -4049,15 +4063,24 @@ async function smmGenerateV093({
             return '';
         };
 
+        const stringifyStructured = (x) => {
+            if (!x || typeof x !== 'object') return '';
+            try { return JSON.stringify(x); } catch (_) { return ''; }
+        };
+
         let text = pickString(
             typeof response === 'string' ? response : '',
-            response?.content,
+            typeof response?.content === 'string' ? response.content : '',
+            stringifyStructured(response?.content),
             response?.text,
             typeof response?.message === 'string' ? response.message : '',
-            response?.message?.content,
-            response?.data?.content,
+            typeof response?.message?.content === 'string' ? response.message.content : '',
+            stringifyStructured(response?.message?.content),
+            typeof response?.data?.content === 'string' ? response.data.content : '',
+            stringifyStructured(response?.data?.content),
             response?.data?.text,
-            response?.choices?.[0]?.message?.content,
+            typeof response?.choices?.[0]?.message?.content === 'string' ? response.choices[0].message.content : '',
+            stringifyStructured(response?.choices?.[0]?.message?.content),
             response?.choices?.[0]?.text
         );
 
@@ -4082,7 +4105,7 @@ async function smmGenerateV093({
                 } catch (_) {}
 
                 if (usable) {
-                    console.warn('[StoryMemory] v0.11.23 profile content empty; recovered JSON from reasoning channel');
+                    console.warn('[StoryMemory] v0.11.24 profile content empty; recovered JSON from reasoning channel');
                     text = reasoning;
                 }
             }
@@ -4091,7 +4114,7 @@ async function smmGenerateV093({
         if (!String(text).trim()) {
             const contentLen = typeof response?.content === 'string' ? response.content.length : 0;
             const reasoningLen = typeof response?.reasoning === 'string' ? response.reasoning.length : 0;
-            console.warn('[StoryMemory] v0.11.23 empty profile response', {
+            console.warn('[StoryMemory] v0.11.24 empty profile response', {
                 contentLen, reasoningLen, responseKeys: response && typeof response === 'object' ? Object.keys(response) : []
             });
             throw new Error('独立总结 Profile 正文为空，且未找到可恢复的 JSON 输出');
@@ -4349,7 +4372,7 @@ async function generateStageSummariesV01121() {
         return normalized;
     }catch(e){
         mem.stage_summaries=previous;
-        console.error('[StoryMemory] v0.11.23 stage summary failed',e);
+        console.error('[StoryMemory] v0.11.24 stage summary failed',e);
         const fullErr=String(e?.message||e||'未知错误');
         const shortErr=fullErr.length>180 ? fullErr.slice(0,180)+'…' : fullErr;
         if(status) status.textContent='阶段大总结失败：'+shortErr+'；旧阶段总结已保留。详细错误见浏览器控制台。';
@@ -5723,13 +5746,13 @@ function refreshCurrentStoryStateV01121({persist=true}={}) {
     let result;
     try { result = resolveCurrentStoryStateV01121(M()); }
     catch (e) {
-        console.warn('[StoryMemory] v0.11.23 current-state resolver failed', e);
+        console.warn('[StoryMemory] v0.11.24 current-state resolver failed', e);
         return {changed:false,error:String(e?.message||e)};
     }
     if (result.changed && persist && !CURRENT_STATE_SAVE_PENDING_V01121) {
         CURRENT_STATE_SAVE_PENDING_V01121 = true;
         Promise.resolve(saveMeta())
-            .catch(e=>console.warn('[StoryMemory] v0.11.23 current-state save failed',e))
+            .catch(e=>console.warn('[StoryMemory] v0.11.24 current-state save failed',e))
             .finally(()=>{ CURRENT_STATE_SAVE_PENDING_V01121=false; });
     }
     return result;
@@ -7033,7 +7056,7 @@ function stat() {
 function panelHTML() {
     return `<div id="${PANEL_ID}" class="smm2-hidden">
       <div class="smm2-card">
-        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.23</span></div><button id="smm2_close">×</button></div>
+        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.24</span></div><button id="smm2_close">×</button></div>
         <div id="smm2_stats" class="smm2-stats"></div>
         <div class="smm2-grid">
           <button id="smm2_new">总结新增</button>
@@ -9517,7 +9540,7 @@ function installNativeExtensionEntry() {
 
         wrap.innerHTML = `
           <div class="inline-drawer-toggle inline-drawer-header">
-            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.23</span></div>
+            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.24</span></div>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
           </div>
           <div class="inline-drawer-content">
@@ -9681,7 +9704,7 @@ function statsHTMLV0105() {
 function refresh() {
     // v0.11.19: extension prompts are chat-scoped in practice; always refresh after
     // chat/message state changes so the main model receives THIS chat's latest memory.
-    try { refreshSafeMemoryInjectionV0100(); } catch(e) { console.warn('[StoryMemory] v0.11.23 injection refresh failed', e); }
+    try { refreshSafeMemoryInjectionV0100(); } catch(e) { console.warn('[StoryMemory] v0.11.24 injection refresh failed', e); }
     refreshNative();
     renderMemoryInjectionAuditV0119();
 
@@ -9749,7 +9772,7 @@ function initializeExtension() {
     try {
         installUI();
         refresh();
-        console.log('[StoryMemory] v0.11.23 loaded successfully');
+        console.log('[StoryMemory] v0.11.24 loaded successfully');
     } catch (e) {
         console.error('[StoryMemory] UI initialization failed', e);
     }

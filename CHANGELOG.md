@@ -1,3 +1,10 @@
+# v0.11.24 HYBRID
+- 独立总结 Profile 请求改为 `includePreset:false`，隔离 RP/聊天 generation preset 对总结任务的干扰。
+- Chat Completion Profile 现在会把 SMM 的 `jsonSchema` 作为 `json_schema` 透传给 SillyTavern Connection Manager 的 override payload，使用原生结构化输出。
+- 支持结构化返回时 `response.content` 为 JSON 对象，并安全序列化后进入既有 parse/repair/normalize 链。
+- 保留 v0.11.23 reasoning JSON 恢复与 v0.11.22 本地 JSON 修复；普通 reasoning prose 仍拒绝进入 canonical memory。
+- 阶段大总结失败时继续保留旧结果，不修改原聊天 JSONL。
+
 # v0.11.23 HYBRID
 - 修复独立总结 Connection Profile 成功返回但 `content` 为空、有效 JSON 落在 `reasoning` 时被误判为空响应。
 - 仅在 reasoning 可解析/本地修复为 JSON 时启用恢复，避免把普通推理内容写入长期记忆。
