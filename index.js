@@ -1,4 +1,4 @@
-// Story Memory Manager v0.11.26
+// Story Memory Manager v0.11.27
 // canonical-input purification / character-core preservation / story-arc continuity
 // does not rewrite original chat JSONL
 
@@ -529,12 +529,63 @@ function cleanMesForSummaryV0110(m) {
 
 // v0.11.2: structured world-state metadata bridge.
 // UpdateVariable / JSONPatch remains excluded from canonical story prose. We only
-// read three exact world-state paths as non-canonical end-of-message metadata.
+// read an explicit allow-list of time/location paths as non-canonical
+// end-of-message metadata.
+//
+// v0.11.27: some MVU cards expose two clocks. `/世界/现实时间` is the primary
+// calendar clock, while paths such as `/玩家副本/副本内时间` are scene-local
+// clocks. Only the primary world paths below are admitted by this bridge; dungeon
+// clocks remain display text in canonical prose and can never drive the absolute
+// story date.
 const WORLD_STATE_PATHS_V0112 = Object.freeze({
-    '/世界/当前日期':'date',
-    '/世界/当前时间':'time',
-    '/世界/当前地点':'location'
+    '/世界/当前日期':Object.freeze({field:'date',axis:'world',rank:20}),
+    '/世界/当前时间':Object.freeze({field:'time',axis:'world',rank:20}),
+    '/世界/当前地点':Object.freeze({field:'location',axis:'world',rank:20}),
+    '/世界/现实日期':Object.freeze({field:'date',axis:'reality',rank:40}),
+    '/世界/现实时间':Object.freeze({field:'datetime',axis:'reality',rank:50}),
+    '/世界/现实时间/日期':Object.freeze({field:'date',axis:'reality',rank:50}),
+    '/世界/现实时间/时间':Object.freeze({field:'time',axis:'reality',rank:50}),
+    '/世界/现实地点':Object.freeze({field:'location',axis:'reality',rank:40})
 });
+
+function normalizeWorldStatePathV01127(value) {
+    let path=String(value||'').trim();
+    if(!path) return '';
+    path=path.replace(/^\$\.?/,'').replace(/[.．]/g,'/');
+    if(!path.startsWith('/')) path='/'+path;
+    path=path.replace(/\/{2,}/g,'/').replace(/\/$/,'');
+    return path.replace(/~1/g,'/').replace(/~0/g,'~');
+}
+
+function dateInsideWorldValueV01127(value) {
+    const direct=normalizeDateInput(value);
+    if(direct) return direct.iso;
+    const m=String(value||'').match(/(20\d{2})[年\-\/.](\d{1,2})[月\-\/.](\d{1,2})日?/);
+    if(!m) return null;
+    return normalizeDateInput(`${m[1]}-${String(Number(m[2])).padStart(2,'0')}-${String(Number(m[3])).padStart(2,'0')}`)?.iso||null;
+}
+
+function clockInsideWorldValueV01127(value) {
+    const s=String(value||'');
+    const m=s.match(/(?:^|[^\d])([01]?\d|2[0-3])\s*[:：]\s*([0-5]\d)(?!\d)/);
+    if(!m) return null;
+    return `${String(Number(m[1])).padStart(2,'0')}:${m[2]}`;
+}
+
+function splitRealityDateTimeV01127(value) {
+    if(value && typeof value==='object' && !Array.isArray(value)){
+        const dateRaw=value.日期 ?? value.date ?? value.现实日期 ?? value.current_date ?? null;
+        const timeRaw=value.时间 ?? value.time ?? value.时刻 ?? value.clock ?? value.current_time ?? null;
+        return {
+            date:dateInsideWorldValueV01127(dateRaw),
+            time:clockInsideWorldValueV01127(timeRaw) || sanitizeWorldMetaValueV0112(timeRaw,100)
+        };
+    }
+    return {
+        date:dateInsideWorldValueV01127(value),
+        time:clockInsideWorldValueV01127(value)
+    };
+}
 
 function sanitizeWorldMetaValueV0112(value, maxLen=180) {
     if (value === undefined || value === null) return null;
@@ -552,27 +603,55 @@ function extractWorldStateMetadataV0112(m) {
     const raw = String(m?.mes ?? '');
     if (!raw) return null;
 
-    const out = {date:null, time:null, location:null};
+    const out = {
+        date:null, time:null, location:null,
+        date_path:null, time_path:null, location_path:null,
+        date_reality:false, time_reality:false, location_reality:false,
+        reality_axis:false
+    };
+    const ranks={date:-1,time:-1,location:-1};
     const blocks = [];
-    const re = /<JSONPatch\b[^>]*>([\s\S]*?)<\/JSONPatch>/gi;
-    let match;
-    while ((match = re.exec(raw))) blocks.push(match[1]);
+    for(const tag of ['JSONPatch','UpdateVariable']){
+        const re = new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)<\\/${tag}>`,'gi');
+        let match;
+        while ((match = re.exec(raw))) blocks.push(match[1]);
+    }
     if (!blocks.length) return null;
+
+    const setField=(field,value,spec,path)=>{
+        if(!['date','time','location'].includes(field)) return;
+        if(value===undefined||value===null||String(value).trim()==='') return;
+        const rank=Number(spec?.rank||0);
+        if(rank<ranks[field]) return;
+        ranks[field]=rank;
+        out[field]=value;
+        out[`${field}_path`]=path;
+        out[`${field}_reality`]=spec?.axis==='reality';
+        if(spec?.axis==='reality') out.reality_axis=true;
+    };
 
     const acceptOperation = (op) => {
         if (!op || typeof op !== 'object' || Array.isArray(op)) return;
         const kind = String(op.op || '').trim().toLowerCase();
-        if (!['replace','insert'].includes(kind)) return;
-        const field = WORLD_STATE_PATHS_V0112[String(op.path || '').trim()];
-        if (!field) return;
-        let value = sanitizeWorldMetaValueV0112(op.value, field === 'location' ? 180 : 100);
-        if (!value) return;
-        if (field === 'date') {
-            const d = normalizeDateInput(value);
-            if (!d) return;
-            value = d.iso;
+        if (!['replace','insert','add'].includes(kind)) return;
+        const path=normalizeWorldStatePathV01127(op.path);
+        const spec = WORLD_STATE_PATHS_V0112[path];
+        if (!spec) return;
+
+        if(spec.field==='datetime'){
+            const dt=splitRealityDateTimeV01127(op.value);
+            if(dt.date) setField('date',dt.date,spec,path);
+            if(dt.time) setField('time',dt.time,spec,path);
+            return;
         }
-        out[field] = value;
+
+        let value=sanitizeWorldMetaValueV0112(op.value,spec.field==='location'?180:100);
+        if(!value) return;
+        if(spec.field==='date'){
+            value=dateInsideWorldValueV01127(value);
+            if(!value) return;
+        }
+        setField(spec.field,value,spec,path);
     };
 
     for (const blockRaw of blocks) {
@@ -634,9 +713,14 @@ function worldStateMetaPromptLineV0112(m, idx) {
     const meta = extractWorldStateMetadataV0112(m);
     if (!meta) return '';
     const parts=[];
-    if (meta.date) parts.push(`/世界/当前日期=${meta.date}`);
-    if (meta.time) parts.push(`/世界/当前时间=${meta.time}`);
-    if (meta.location) parts.push(`/世界/当前地点=${meta.location}`);
+    if(meta.reality_axis && (meta.date_reality||meta.time_reality)){
+        const value=[meta.date_reality?meta.date:null,meta.time_reality?meta.time:null].filter(Boolean).join(' ');
+        if(value) parts.push(`${meta.time_path||meta.date_path||'/世界/现实时间'}=${value}（现实主时间轴）`);
+    }else{
+        if (meta.date) parts.push(`${meta.date_path||'/世界/当前日期'}=${meta.date}`);
+        if (meta.time) parts.push(`${meta.time_path||'/世界/当前时间'}=${meta.time}`);
+    }
+    if (meta.location) parts.push(`${meta.location_path||'/世界/当前地点'}=${meta.location}`);
     return parts.length
         ? `[SMM_WORLD_STATE_META #${idx} | assistant reply end-state only | ${parts.join(' | ')}]`
         : '';
@@ -660,8 +744,10 @@ function applyWorldStateMetadataFallbackV0112(parsed, start, endExclusive) {
     const chat = C().chat || [];
 
     // Fill timeline date/time only when the summarizer left it blank/unknown.
-    // The metadata belongs to the END of the referenced assistant reply, so use
-    // the latest metadata-bearing source in that event, never an unrelated row.
+    // A same-source reality-axis date is the exception: it owns the absolute
+    // calendar bucket even when the model filled that bucket from a dungeon clock.
+    // The event's non-empty time text is retained so a secondary clock such as
+    // “副本第3天 13:00” remains visible without becoming the calendar clock.
     if (Array.isArray(parsed.timeline)) {
         for (const e of parsed.timeline) {
             const idx = [...sourceIndexes(e?.source)].sort((a,b)=>b-a)
@@ -669,18 +755,19 @@ function applyWorldStateMetadataFallbackV0112(parsed, start, endExclusive) {
             if (!Number.isInteger(idx)) continue;
             const meta = extractWorldStateMetadataV0112(chat[idx]);
             if (!meta) continue;
-            if (isMissingStoryValueV0112(e?.date) && meta.date) e.date=meta.date;
+            if (meta.date && (meta.date_reality || isMissingStoryValueV0112(e?.date))) e.date=meta.date;
             if ((isMissingStoryValueV0112(e?.time) || (isUnresolvedStoryTimeV0112(e?.time) && parseStoryClock(meta.time)!=null)) && meta.time) e.time=meta.time;
         }
     }
 
-    // Top-level current story state may use the latest batch metadata as a
-    // fallback only. It never overwrites a non-empty summarizer conclusion.
+    // Top-level current story state normally uses metadata as a fallback. A
+    // recognised reality clock is stronger than a model conclusion based on a
+    // secondary dungeon/day counter, so it replaces date/time for this batch.
     const latest = latestWorldStateMetaInRangeV0112(start,endExclusive);
     if (latest) {
-        if (isMissingStoryValueV0112(parsed.current_story_date) && latest.date)
+        if (latest.date && (latest.date_reality || isMissingStoryValueV0112(parsed.current_story_date)))
             parsed.current_story_date=latest.date;
-        if (latest.time && (isMissingStoryValueV0112(parsed.current_story_time) ||
+        if (latest.time && (latest.time_reality || isMissingStoryValueV0112(parsed.current_story_time) ||
             (isUnresolvedStoryTimeV0112(parsed.current_story_time) && parseStoryClock(latest.time)!=null)))
             parsed.current_story_time=latest.time;
         if (latest.location && parsed.current_scene && typeof parsed.current_scene==='object' &&
@@ -1684,14 +1771,32 @@ function sourceDateAnchor(source) {
     const indexes = sourceIndexes(source);
     if (!indexes.length) return null;
 
-    // 1) A canonical <date> attached to the same source has highest priority.
+    // 1) In a dual-clock MVU card, the same-source reality clock exclusively
+    // owns the absolute calendar. A <date> or prose header may describe the
+    // current dungeon day and must not replace it.
+    for (const i of [...indexes].sort((a,b)=>b-a)) {
+        const meta=extractWorldStateMetadataV0112(chat[i]);
+        if (meta?.date && meta.date_reality) {
+            return {
+                date:meta.date,
+                source_index:i,
+                source:'#'+i+' '+(meta.date_path||'/世界/现实时间'),
+                distance:Math.abs(indexes[0]-i),
+                text:cleanMesForSummaryV0110(chat[i]),
+                kind:'world_reality_meta'
+            };
+        }
+    }
+
+    // 2) A canonical <date> attached to the same source has highest priority
+    // for ordinary single-clock cards.
     for (const i of [...indexes].sort((a,b)=>b-a)) {
         const text=stripAuxiliaryBlocksV0110(cleanMes(chat[i]));
         const d=extractDateTagFromMessage(text);
         if (d) return {date:d,source_index:i,source:'#'+i+' <date>',distance:Math.abs(indexes[0]-i),text,kind:'date_tag'};
     }
 
-    // 2) Structured JSONPatch world date is an end-state candidate for the same
+    // 3) Structured JSONPatch world date is an end-state candidate for the same
     // source. It never bypasses validateSourceDateAnchor() continuity checks.
     for (const i of [...indexes].sort((a,b)=>b-a)) {
         const meta=extractWorldStateMetadataV0112(chat[i]);
@@ -1699,7 +1804,7 @@ function sourceDateAnchor(source) {
             return {
                 date:meta.date,
                 source_index:i,
-                source:'#'+i+' JSONPatch /世界/当前日期',
+                source:'#'+i+' JSONPatch '+(meta.date_path||'/世界/当前日期'),
                 distance:Math.abs(indexes[0]-i),
                 text:cleanMesForSummaryV0110(chat[i]),
                 kind:'world_state_meta'
@@ -1707,7 +1812,7 @@ function sourceDateAnchor(source) {
         }
     }
 
-    // 3) Fallback to the nearest earlier canonical <date> tag.
+    // 4) Fallback to the nearest earlier canonical <date> tag.
     const first=indexes[0];
     for (let i=first-1;i>=0;i--) {
         const text=stripAuxiliaryBlocksV0110(cleanMes(chat[i]));
@@ -1840,6 +1945,14 @@ function validateSourceDateAnchor(r, currentDate, lastAcceptedAnchorIndex=null) 
     if (diff === 0) return {accept:true, reason:'same_date'};
     if (diff != null && diff < 0) {
         return {accept:false, reason:'candidate_regression'};
+    }
+
+    // v0.11.27: `/世界/现实时间` is an end-state value, not a prose guess.
+    // Accept any monotonic advance, including a new wash/round several days
+    // later. A backwards value remains blocked above unless the story explicitly
+    // implements time travel in a future dedicated mechanism.
+    if (cand.kind === 'world_reality_meta' && diff != null && diff > 0) {
+        return {accept:true, reason:`primary_reality_axis_advance_${diff}d`};
     }
 
     // 只检查候选 <date> 所在原始消息本身以及当前 source 原文。
@@ -3725,6 +3838,7 @@ const SYSTEM_PROMPT = `你是长线角色扮演的“剧情记忆审计器”。
 绝对规则：
 1. 酒馆消息发送时间/楼层时间戳不是剧情时间，禁止据此推断剧情日期。
 2. 时间证据优先级：用户正文明确时间 > 正文明确相对推进（第二天/几小时后/跨午夜） > 可验证事件连续性 > AI正文中的<date>标签。
+2A. 双时间轴例外：插件标记为“现实主时间轴”的 /世界/现实时间，独占 current_story_date 和 current_story_time；“副本第N天/副本内时间/倒计时”只能作为 timeline 的场景第二时间轴，绝不能据此重算、覆盖或倒退现实日期。
 3. 如果上一场景是夜晚，后文明确“半夜2点/凌晨2点”等，必须考虑跨日。
 3A. 月份锁：若已有可靠记忆处于某月，而“新增原始聊天”没有明确出现新的年月日、明确“下个月/数周后/一个月后”等跨月推进证据，禁止自行改变月份。
 3B. 单独出现“17日/周五/早晨”等信息时，默认继承当前可靠月份；不得仅凭 AI 的 <date> 标签把 9 月推成 10 月。
@@ -3747,7 +3861,7 @@ const SYSTEM_PROMPT = `你是长线角色扮演的“剧情记忆审计器”。
 9A. 任何被写成“过去已经发生”的具体事实，都必须由本批新增原始聊天的真实 source，或【已有可靠记忆】中的明确事实/semantic_anchors 支持。禁止为了叙事连贯自行补写过去的对话、约定、物品来源、动机、关系历史、接触、主动/被动或同意/拒绝状态。
 9B. 当前回复中的无害文学性细节若不影响连续性，可以不记录；不得把没有可靠依据的新装饰性细节升级成 timeline/facts/events/semantic_anchors 中的既定历史。证据不足时保持模糊。
 9C. <thinking>/<think>、HTML 草稿注释、故事考据、campus_gossip、小剧场、UpdateVariable、Analysis、JSONPatch、状态占位符、写作规划等辅助/元数据块不是 canonical 剧情正文，即使其中出现人物、地点、日期或行为，也不得进入长期记忆；只有真正正文 <content> 或无标签的剧情正文可作为事实来源。
-9D. 唯一例外：插件可能提供 [SMM_WORLD_STATE_META #N ...]，它只含 /世界/当前日期、/世界/当前时间、/世界/当前地点，且只用于校准该 #N assistant 回复结束时的 date/time/location；不得据此创造剧情事实、关系变化、人物行为或其他变量。正文明确事实与该元数据冲突时，正文优先。
+9D. 唯一例外：插件可能提供 [SMM_WORLD_STATE_META #N ...]，它只含白名单中的 /世界/当前日期、/世界/当前时间、/世界/当前地点、/世界/现实日期、/世界/现实时间、/世界/现实地点，且只用于校准该 #N assistant 回复结束时的 date/time/location；不得据此创造剧情事实、关系变化、人物行为或其他变量。普通世界状态元数据与正文冲突时正文优先；明确标记“现实主时间轴”的值仅在绝对日期/现实钟点维度优先，副本内叙事时间仍作为第二时间轴保留。
 10. relationships 只记录文本已经支持的关系状态，不擅自把暧昧升级成恋爱/伴侣。
 10A. characters 只保存人物自身资料与当前即时状态。
 10B. characters 中只允许稳定字段 age/gender/identity/personality，以及当前状态字段 location/companion/physiology/outfit。
@@ -4039,7 +4153,7 @@ async function smmGenerateV093({
             ? { json_schema: jsonSchema }
             : {};
         if (jsonSchema) {
-            console.debug('[StoryMemory] v0.11.26 summary transport', {
+            console.debug('[StoryMemory] v0.11.27 summary transport', {
                 profileId,
                 profileMode: profile?.mode || null,
                 selected: selectedApiMap?.selected || null,
@@ -4121,7 +4235,7 @@ async function smmGenerateV093({
                 } catch (_) {}
 
                 if (usable) {
-                    console.warn('[StoryMemory] v0.11.26 profile content empty; recovered JSON from reasoning channel');
+                    console.warn('[StoryMemory] v0.11.27 profile content empty; recovered JSON from reasoning channel');
                     text = reasoning;
                 }
             }
@@ -4130,7 +4244,7 @@ async function smmGenerateV093({
         if (!String(text).trim()) {
             const contentLen = typeof response?.content === 'string' ? response.content.length : 0;
             const reasoningLen = typeof response?.reasoning === 'string' ? response.reasoning.length : 0;
-            console.warn('[StoryMemory] v0.11.26 empty profile response', {
+            console.warn('[StoryMemory] v0.11.27 empty profile response', {
                 contentLen, reasoningLen, responseKeys: response && typeof response === 'object' ? Object.keys(response) : []
             });
             throw new Error('独立总结 Profile 正文为空，且未找到可恢复的 JSON 输出');
@@ -4532,10 +4646,10 @@ async function generateStageSummariesV01121() {
                 }catch(e){
                     consecutiveAiFailures++;
                     failReason=String(e?.message||e||'未知错误');
-                    console.warn(`[StoryMemory] v0.11.26 stage chunk ${ci+1} AI output unusable; local canonical fallback`,e);
+                    console.warn(`[StoryMemory] v0.11.27 stage chunk ${ci+1} AI output unusable; local canonical fallback`,e);
                     if(consecutiveAiFailures>=2){
                         aiDisabledForRun=true;
-                        console.warn('[StoryMemory] v0.11.26 stage AI circuit breaker opened; remaining chunks use canonical local fallback');
+                        console.warn('[StoryMemory] v0.11.27 stage AI circuit breaker opened; remaining chunks use canonical local fallback');
                     }
                 }
             }else{
@@ -4581,7 +4695,7 @@ async function generateStageSummariesV01121() {
         return normalized;
     }catch(e){
         mem.stage_summaries=previous;
-        console.error('[StoryMemory] v0.11.26 stage summary failed',e);
+        console.error('[StoryMemory] v0.11.27 stage summary failed',e);
         const fullErr=String(e?.message||e||'未知错误');
         const shortErr=fullErr.length>180 ? fullErr.slice(0,180)+'…' : fullErr;
         if(status) status.textContent='阶段大总结失败：'+shortErr+'；旧阶段总结已保留。详细错误见浏览器控制台。';
@@ -4717,12 +4831,13 @@ ${JSON.stringify(compact(mem), null, 2)}
 ${messagesText(start, end)}
 
 【SMM_WORLD_STATE_META 使用边界】
-- 该行由插件从同一条 assistant 回复的 <JSONPatch> 中只提取三个精确路径：/世界/当前日期、/世界/当前时间、/世界/当前地点。
+- 该行由插件从同一条 assistant 回复的 <JSONPatch>/<UpdateVariable> 中只提取白名单路径：/世界/当前日期、/世界/当前时间、/世界/当前地点，以及 MVU 双时间轴使用的 /世界/现实日期、/世界/现实时间、/世界/现实地点。
 - 它不是 canonical 剧情正文，禁止转写为对白、动作、人物动机、facts/events/relationships/semantic_anchors。
 - 它只可作为“该 assistant 回复结束时”的结构化日期/时间/地点候选证据。
-- 若 canonical 正文或 USER 正文明示的时间推进、地点移动与该元数据冲突，以正文事实为准；不得让元数据覆盖“第二天/跨午夜/到达新地点”等明确叙事。
+- 普通 /世界/当前日期、当前时间、当前地点与 canonical 正文冲突时，以正文事实为准；不得让它覆盖“第二天/跨午夜/到达新地点”等明确叙事。
+- 若元数据明确标记“现实主时间轴”，它独占绝对日期与现实钟点。正文中的“副本第N天/副本内时间/倒计时”仍可写入 timeline.time 作为第二时间轴，但不得覆盖 current_story_date/current_story_time，也不得把“第1天”重新绑定剧情起点。
 - timeline 事件的 source 若包含该 assistant 回复且 time/date 为空，可使用同 source 的结构化元数据补齐；不得把后续楼层的元数据倒灌到更早事件。
-- 除上述三个路径外，任何 JSONPatch 变量（好感度、状态、数值、分析等）都没有被提供给总结器，也不得进入长期记忆。
+- 除上述白名单路径外，任何 JSONPatch 变量（好感度、状态、数值、分析等）都没有被提供给总结器，也不得进入长期记忆。
 
 请只从“新增原始聊天”更新记忆。旧记忆只用于对照，不允许把旧记忆中尚未发生的未来内容变成事实。
 
@@ -4739,8 +4854,9 @@ ${messagesText(start, end)}
 10. current_story_date/current_story_time 必须依据新增原始聊天与可靠连续性推进，不得依据旧总结的日期直接推进。
 【结构化记忆规范】
 - 必须单独输出 current_story_date，格式严格为 YYYY-MM-DD；这是机器计算使用的绝对剧情日期。
-- current_story_time 可以保留“秋季学期 周X HH:MM”作为显示时间，但不能代替 current_story_date。
+- current_story_time 保存主时间轴钟点，可以保留“秋季学期 周X HH:MM”作为显示时间，但不能代替 current_story_date；存在“现实主时间轴”时不得填写副本内钟点。
 - 时间线必须尽量给出具体 YYYY-MM-DD；“秋季学期/周五/上午”只能作为附加描述，不能替代日期。
+- 双时间轴 timeline 可采用“现实日期｜[副本第N轮·第M天 HH:MM]”的含义：date 属于现实主时间轴，time 可保留该事件的副本内标签。不得根据副本轮次或副本第几天自行计算现实日期。
 - 人物资料分稳定资料与当前状态。地点、衣着、陪伴者、身体状态属于当前状态，后文更新时覆盖，不要不断堆成数组。
 - 人物别名必须归一；同一人物不得因中英文名/昵称拆成多个实体。
 - 人物关系只有在明确两个人之间存在关系时才记录；多人同场、群体互动不得自动生成多边关系链。
@@ -5205,6 +5321,12 @@ function chooseLocalDateV0114(candidate,currentDate,combined,prevTime,nextTime,i
     const diff=dateDiffDaysLocalV0114(cur,cand);
     if(diff===0) return cur;
     if(diff<0) return cur; // never let stale metadata drag historical backfill backward
+    const chat=C().chat||[];
+    const primaryReality=[...new Set(indexes||[])].some(i=>{
+        const meta=extractWorldStateMetadataV0112(chat[i]);
+        return !!(meta?.date_reality && normalizeDateInput(meta.date)?.iso===cand);
+    });
+    if(primaryReality) return cand;
     const canonicalDate=directCanonicalDateCueV0114(indexes);
     if(canonicalDate===cand) return cand;
     if(diff===1){
@@ -5537,18 +5659,19 @@ function compressEventLocalV0116(text,userName='',maxLen=190) {
 function sourceTemporalMetaLocalV0116(indexes,mem=M()) {
     const chat=C().chat||[];
     const sorted=[...new Set(indexes)].sort((a,b)=>b-a);
-    const out={date:null,time:null,location:null,kind:null,reason:null};
+    const out={date:null,time:null,location:null,kind:null,reason:null,reality_axis:false,date_reality:false,time_reality:false};
 
     // 1) Exact UpdateVariable world-state metadata from the same source.
     for(const i of sorted){
         const meta=extractWorldStateMetadataV0112(chat[i]);
         if(!meta) continue;
-        if(!out.date&&meta.date) out.date=meta.date;
-        if(!out.time&&meta.time) out.time=meta.time;
+        if(!out.date&&meta.date){ out.date=meta.date; out.date_reality=!!meta.date_reality; }
+        if(!out.time&&meta.time){ out.time=meta.time; out.time_reality=!!meta.time_reality; }
         if(!out.location&&meta.location) out.location=meta.location;
+        if(meta.reality_axis) out.reality_axis=true;
         if(out.time){
-            out.kind='world_meta';
-            out.reason=`同 source #${i} 的 /世界/当前时间`;
+            out.kind=meta.time_reality||meta.date_reality?'world_reality_meta':'world_meta';
+            out.reason=`同 source #${i} 的 ${meta.time_path||meta.date_path||'/世界/当前时间'}`;
             break;
         }
     }
@@ -5646,7 +5769,9 @@ function syncCurrentStoryStateFromLatestMetaV0116(mem,endInclusive) {
 
 // =========================================================
 // v0.11.21 current story-state resolver
-// Recent canonical prose > recent world-state metadata > stored timeline/state.
+// Recent canonical prose > recent ordinary world-state metadata > stored state.
+// v0.11.27 exception: a recognised `/世界/现实时间` owns the primary calendar
+// and clock when prose on the same floor is describing a dungeon-local time.
 // This is intentionally conservative: it never edits the chat JSONL and only
 // upgrades current state when the evidence is newer than the stored timeline.
 // =========================================================
@@ -5746,13 +5871,18 @@ function latestTimelineStateV01121(mem=M()) {
 
 function latestWorldStateFieldsInRangeV01121(start,endExclusive) {
     const chat=C().chat||[];
-    const out={date:null,time:null,location:null,date_index:-1,time_index:-1,location_index:-1};
+    const out={
+        date:null,time:null,location:null,
+        date_index:-1,time_index:-1,location_index:-1,
+        date_reality:false,time_reality:false,
+        date_path:null,time_path:null,location_path:null
+    };
     for(let i=Math.min(endExclusive,chat.length)-1;i>=Math.max(0,start);i--){
         const meta=extractWorldStateMetadataV0112(chat[i]);
         if(!meta) continue;
-        if(!out.date&&meta.date){out.date=meta.date;out.date_index=i;}
-        if(!out.time&&meta.time){out.time=meta.time;out.time_index=i;}
-        if(!out.location&&meta.location){out.location=meta.location;out.location_index=i;}
+        if(!out.date&&meta.date){out.date=meta.date;out.date_index=i;out.date_reality=!!meta.date_reality;out.date_path=meta.date_path;}
+        if(!out.time&&meta.time){out.time=meta.time;out.time_index=i;out.time_reality=!!meta.time_reality;out.time_path=meta.time_path;}
+        if(!out.location&&meta.location){out.location=meta.location;out.location_index=i;out.location_path=meta.location_path;}
         if(out.date&&out.time&&out.location) break;
     }
     return (out.date||out.time||out.location)?out:null;
@@ -5843,10 +5973,11 @@ function resolveCurrentStoryStateV01121(mem=M()) {
     if (metaDate) {
         const metaIsLaterEvidence = latestMeta.date_index > chosenDateIndex;
         const metaAdvancesDate = !chosenDate || metaDate > chosenDate;
-        if (!chosenDate || (metaIsLaterEvidence && metaAdvancesDate)) {
+        const realityOwnsSameFloor = latestMeta.date_reality && latestMeta.date_index >= chosenDateIndex;
+        if (!chosenDate || realityOwnsSameFloor || (metaIsLaterEvidence && metaAdvancesDate)) {
             chosenDate = metaDate;
             chosenDateIndex = latestMeta.date_index;
-            chosenDateKind = 'world_meta';
+            chosenDateKind = latestMeta.date_reality ? 'world_reality_meta' : 'world_meta';
         }
     }
     if (chosenDate) {
@@ -5864,7 +5995,11 @@ function resolveCurrentStoryStateV01121(mem=M()) {
     let timeSource = nextTime ? 'stored/timeline' : 'none';
     const rawTimeUsable = !!rawTime && rawTimeIndex >= Math.max(scanStart, tl.index - 6);
     const metaTimeUsable = !!latestMeta?.time;
-    if (rawTimeUsable && (!metaTimeUsable || rawTimeIndex >= latestMeta.time_index)) {
+    const realityTimeOwnsSameFloor = metaTimeUsable && latestMeta.time_reality && latestMeta.time_index >= rawTimeIndex;
+    if (realityTimeOwnsSameFloor) {
+        nextTime = latestMeta.time;
+        timeSource = `world_reality_meta#${latestMeta.time_index}`;
+    } else if (rawTimeUsable && (!metaTimeUsable || rawTimeIndex >= latestMeta.time_index)) {
         nextTime = rawTime;
         timeSource = `raw#${rawTimeIndex}`;
     } else if (metaTimeUsable) {
@@ -5883,7 +6018,7 @@ function resolveCurrentStoryStateV01121(mem=M()) {
             timeSource = 'date_advanced_time_unknown';
         }
     }
-    if(nextTime && (timeSource.startsWith('raw#') || timeSource.startsWith('world_meta#'))){
+    if(nextTime && (timeSource.startsWith('raw#') || timeSource.startsWith('world_meta#') || timeSource.startsWith('world_reality_meta#'))){
         nextTime=composeCurrentStoryTimeV01121(nextDate,nextTime,mem?.current_story_time||'');
     }
 
@@ -5952,18 +6087,81 @@ function resolveCurrentStoryStateV01121(mem=M()) {
     };
 }
 
+function repairRealityAxisTimelineV01127(mem=M()) {
+    const timeline=Array.isArray(mem?.timeline)?mem.timeline:[];
+    if(!timeline.length) return {found:false,changed:false,anchors:0};
+
+    const anchors=[];
+    for(const e of timeline){
+        for(const i of sourceIndexes(e?.source)){
+            const meta=extractWorldStateMetadataV0112((C().chat||[])[i]);
+            if(meta?.date_reality && meta.date){
+                anchors.push(`${i}:${meta.date}:${meta.time_reality?meta.time||'':''}`);
+            }
+        }
+    }
+    const unique=[...new Set(anchors)].sort();
+    if(!unique.length) return {found:false,changed:false,anchors:0};
+
+    const fingerprint=JSON.stringify([
+        Number(mem?.last_processed_index??-1),
+        timeline.length,
+        unique
+    ]);
+    if(mem?.temporal_axis_v01127?.fingerprint===fingerprint){
+        return {found:true,changed:false,anchors:unique.length,cached:true};
+    }
+
+    const before=JSON.stringify(timeline.map(e=>[e?.source||null,e?.date||null,e?.time||null]));
+    calibrateTimeline(mem,{allowCrossMidnight:true});
+    const dateSync=syncCurrentDateFromTimeline(mem,null);
+    const after=JSON.stringify((mem.timeline||[]).map(e=>[e?.source||null,e?.date||null,e?.time||null]));
+    const changed=before!==after || !!dateSync?.changed;
+
+    const finalFingerprint=JSON.stringify([
+        Number(mem?.last_processed_index??-1),
+        (mem.timeline||[]).length,
+        unique
+    ]);
+    mem.temporal_axis_v01127={
+        version:'0.11.27',
+        at:new Date().toISOString(),
+        fingerprint:finalFingerprint,
+        anchors:unique.length,
+        timeline_changed:before!==after,
+        current_date_changed:!!dateSync?.changed
+    };
+    mem.audit=Array.isArray(mem.audit)?mem.audit:[];
+    mem.audit.push({
+        at:new Date().toISOString(),
+        type:'dual_time_axis_calibrated_v01127',
+        anchors:unique.length,
+        timeline_changed:before!==after,
+        current_date_changed:!!dateSync?.changed,
+        reason:'以 /世界/现实时间 校准绝对日期；副本内时间仅保留为场景第二时间轴'
+    });
+    if(mem.audit.length>50) mem.audit=mem.audit.slice(-50);
+    return {found:true,changed:true,content_changed:changed,anchors:unique.length};
+}
+
 let CURRENT_STATE_SAVE_PENDING_V01121 = false;
 function refreshCurrentStoryStateV01121({persist=true}={}) {
     let result;
-    try { result = resolveCurrentStoryStateV01121(M()); }
+    try {
+        const mem=M();
+        const temporalRepair=repairRealityAxisTimelineV01127(mem);
+        result = resolveCurrentStoryStateV01121(mem);
+        result.temporal_repair=temporalRepair;
+        if(temporalRepair.changed) result.changed=true;
+    }
     catch (e) {
-        console.warn('[StoryMemory] v0.11.26 current-state resolver failed', e);
+        console.warn('[StoryMemory] v0.11.27 current-state resolver failed', e);
         return {changed:false,error:String(e?.message||e)};
     }
     if (result.changed && persist && !CURRENT_STATE_SAVE_PENDING_V01121) {
         CURRENT_STATE_SAVE_PENDING_V01121 = true;
         Promise.resolve(saveMeta())
-            .catch(e=>console.warn('[StoryMemory] v0.11.26 current-state save failed',e))
+            .catch(e=>console.warn('[StoryMemory] v0.11.27 current-state save failed',e))
             .finally(()=>{ CURRENT_STATE_SAVE_PENDING_V01121=false; });
     }
     return result;
@@ -6019,14 +6217,19 @@ function normalizeWeekdayInTimeV0117(time,date){
 
 function exactWorldStateMetaSameSourceV0117(indexes){
     const chat=C().chat||[];
-    const out={date:null,time:null,location:null,index:null};
+    const out={
+        date:null,time:null,location:null,index:null,
+        date_path:null,time_path:null,location_path:null,
+        date_reality:false,time_reality:false,reality_axis:false
+    };
     for(const i of [...new Set(indexes||[])].sort((a,b)=>b-a)){
         const meta=extractWorldStateMetadataV0112(chat[i]);
         if(!meta) continue;
         if(out.index==null) out.index=i;
-        if(!out.date&&meta.date) out.date=meta.date;
-        if(!out.time&&meta.time) out.time=meta.time;
-        if(!out.location&&meta.location) out.location=meta.location;
+        if(!out.date&&meta.date){ out.date=meta.date; out.date_path=meta.date_path; out.date_reality=!!meta.date_reality; }
+        if(!out.time&&meta.time){ out.time=meta.time; out.time_path=meta.time_path; out.time_reality=!!meta.time_reality; }
+        if(!out.location&&meta.location){ out.location=meta.location; out.location_path=meta.location_path; }
+        if(meta.reality_axis) out.reality_axis=true;
         if(out.date&&out.time&&out.location) break;
     }
     return out;
@@ -6215,11 +6418,17 @@ function displayTimelineTimeLocalV0119(e) {
 function sourceTemporalMetaLocalV0117(indexes,mem=M()){
     const chat=C().chat||[];
     const sorted=[...new Set(indexes||[])].sort((a,b)=>b-a);
-    const out={date:null,time:null,location:null,kind:null,reason:null};
+    const out={date:null,time:null,location:null,kind:null,reason:null,reality_axis:false,date_reality:false,time_reality:false};
     const wm=exactWorldStateMetaSameSourceV0117(sorted);
-    if(wm.date) out.date=wm.date;
-    if(wm.time){ out.time=wm.time; out.kind='world_meta'; out.reason=`同 source #${wm.index} 的 /世界/当前时间`; }
+    if(wm.date){ out.date=wm.date; out.date_reality=!!wm.date_reality; }
+    if(wm.time){
+        out.time=wm.time;
+        out.time_reality=!!wm.time_reality;
+        out.kind=wm.time_reality||wm.date_reality?'world_reality_meta':'world_meta';
+        out.reason=`同 source #${wm.index} 的 ${wm.time_path||wm.date_path||'/世界/当前时间'}`;
+    }
     if(wm.location) out.location=wm.location;
+    out.reality_axis=!!wm.reality_axis;
 
     if(!out.time||!out.date||!out.location){
         for(const i of sorted){
@@ -6290,6 +6499,8 @@ function reconcileTemporalLocalV0117({currentDate=null,previousTime=null,candida
                 date=cur; notes.push(`拒绝倒退日期 ${cand}`);
             }else if(diff===0){
                 date=cur;
+            }else if(auth==='world_reality_meta' && diff!=null && diff>0){
+                date=cand; notes.push(`现实主时间轴推进 ${diff} 天至 ${cand}`);
             }else if(diff===1){
                 // +1 is accepted for structured summary / explicit source date / next-day semantics.
                 if(auth==='structured_summary' || sameSourceAbsoluteDateCueLocalV01110(combined,cand) || hasNextDayCueTextV0114(combined)){
@@ -6316,7 +6527,7 @@ function reconcileTemporalLocalV0117({currentDate=null,previousTime=null,candida
 
     let p=parseStoryClock(previousTime), n=parseStoryClock(time);
     // Midnight rollover: even stale same-day world metadata must not pin 03:xx to the previous day.
-    if(date&&cur&&date===cur&&p!=null&&n!=null&&p>=18*60&&n<=8*60){
+    if(date&&cur&&date===cur&&p!=null&&n!=null&&p>=18*60&&n<=8*60&&auth!=='world_reality_meta'){
         const rawExplicitSameDay = cand && sameSourceAbsoluteDateCueLocalV01110(combined,cand) && auth==='structured_summary';
         if(!rawExplicitSameDay){
             date=addDaysISO(cur,1); notes.push('晚间/深夜→凌晨，按 source 顺序跨日 +1');
@@ -6461,9 +6672,9 @@ function makeLocalTimelineNodesV0117(start,endInclusive,mem=M()){
         if(records.length){
             let acceptedRecord=false;
             for(const rec of records){
-                const candidateDate=rec.date||world.date||rawDate||null;
+                const candidateDate=world.date_reality ? world.date : (rec.date||world.date||rawDate||null);
                 const candidateTime=rec.time||world.time||rawTime||null;
-                const authority=rec.date?'structured_summary':(world.date?'world_meta':'raw');
+                const authority=world.date_reality?'world_reality_meta':(rec.date?'structured_summary':(world.date?'world_meta':'raw'));
                 const tr=reconcileTemporalLocalV0117({currentDate,previousTime,candidateDate,candidateTime,combined:`${combined}\n${rec.event||''}`,authority});
                 if(tr.date) currentDate=tr.date;
                 if(tr.time) previousTime=tr.time;
@@ -6472,7 +6683,7 @@ function makeLocalTimelineNodesV0117(start,endInclusive,mem=M()){
                 const loc=rec.location||world.location||rawLoc; if(loc) node.location=loc;
                 if(tr.corrected){ node.time_evidence='structured'; node.time_evidence_label='连续性校准时间'; node.time_evidence_reason=tr.reason; }
                 else if(rec.time){ node.time_evidence='structured'; node.time_evidence_label='预设摘要时间'; node.time_evidence_reason=`来自本批 source 的 <${rec.tag}> 结构化记录${rec.record_no?` #${rec.record_no}`:''}`; }
-                else if(world.time){ node.time_evidence='structured'; node.time_evidence_label='变量状态时间'; node.time_evidence_reason=`同 source #${world.index} 的 /世界/当前时间`; }
+                else if(world.time){ node.time_evidence='structured'; node.time_evidence_label=world.time_reality?'现实主时间轴':'变量状态时间'; node.time_evidence_reason=`同 source #${world.index} 的 ${world.time_path||'/世界/当前时间'}`; }
                 else { const te=classifySourceTimeEvidence(node); node.time_evidence=te.level; node.time_evidence_label=te.label; node.time_evidence_reason=te.reason; }
                 if(node.event){
                     nodes.push(node);
@@ -6488,7 +6699,7 @@ function makeLocalTimelineNodesV0117(start,endInclusive,mem=M()){
         }else{
             const candidateDate=world.date||rawDate||null;
             const candidateTime=world.time||rawTime||null;
-            const authority=world.date?'world_meta':'raw';
+            const authority=world.date?(world.date_reality?'world_reality_meta':'world_meta'):'raw';
             const tr=reconcileTemporalLocalV0117({currentDate,previousTime,candidateDate,candidateTime,combined,authority});
             if(tr.date) currentDate=tr.date;
             if(tr.time) previousTime=tr.time;
@@ -6497,7 +6708,7 @@ function makeLocalTimelineNodesV0117(start,endInclusive,mem=M()){
                 const node={date:tr.date||null,time:ensureWeekdayTimelineTimeLocalV0119(tr.time,tr.date),event,source,__local_kind_v0115:'fallback'};
                 const loc=world.location||rawLoc; if(loc) node.location=loc;
                 if(tr.corrected){ node.time_evidence='structured'; node.time_evidence_label='连续性校准时间'; node.time_evidence_reason=tr.reason; }
-                else if(world.time){ node.time_evidence='structured'; node.time_evidence_label='变量状态时间'; node.time_evidence_reason=`同 source #${world.index} 的 /世界/当前时间`; }
+                else if(world.time){ node.time_evidence='structured'; node.time_evidence_label=world.time_reality?'现实主时间轴':'变量状态时间'; node.time_evidence_reason=`同 source #${world.index} 的 ${world.time_path||'/世界/当前时间'}`; }
                 else { const te=classifySourceTimeEvidence(node); node.time_evidence=te.level; node.time_evidence_label=te.label; node.time_evidence_reason=te.reason; }
                 nodes.push(node); triage.factualFallbackNodes++; for(const q of indexes) triage.reliable.push(q);
             }else{
@@ -6553,7 +6764,7 @@ function repairExistingTimelineTemporalV0117(mem,start=0,endInclusive=null){
         if(meta.date&&oldTime&&weekdayIndexTextV0117(oldTime)!=null&&weekdayIndexTextV0117(oldTime)!==weekdayIndexISO_V0117(meta.date)&&meta.time){
             candidateTime=meta.time;
         }
-        const authority=meta.date?(meta.kind==='preset_summary'?'structured_summary':'world_meta'):'raw';
+        const authority=meta.date?(meta.date_reality?'world_reality_meta':(meta.kind==='preset_summary'?'structured_summary':'world_meta')):'raw';
         const combined=idx.map(i=>cleanMesForSummaryV0110(chat[i])).join('\n');
         const tr=reconcileTemporalLocalV0117({currentDate,previousTime,candidateDate,candidateTime,combined,authority});
 
@@ -6573,7 +6784,7 @@ function repairExistingTimelineTemporalV0117(mem,start=0,endInclusive=null){
         if((isMissingStoryValueV0112(e?.location))&&meta.location){ e.location=meta.location; locationFixed++; }
         if(tr.time){
             if(tr.corrected){ e.time_evidence='structured'; e.time_evidence_label='连续性校准时间'; e.time_evidence_reason=tr.reason; }
-            else if(meta.kind==='world_meta'){ e.time_evidence='structured'; e.time_evidence_label='变量状态时间'; e.time_evidence_reason=meta.reason||'同 source 世界状态时间'; }
+            else if(meta.kind==='world_meta'||meta.kind==='world_reality_meta'){ e.time_evidence='structured'; e.time_evidence_label=meta.kind==='world_reality_meta'?'现实主时间轴':'变量状态时间'; e.time_evidence_reason=meta.reason||'同 source 世界状态时间'; }
             else if(meta.kind==='preset_summary'){ e.time_evidence='structured'; e.time_evidence_label='预设摘要时间'; e.time_evidence_reason=meta.reason||'同 source 预设摘要时间'; }
         }
         if(tr.date) currentDate=tr.date;
@@ -7267,7 +7478,7 @@ function stat() {
 function panelHTML() {
     return `<div id="${PANEL_ID}" class="smm2-hidden">
       <div class="smm2-card">
-        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.26</span></div><button id="smm2_close">×</button></div>
+        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.27</span></div><button id="smm2_close">×</button></div>
         <div id="smm2_stats" class="smm2-stats"></div>
         <div class="smm2-grid">
           <button id="smm2_new">总结新增</button>
@@ -9751,7 +9962,7 @@ function installNativeExtensionEntry() {
 
         wrap.innerHTML = `
           <div class="inline-drawer-toggle inline-drawer-header">
-            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.26</span></div>
+            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.27</span></div>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
           </div>
           <div class="inline-drawer-content">
@@ -9915,7 +10126,7 @@ function statsHTMLV0105() {
 function refresh() {
     // v0.11.19: extension prompts are chat-scoped in practice; always refresh after
     // chat/message state changes so the main model receives THIS chat's latest memory.
-    try { refreshSafeMemoryInjectionV0100(); } catch(e) { console.warn('[StoryMemory] v0.11.26 injection refresh failed', e); }
+    try { refreshSafeMemoryInjectionV0100(); } catch(e) { console.warn('[StoryMemory] v0.11.27 injection refresh failed', e); }
     refreshNative();
     renderMemoryInjectionAuditV0119();
 
@@ -9983,7 +10194,7 @@ function initializeExtension() {
     try {
         installUI();
         refresh();
-        console.log('[StoryMemory] v0.11.26 loaded successfully');
+        console.log('[StoryMemory] v0.11.27 loaded successfully');
     } catch (e) {
         console.error('[StoryMemory] UI initialization failed', e);
     }
