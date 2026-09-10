@@ -20,6 +20,7 @@
 .smm2-card label{display:block;margin:10px 0;line-height:1.5}
 .smm2-card input[type=number]{width:68px}
 .smm2-card input[type=text]{display:block;width:100%;box-sizing:border-box;margin-top:5px;padding:7px}
+#smm2_mode{display:block;width:100%;box-sizing:border-box;margin-top:5px;padding:7px}
 .smm2-note{opacity:.75;font-size:.9em;line-height:1.5;margin-top:12px}
 @media(max-width:480px){.smm2-grid{grid-template-columns:1fr}.smm2-card{max-height:92vh}}
 
@@ -850,6 +851,13 @@
   margin:0 !important;
 }
 
+#smm129_summary_mode{
+  flex:1 1 220px;
+  min-width:0;
+  max-width:72%;
+  box-sizing:border-box;
+}
+
 .smm107-number-unit{
   display:flex;
   align-items:center;
@@ -942,6 +950,17 @@
 
   .smm107-inline-setting{
     align-items:center;
+  }
+
+  .smm129-mode-row{
+    align-items:stretch;
+    flex-direction:column;
+    gap:6px;
+  }
+
+  #smm129_summary_mode{
+    width:100%;
+    max-width:none;
   }
 
   .smm107-advanced-grid{
