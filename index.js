@@ -1,4 +1,4 @@
-// Story Memory Manager v0.11.27
+// Story Memory Manager v0.11.28
 // canonical-input purification / character-core preservation / story-arc continuity
 // does not rewrite original chat JSONL
 
@@ -17,6 +17,8 @@ const DEFAULTS = Object.freeze({
     maxFacts: 60,
     maxEvents: 40,
     maxLoops: 30,
+    // Legacy compatibility only. Since v0.11.28 the story-start anchor belongs
+    // to chatMetadata and must never be reused as a cross-chat global default.
     storyStart: '',
     currentStoryTime: '',
     ignoreMessageTimestamps: true,
@@ -48,9 +50,11 @@ function freshMemory() {
     return {
         schema: 'story_memory_manager_v2',
         version: 2,
-        story_start: S().storyStart || null,
+        // Per-chat hard anchor. v0.11.28 initializes this from the opening
+        // scene immediately before the first incremental summary.
+        story_start: null,
         current_story_date: null,
-        current_story_time: S().currentStoryTime || null,
+        current_story_time: null,
         last_processed_index: -1,
         timeline: [],
         facts: [],
@@ -787,6 +791,91 @@ function messagesText(start, end) {
         const meta = worldStateMetaPromptLineV0112(m, idx);
         return `[#${idx} ${who}]\n${body}${meta ? `\n${meta}` : ''}`;
     }).join('\n\n');
+}
+
+// v0.11.28: initialize the immutable story-start anchor once per chat.
+// The opening scan is intentionally small: a date introduced much later may be
+// the current scene date rather than the date on which this chat began.
+const AUTO_STORY_START_LABEL_V01128 = '本聊天剧情正式起点';
+
+function openingStoryDateEvidenceV01128(maxMessages=8) {
+    const chat = C().chat || [];
+    const end = Math.min(chat.length, Math.max(1, Number(maxMessages)||8));
+
+    for (let i=0; i<end; i++) {
+        const m = chat[i];
+        const raw = String(m?.mes || '');
+        const canonical = String(cleanMesForSummaryV0110(m) || '')
+            .replace(/\s+/g, ' ')
+            .trim();
+        const meta = extractWorldStateMetadataV0112(m);
+
+        // On a dual-clock MVU card the reality clock is authoritative, even if
+        // the same reply also displays a dungeon-local day or clock.
+        if (meta?.date_reality && meta.date) {
+            return {
+                date:meta.date,
+                source:`#${i} ${meta.date_path || meta.time_path || '/世界/现实时间'}`,
+                kind:'world_reality_meta'
+            };
+        }
+
+        const tagged = extractDateTagFromMessage(raw);
+        if (tagged) {
+            return {date:tagged, source:`#${i} <date>`, kind:'date_tag'};
+        }
+
+        // Only accept a prose date near the beginning of the canonical body.
+        // Dates buried in recollections, lore or future plans are not anchors.
+        const dm = canonical.slice(0,520)
+            .match(/(20\d{2})[年\-\/.](\d{1,2})[月\-\/.](\d{1,2})日?/);
+        if (dm) {
+            const iso = normalizeDateInput(
+                `${dm[1]}-${String(Number(dm[2])).padStart(2,'0')}-${String(Number(dm[3])).padStart(2,'0')}`
+            )?.iso || null;
+            if (iso) return {date:iso, source:`#${i} 正文开场`, kind:'opening_prose'};
+        }
+
+        // Ordinary single-clock world metadata is a conservative final choice
+        // for this same opening message.
+        if (meta?.date) {
+            return {
+                date:meta.date,
+                source:`#${i} ${meta.date_path || '/世界/当前日期'}`,
+                kind:'world_state_meta'
+            };
+        }
+    }
+    return null;
+}
+
+function autoInitializeStoryStartV01128(mem=M()) {
+    const existing = String(mem?.story_start || '').trim();
+    if (existing) return {changed:false, anchor:existing, reason:'already_established'};
+
+    // Never reinterpret an established long chat's current date as its origin.
+    if (Number(mem?.last_processed_index ?? -1) >= 0) {
+        return {changed:false, anchor:null, reason:'chat_already_processed'};
+    }
+    if (!(C().chat || []).length) return {changed:false, anchor:null, reason:'empty_chat'};
+
+    const evidence = openingStoryDateEvidenceV01128(8);
+    const anchor = evidence?.date
+        ? `${evidence.date} / ${AUTO_STORY_START_LABEL_V01128}`
+        : AUTO_STORY_START_LABEL_V01128;
+
+    mem.story_start = anchor;
+    mem.audit = Array.isArray(mem.audit) ? mem.audit : [];
+    mem.audit.push({
+        at:new Date().toISOString(),
+        type:'story_start_auto_initialized_v01128',
+        anchor,
+        date:evidence?.date || null,
+        source:evidence?.source || 'opening_without_absolute_date',
+        evidence_kind:evidence?.kind || 'undated_opening'
+    });
+    if (mem.audit.length > 50) mem.audit = mem.audit.slice(-50);
+    return {changed:true, anchor, evidence};
 }
 
 function repairJSONStringLocalV01118(input) {
@@ -2142,7 +2231,7 @@ function rebuildDatesBySourceAxis(mem=M()) {
     let changed=0, midnightRollovers=0, explicitOverrides=0;
     let sourceAnchorAccepted=0, sourceAnchorRejected=0;
 
-    const storyStart = normalizeDateInput(mem.story_start||S().storyStart)?.iso || null;
+    const storyStart = normalizeDateInput(mem.story_start)?.iso || null;
 
     function isEarlyNight(r){
         if (r.__clock!=null && r.__clock <= 5*60) return true;
@@ -3773,9 +3862,10 @@ function mergeResult(mem, r, endIndex, options={}) {
         // current_scene is a snapshot, not an accumulating history object.
         mem.current_scene = { ...r.current_scene };
     }
-    // story_start is a user-controlled hard anchor. Once established it must not drift
-    // because of model summaries. Model output may only fill an empty anchor.
-    const lockedStart = String(S().storyStart || mem.story_start || '').trim();
+    // story_start is a per-chat hard anchor. Once established it must not drift
+    // because of model summaries. Model output may only fill an empty legacy
+    // memory; new chats are initialized locally before their first request.
+    const lockedStart = String(mem.story_start || '').trim();
     if (lockedStart) {
         mem.story_start = lockedStart;
     } else if (typeof r.story_start === 'string' && r.story_start.trim()) {
@@ -4153,7 +4243,7 @@ async function smmGenerateV093({
             ? { json_schema: jsonSchema }
             : {};
         if (jsonSchema) {
-            console.debug('[StoryMemory] v0.11.27 summary transport', {
+            console.debug('[StoryMemory] v0.11.28 summary transport', {
                 profileId,
                 profileMode: profile?.mode || null,
                 selected: selectedApiMap?.selected || null,
@@ -4235,7 +4325,7 @@ async function smmGenerateV093({
                 } catch (_) {}
 
                 if (usable) {
-                    console.warn('[StoryMemory] v0.11.27 profile content empty; recovered JSON from reasoning channel');
+                    console.warn('[StoryMemory] v0.11.28 profile content empty; recovered JSON from reasoning channel');
                     text = reasoning;
                 }
             }
@@ -4244,7 +4334,7 @@ async function smmGenerateV093({
         if (!String(text).trim()) {
             const contentLen = typeof response?.content === 'string' ? response.content.length : 0;
             const reasoningLen = typeof response?.reasoning === 'string' ? response.reasoning.length : 0;
-            console.warn('[StoryMemory] v0.11.27 empty profile response', {
+            console.warn('[StoryMemory] v0.11.28 empty profile response', {
                 contentLen, reasoningLen, responseKeys: response && typeof response === 'object' ? Object.keys(response) : []
             });
             throw new Error('独立总结 Profile 正文为空，且未找到可恢复的 JSON 输出');
@@ -4646,10 +4736,10 @@ async function generateStageSummariesV01121() {
                 }catch(e){
                     consecutiveAiFailures++;
                     failReason=String(e?.message||e||'未知错误');
-                    console.warn(`[StoryMemory] v0.11.27 stage chunk ${ci+1} AI output unusable; local canonical fallback`,e);
+                    console.warn(`[StoryMemory] v0.11.28 stage chunk ${ci+1} AI output unusable; local canonical fallback`,e);
                     if(consecutiveAiFailures>=2){
                         aiDisabledForRun=true;
-                        console.warn('[StoryMemory] v0.11.27 stage AI circuit breaker opened; remaining chunks use canonical local fallback');
+                        console.warn('[StoryMemory] v0.11.28 stage AI circuit breaker opened; remaining chunks use canonical local fallback');
                     }
                 }
             }else{
@@ -4695,7 +4785,7 @@ async function generateStageSummariesV01121() {
         return normalized;
     }catch(e){
         mem.stage_summaries=previous;
-        console.error('[StoryMemory] v0.11.27 stage summary failed',e);
+        console.error('[StoryMemory] v0.11.28 stage summary failed',e);
         const fullErr=String(e?.message||e||'未知错误');
         const shortErr=fullErr.length>180 ? fullErr.slice(0,180)+'…' : fullErr;
         if(status) status.textContent='阶段大总结失败：'+shortErr+'；旧阶段总结已保留。详细错误见浏览器控制台。';
@@ -4840,6 +4930,11 @@ ${messagesText(start, end)}
 - 除上述白名单路径外，任何 JSONPatch 变量（好感度、状态、数值、分析等）都没有被提供给总结器，也不得进入长期记忆。
 
 请只从“新增原始聊天”更新记忆。旧记忆只用于对照，不允许把旧记忆中尚未发生的未来内容变成事实。
+
+【剧情起点规则】
+- 【已有可靠记忆】中的 story_start 是插件按当前聊天单独建立的硬锚点，必须原样返回。
+- 禁止把当前批次日期、最近日期、副本第几天或模型推测日期改写成新的 story_start。
+- story_start 为“本聊天剧情正式起点”且未带日期时，表示开场没有可靠绝对日期；不得为了补全字段自行添加日期。
 
 【source 强制规则】
 1. timeline 中每一条事件的 source 必须直接引用“新增原始聊天”中的真实 #消息编号。
@@ -6155,13 +6250,13 @@ function refreshCurrentStoryStateV01121({persist=true}={}) {
         if(temporalRepair.changed) result.changed=true;
     }
     catch (e) {
-        console.warn('[StoryMemory] v0.11.27 current-state resolver failed', e);
+        console.warn('[StoryMemory] v0.11.28 current-state resolver failed', e);
         return {changed:false,error:String(e?.message||e)};
     }
     if (result.changed && persist && !CURRENT_STATE_SAVE_PENDING_V01121) {
         CURRENT_STATE_SAVE_PENDING_V01121 = true;
         Promise.resolve(saveMeta())
-            .catch(e=>console.warn('[StoryMemory] v0.11.27 current-state save failed',e))
+            .catch(e=>console.warn('[StoryMemory] v0.11.28 current-state save failed',e))
             .finally(()=>{ CURRENT_STATE_SAVE_PENDING_V01121=false; });
     }
     return result;
@@ -7348,6 +7443,16 @@ async function summarizeNew(force=false) {
 
     BUSY = true;
     try {
+        // Establish the per-chat anchor before the first model request so the
+        // summarizer receives a stable origin and cannot substitute a later
+        // current-scene date. The anchor remains editable until the first batch
+        // is successfully committed.
+        const startInit = autoInitializeStoryStartV01128(mem);
+        if (startInit.changed) {
+            await saveMeta();
+            refresh();
+        }
+
         let pos = start;
         const batch = Math.max(4, Number(s.batchMessages)||20);
         while (pos < chat.length) {
@@ -7478,7 +7583,7 @@ function stat() {
 function panelHTML() {
     return `<div id="${PANEL_ID}" class="smm2-hidden">
       <div class="smm2-card">
-        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.27</span></div><button id="smm2_close">×</button></div>
+        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.28</span></div><button id="smm2_close">×</button></div>
         <div id="smm2_stats" class="smm2-stats"></div>
         <div class="smm2-grid">
           <button id="smm2_new">总结新增</button>
@@ -7494,8 +7599,8 @@ function panelHTML() {
         <label><input id="smm2_auto" type="checkbox"> 自动增量总结</label>
         <label>每 <input id="smm2_trigger" type="number" min="1" max="50"> 条新消息总结一次</label>
         <label>每批最多 <input id="smm2_batch" type="number" min="4" max="60"> 条消息</label>
-        <label>剧情起点（可无日期；建立记忆后自动锁定）<input id="smm2_start" type="text" placeholder="可留空，或填写 YYYY-MM-DD / 本聊天剧情正式起点"></label>
-        <div class="smm2-note">记忆按“聊天”隔离。同一角色开新聊天，也会得到另一套记忆。酒馆楼层时间不会作为剧情时间。</div>
+        <label>剧情起点（首次总结自动建立，之后锁定）<input id="smm2_start" type="text" placeholder="无需填写；也可在首次总结前手动指定"></label>
+        <div class="smm2-note">记忆与剧情起点均按“聊天”隔离。首次总结会从开场正文或可靠现实时间变量自动识别；开场没有绝对日期时只标记“本聊天剧情正式起点”，不会编造日期。酒馆楼层时间不会作为剧情时间。</div>
       </div>
     </div>`;
 }
@@ -7705,7 +7810,7 @@ function isoDateFromAny(value) {
 
 function dateRangeAudit() {
     const m = M();
-    const start = isoDateFromAny(S().storyStart || m.story_start);
+    const start = isoDateFromAny(m.story_start);
     const end = m.current_story_date || isoDateFromAny(m.current_story_time);
     if (!start || !end) return {start, end, days:[], missing:[]};
 
@@ -8252,7 +8357,7 @@ function emptyV4MemoryFromLegacy(mem) {
     return {
         schema: SMM4_SCHEMA,
         version: 4,
-        story_start: mem.story_start || S().storyStart || null,
+        story_start: mem.story_start || null,
         current_story_date: mem.current_story_date || isoDateFromAny(mem.current_story_time) || null,
         current_story_time: mem.current_story_time || null,
         current_scene: mem.current_scene || {},
@@ -8581,7 +8686,7 @@ function v4TasksHTML(mem=M()) {
 }
 
 function v4DateAudit(mem=M()) {
-    const start=isoDateFromAny(mem.story_start || S().storyStart);
+    const start=isoDateFromAny(mem.story_start);
     const current=effectiveCurrentDate(mem);
     if (!start || !current) return {ok:false, message:'当前剧情时间尚未标准化为具体日期，暂不能检查缺失日期。'};
     const present=new Set(Object.keys(mem.days||{}));
@@ -8811,7 +8916,7 @@ function legacyReadableHTML(mem=M()) {
         <div class="smm2-memory-top smm52-live-view">
           <div><b>查看模式：</b>${esc(viewLabel)}</div>
           <div><b>已重建：</b>${processed}/${total} 条</div>
-          <div><b>剧情起点：</b>${esc(mem.story_start||S().storyStart||'未建立')}</div>
+          <div><b>剧情起点：</b>${esc(mem.story_start||'未建立')}</div>
           <div><b>当前绝对日期：</b>${esc(date)}</div>
           <div><b>显示时间：</b>${esc(mem.current_story_time||'未建立')}</div>
           <div><b>当前地点：</b>${esc(mem.current_scene?.location||'未建立')}</div>
@@ -8978,7 +9083,7 @@ function exportRawChat() {
     const payload = {
         exported_at: new Date().toISOString(),
         chat_name: c?.name || null,
-        story_start: M().story_start || S().storyStart || null,
+        story_start: M().story_start || null,
         messages: (c.chat || []).map((m,i)=>({
             index:i,
             role:m.is_user ? 'user' : (m.is_system ? 'system' : 'assistant'),
@@ -9012,7 +9117,7 @@ async function safeHistoryRun({fresh=false}={}) {
     if (!chat.length) return toast('当前聊天为空。','warning');
 
     const existing=M();
-    const anchor=(existing.story_start || S().storyStart || '').trim();
+    const anchor=String(existing.story_start || '').trim();
     const anchorDate=normalizeDateInput(anchor)?.iso || null;
     const target=existing.current_story_date || detectCurrentDateFromRecentChat()?.date || null;
 
@@ -9389,12 +9494,12 @@ function nativeManagerHTML() {
             </label>
 
             <label class="smm107-span-all">
-              剧情起点（可无日期；建立记忆后自动锁定）
-              <input id="smm2_native_start" type="text" placeholder="可留空，或填写 YYYY-MM-DD / 本聊天剧情正式起点">
+              剧情起点（首次总结自动建立，之后锁定）
+              <input id="smm2_native_start" type="text" placeholder="无需填写；也可在首次总结前手动指定">
             </label>
 
             <div class="smm2-note smm107-span-all">
-              记忆按“聊天”隔离。同一角色开新聊天，也会得到另一套记忆。开场没有绝对日期时可留空；SMM 会在正文首次出现可靠日期后建立 current_story_date。酒馆楼层发送时间不作为剧情时间。
+              记忆与剧情起点均按“聊天”隔离。首次总结会从开场正文或可靠现实时间变量自动识别起点；开场没有绝对日期时只建立无日期起点，不会自行编日期。酒馆楼层发送时间不作为剧情时间。
             </div>
           </div>
         </details>
@@ -9862,14 +9967,12 @@ function bindNativeManager() {
     q('smm2_native_start').onchange = async e => {
         const proposed = e.target.value.trim();
         const m = M();
-        const existing = String(m.story_start || s.storyStart || '').trim();
+        const existing = String(m.story_start || '').trim();
         if (existing && m.last_processed_index >= 0 && proposed !== existing) {
             toast(`剧情起点已锁定为 ${existing}。如确需修改，请先清空本聊天记忆后重新建立。`, 'warning');
             e.target.value = existing;
             return;
         }
-        s.storyStart = proposed;
-        saveSettings();
         m.story_start = proposed || null;
         await saveMeta();
         refreshNative();
@@ -9919,7 +10022,7 @@ function refreshNative() {
 
     setValue('smm2_native_trigger', s.triggerMessages);
     setValue('smm2_native_batch', s.batchMessages);
-    setValue('smm2_native_start', s.storyStart);
+    setValue('smm2_native_start', M().story_start || '');
 
     const gapsV0112=timelineCoverageGapsV0112(M());
     const gapStatusV0112=document.getElementById('smm112_gap_status');
@@ -9962,7 +10065,7 @@ function installNativeExtensionEntry() {
 
         wrap.innerHTML = `
           <div class="inline-drawer-toggle inline-drawer-header">
-            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.27</span></div>
+            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.28</span></div>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
           </div>
           <div class="inline-drawer-content">
@@ -10050,9 +10153,18 @@ function bind() {
     $('smm2_auto').onchange=e=>{s.autoSummarize=e.target.checked;saveSettings();};
     $('smm2_trigger').onchange=e=>{s.triggerMessages=Math.max(1,Number(e.target.value)||8);saveSettings();};
     $('smm2_batch').onchange=e=>{s.batchMessages=Math.max(4,Number(e.target.value)||20);saveSettings();};
-    $('smm2_start').onchange=e=>{
-        s.storyStart=e.target.value.trim(); saveSettings();
-        const m=M(); if (m.last_processed_index<0) {m.story_start=s.storyStart||null;saveMeta();}
+    $('smm2_start').onchange=async e=>{
+        const proposed=e.target.value.trim();
+        const m=M();
+        const existing=String(m.story_start||'').trim();
+        if(existing && m.last_processed_index>=0 && proposed!==existing){
+            toast(`剧情起点已锁定为 ${existing}。如确需修改，请先清空本聊天记忆后重新建立。`,'warning');
+            e.target.value=existing;
+            return;
+        }
+        m.story_start=proposed||null;
+        await saveMeta();
+        refresh();
     };
 }
 
@@ -10126,7 +10238,7 @@ function statsHTMLV0105() {
 function refresh() {
     // v0.11.19: extension prompts are chat-scoped in practice; always refresh after
     // chat/message state changes so the main model receives THIS chat's latest memory.
-    try { refreshSafeMemoryInjectionV0100(); } catch(e) { console.warn('[StoryMemory] v0.11.27 injection refresh failed', e); }
+    try { refreshSafeMemoryInjectionV0100(); } catch(e) { console.warn('[StoryMemory] v0.11.28 injection refresh failed', e); }
     refreshNative();
     renderMemoryInjectionAuditV0119();
 
@@ -10139,7 +10251,7 @@ function refresh() {
     document.getElementById('smm2_auto').checked=!!s.autoSummarize;
     document.getElementById('smm2_trigger').value=s.triggerMessages;
     document.getElementById('smm2_batch').value=s.batchMessages;
-    document.getElementById('smm2_start').value=s.storyStart||'';
+    document.getElementById('smm2_start').value=M().story_start||'';
 }
 
 async function maybeAuto() {
@@ -10194,7 +10306,7 @@ function initializeExtension() {
     try {
         installUI();
         refresh();
-        console.log('[StoryMemory] v0.11.27 loaded successfully');
+        console.log('[StoryMemory] v0.11.28 loaded successfully');
     } catch (e) {
         console.error('[StoryMemory] UI initialization failed', e);
     }
