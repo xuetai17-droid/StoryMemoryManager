@@ -1,4 +1,4 @@
-// Story Memory Manager v0.11.29
+// Story Memory Manager v0.11.31
 // canonical-input purification / character-core preservation / story-arc continuity
 // does not rewrite original chat JSONL
 
@@ -69,6 +69,11 @@ function freshMemory() {
         story_start: null,
         current_story_date: null,
         current_story_time: null,
+        // v0.11.30 separates the active narrative/scene calendar from a card's
+        // underlying MVU reality clock.  A historical simulation or dungeon may
+        // therefore be "2003" while /world/reality-time remains in 2026.
+        current_reality_date: null,
+        current_reality_time: null,
         last_processed_index: -1,
         timeline: [],
         facts: [],
@@ -106,6 +111,8 @@ function M() {
     if (!Object.hasOwn(mem, 'stage_summary_updated_at')) mem.stage_summary_updated_at = null;
     if (!Array.isArray(mem.local_coverage_ranges)) mem.local_coverage_ranges = [];
     if (!Array.isArray(mem.local_deferred_ranges)) mem.local_deferred_ranges = [];
+    if (!Object.hasOwn(mem, 'current_reality_date')) mem.current_reality_date = null;
+    if (!Object.hasOwn(mem, 'current_reality_time')) mem.current_reality_time = null;
     return mem;
 }
 
@@ -190,6 +197,9 @@ function buildSafeMemoryPromptV0100() {
     const payload={
         date:mem.current_story_date||null,
         time:mem.current_story_time||null,
+        reality_clock:(mem.current_reality_date||mem.current_reality_time)
+            ? {date:mem.current_reality_date||null,time:mem.current_reality_time||null}
+            : null,
         scene,
         relevant_characters:chars,
         relevant_relationships:rels,
@@ -256,6 +266,8 @@ function memoryInjectionAuditV0119() {
         prompt_chars: prompt.length,
         current_story_date: mem.current_story_date || null,
         current_story_time: mem.current_story_time || null,
+        current_reality_date: mem.current_reality_date || null,
+        current_reality_time: mem.current_reality_time || null,
         current_scene: currentSceneCoreV0110(mem.current_scene),
         characters: Object.keys(mem.characters || {}).length,
         relationships: (mem.relationships || []).length,
@@ -290,6 +302,7 @@ function renderMemoryInjectionAuditV0119() {
         <div><span>当前剧情日期</span><b>${esc(a.current_story_date||'未建立')}</b></div>
         <div><span>当前剧情时间</span><b>${esc(a.current_story_time||'未建立')}</b></div>
         <div><span>当前剧情地点</span><b>${esc(location)}</b></div>
+        ${(a.current_reality_date||a.current_reality_time)?`<div><span>MVU现实时间轴</span><b>${esc([a.current_reality_date,a.current_reality_time].filter(Boolean).join(' '))}</b></div>`:''}
       </div>
       <div class="smm119-counts">人物 ${a.characters} · 关系 ${a.relationships} · 近期事件 ${a.recent_timeline} · 主线 ${a.active_arcs} · 阶段总结 ${a.stage_summaries} · 待办 ${a.open_loops}</div>
       <div class="smm119-note">${esc(note)}</div>
@@ -561,11 +574,9 @@ function cleanMesForSummaryV0110(m) {
 // read an explicit allow-list of time/location paths as non-canonical
 // end-of-message metadata.
 //
-// v0.11.27: some MVU cards expose two clocks. `/世界/现实时间` is the primary
-// calendar clock, while paths such as `/玩家副本/副本内时间` are scene-local
-// clocks. Only the primary world paths below are admitted by this bridge; dungeon
-// clocks remain display text in canonical prose and can never drive the absolute
-// story date.
+// v0.11.30: some MVU cards expose two clocks. `/世界/现实时间` is admitted as
+// trusted MVU metadata, but it is stored separately when the active narrative
+// has its own fully dated scene calendar. Dungeon day counters remain excluded.
 const WORLD_STATE_PATHS_V0112 = Object.freeze({
     '/世界/当前日期':Object.freeze({field:'date',axis:'world',rank:20}),
     '/世界/当前时间':Object.freeze({field:'time',axis:'world',rank:20}),
@@ -744,7 +755,7 @@ function worldStateMetaPromptLineV0112(m, idx) {
     const parts=[];
     if(meta.reality_axis && (meta.date_reality||meta.time_reality)){
         const value=[meta.date_reality?meta.date:null,meta.time_reality?meta.time:null].filter(Boolean).join(' ');
-        if(value) parts.push(`${meta.time_path||meta.date_path||'/世界/现实时间'}=${value}（现实主时间轴）`);
+        if(value) parts.push(`${meta.time_path||meta.date_path||'/世界/现实时间'}=${value}（MVU现实主时间轴；与当前场景日历分开）`);
     }else{
         if (meta.date) parts.push(`${meta.date_path||'/世界/当前日期'}=${meta.date}`);
         if (meta.time) parts.push(`${meta.time_path||'/世界/当前时间'}=${meta.time}`);
@@ -792,11 +803,15 @@ function applyWorldStateMetadataFallbackV0112(parsed, start, endExclusive) {
     if (!parsed || typeof parsed !== 'object') return parsed;
     const chat = C().chat || [];
 
-    // Fill timeline date/time only when the summarizer left it blank/unknown.
-    // A same-source reality-axis date is the exception: it owns the absolute
-    // calendar bucket even when the model filled that bucket from a dungeon clock.
-    // The event's non-empty time text is retained so a secondary clock such as
-    // “副本第3天 13:00” remains visible without becoming the calendar clock.
+    const narrativeRecAt=(idx)=>{
+        const msg=chat[idx];
+        if(!msg||msg.is_user) return null;
+        const prev=(idx>0&&chat[idx-1]?.is_user)?chat[idx-1]:null;
+        return narrativeSummaryRecordsV01130(msg,prev,M()).at(-1)||null;
+    };
+
+    // Fill timeline date/time from the same source.  An explicit preset scene
+    // summary wins; otherwise the MVU world/reality clock remains the fallback.
     if (Array.isArray(parsed.timeline)) {
         for (const e of parsed.timeline) {
             const idx = [...sourceIndexes(e?.source)].sort((a,b)=>b-a)
@@ -804,19 +819,31 @@ function applyWorldStateMetadataFallbackV0112(parsed, start, endExclusive) {
             if (!Number.isInteger(idx)) continue;
             const meta = extractWorldStateMetadataV0112(chat[idx]);
             if (!meta) continue;
-            if (meta.date && (meta.date_reality || isMissingStoryValueV0112(e?.date))) e.date=meta.date;
+            const narrative=narrativeRecAt(idx);
+            if(narrative?.date) e.date=narrative.date;
+            else if (meta.date && (meta.date_reality || isMissingStoryValueV0112(e?.date))) e.date=meta.date;
             if ((isMissingStoryValueV0112(e?.time) || (isUnresolvedStoryTimeV0112(e?.time) && parseStoryClock(meta.time)!=null)) && meta.time) e.time=meta.time;
         }
     }
 
-    // Top-level current story state normally uses metadata as a fallback. A
-    // recognised reality clock is stronger than a model conclusion based on a
-    // secondary dungeon/day counter, so it replaces date/time for this batch.
+    // Top-level current story state uses world metadata only as a fallback.
+    // v0.11.30 no longer lets /world/reality-time overwrite an explicit dated
+    // narrative scene (for example a 2003 simulation inside a 2026 card).
     const latest = latestWorldStateMetaInRangeV0112(start,endExclusive);
     if (latest) {
-        if (latest.date && (latest.date_reality || isMissingStoryValueV0112(parsed.current_story_date)))
+        let latestNarrative=null;
+        for(let i=Math.min(endExclusive,chat.length)-1;i>=Math.max(0,start);i--){
+            const rec=narrativeRecAt(i);
+            if(rec&&(rec.date||rec.time)){latestNarrative={index:i,...rec};break;}
+        }
+        const parsedDate=normalizeDateInput(parsed.current_story_date||'')?.iso||null;
+        const latestDate=normalizeDateInput(latest.date||'')?.iso||null;
+        if(latestNarrative?.date) parsed.current_story_date=latestNarrative.date;
+        else if(latest.date && (isMissingStoryValueV0112(parsed.current_story_date) ||
+            (latest.date_reality&&parsedDate&&latestDate&&parsedDate.slice(0,4)===latestDate.slice(0,4)&&latestDate>=parsedDate)))
             parsed.current_story_date=latest.date;
-        if (latest.time && (latest.time_reality || isMissingStoryValueV0112(parsed.current_story_time) ||
+        if(latestNarrative?.time) parsed.current_story_time=latestNarrative.time;
+        else if (latest.time && ((latest.time_reality&&!latestNarrative) || isMissingStoryValueV0112(parsed.current_story_time) ||
             (isUnresolvedStoryTimeV0112(parsed.current_story_time) && parseStoryClock(latest.time)!=null)))
             parsed.current_story_time=latest.time;
         if (latest.location && parsed.current_scene && typeof parsed.current_scene==='object' &&
@@ -1564,12 +1591,26 @@ function mergeSources(a,b) {
     return x.length ? x.map(n=>`#${n}`).join(',') : (a||b||null);
 }
 
+function stripGeneratedSummaryBlocksForTimeEvidenceV01131(text) {
+    let t=String(text||'');
+    // These blocks are model-generated recaps, not evidence that the narrated
+    // scene itself stated an exact clock.  Keeping them here would let a time
+    // invented by a recap verify itself.
+    for(const tag of ['abstract','meow_FM','scene_summary','memory_summary','story_summary','plot_summary','剧情摘要']){
+        const paired=new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}>`,'gi');
+        t=t.replace(paired,'');
+    }
+    return t.trim();
+}
+
 function sourceTextForTime(source) {
     const chat = C().chat || [];
     // Canonical story evidence only. Auxiliary UpdateVariable/JSONPatch blocks
-    // are handled separately by worldStateMetaForSourceV0112().
+    // are handled separately by worldStateMetaForSourceV0112(). Generated
+    // summaries are removed as well, so an inferred recap time cannot verify
+    // itself as if it had appeared in the original scene prose.
     return sourceIndexes(source)
-        .map(i => cleanMesForSummaryV0110(chat[i]))
+        .map(i => stripGeneratedSummaryBlocksForTimeEvidenceV01131(cleanMesForSummaryV0110(chat[i])))
         .filter(Boolean)
         .join('\n');
 }
@@ -1579,6 +1620,37 @@ function sourceWorldMetaTextV0112(source) {
         .map(x => [x.date,x.time,x.location].filter(Boolean).join(' | '))
         .filter(Boolean)
         .join('\n');
+}
+
+function temporalTextContainsClockV01131(text,targetMinutes) {
+    const src=String(text||'');
+    if(!src||targetMinutes==null) return false;
+    const targetH=Math.floor(targetMinutes/60), targetM=targetMinutes%60;
+    const colon=/(凌晨|半夜|清晨|早晨|早上|上午|中午|正午|下午|傍晚|晚上|晚间|夜间|夜晚|深夜)?\s*([01]?\d|2[0-3])\s*[:：]\s*([0-5]\d)/g;
+    let activePeriod='',lastEnd=-999;
+    for(const m of src.matchAll(colon)){
+        if(m.index-lastEnd>32||/[。！？!?\n]/.test(src.slice(Math.max(0,lastEnd),m.index))) activePeriod='';
+        if(m[1]) activePeriod=m[1];
+        let h=Number(m[2]), min=Number(m[3]);
+        const period=m[1]||activePeriod;
+        if(/下午|傍晚|晚上|晚间|夜间|夜晚|深夜/.test(period)&&h<12) h+=12;
+        if(/中午|正午/.test(period)&&h<11) h+=12;
+        if(/凌晨|半夜/.test(period)&&h===12) h=0;
+        if(h===targetH&&min===targetM) return true;
+        lastEnd=(m.index||0)+m[0].length;
+    }
+
+    const chinese=/(凌晨|半夜|清晨|早晨|早上|上午|中午|正午|下午|傍晚|晚上|晚间|夜间|夜晚|深夜)\s*([0-9]{1,2}|[零〇一二两三四五六七八九十]{1,3})\s*(?:点|时)(?:\s*([0-9]{1,2}|[零〇一二两三四五六七八九十]{1,3})\s*分)?/g;
+    for(const m of src.matchAll(chinese)){
+        let h=chineseNumberToInt(m[2]);
+        const min=m[3]?chineseNumberToInt(m[3]):0;
+        if(h==null||min==null||min<0||min>=60) continue;
+        if(/下午|傍晚|晚上|晚间|夜间|夜晚|深夜/.test(m[1])&&h<12) h+=12;
+        if(/中午|正午/.test(m[1])&&h<11) h+=12;
+        if(/凌晨|半夜/.test(m[1])&&h===12) h=0;
+        if(h===targetH&&min===targetM) return true;
+    }
+    return false;
 }
 
 function classifySourceTimeEvidence(e) {
@@ -1593,18 +1665,17 @@ function classifySourceTimeEvidence(e) {
         return {level:'unverified', label:'无法验证', reason:'找不到 source 对应的原始聊天或世界状态元数据'};
     }
 
-    const containsAny = (text, forms) => !!text && forms.some(x=>text.includes(x));
-
-    // HH:MM，例如 22:00 / 02:30
-    const numeric = [...time.matchAll(/(?:^|[^\d])([01]?\d|2[0-3])[:：]([0-5]\d)/g)];
-    if (numeric.length) {
-        const checks = numeric.map(m => {
-            const hh=String(Number(m[1])), hh2=hh.padStart(2,'0'), mm=m[2];
-            const forms=[hh+':'+mm,hh2+':'+mm,hh+'：'+mm,hh2+'：'+mm];
+    // Exact clock candidates, including 22:00, 下午3:00 and
+    // 下午3:30-5:00. Period prefixes must be resolved before verification.
+    const preciseClocks=clockCandidatesFromTimelineTime(time);
+    if (preciseClocks.length) {
+        const checks = preciseClocks.map(minutes => {
+            const hh2=String(Math.floor(minutes/60)).padStart(2,'0');
+            const mm=String(minutes%60).padStart(2,'0');
             return {
                 clock:hh2+':'+mm,
-                inCanonical:containsAny(src,forms),
-                inMeta:containsAny(meta,forms)
+                inCanonical:temporalTextContainsClockV01131(src,minutes),
+                inMeta:temporalTextContainsClockV01131(meta,minutes)
             };
         });
         const missing=checks.filter(x=>!x.inCanonical&&!x.inMeta);
@@ -1732,12 +1803,22 @@ function clockCandidatesFromTimelineTime(time) {
 
     const out = [];
 
-    // 先抽 HH:MM，包括 21:07-21:55 / 02:00–03:15。
-    for (const m of s.matchAll(/(?:^|[^\d])([01]?\d|2[0-3])[:：]([0-5]\d)/g)) {
-        const h = Number(m[1]);
-        const min = Number(m[2]);
+    // 先抽 HH:MM，包括 21:07-21:55 / 下午3:00-5:00。时段前缀
+    // 必须参与 12/24 小时换算，否则“下午3:00”会被误读为凌晨。
+    const re=/(凌晨|半夜|清晨|早晨|早上|上午|中午|正午|下午|傍晚|晚上|晚间|夜间|夜晚|深夜)?\s*([01]?\d|2[0-3])[:：]([0-5]\d)/g;
+    let activePeriod='',lastEnd=-999;
+    for (const m of s.matchAll(re)) {
+        if(m.index-lastEnd>24||/[。！？!?\n]/.test(s.slice(Math.max(0,lastEnd),m.index))) activePeriod='';
+        if(m[1]) activePeriod=m[1];
+        let h = Number(m[2]);
+        const min = Number(m[3]);
+        const period=m[1]||activePeriod;
+        if(/下午|傍晚|晚上|晚间|夜间|夜晚|深夜/.test(period)&&h<12) h+=12;
+        if(/中午|正午/.test(period)&&h<11) h+=12;
+        if(/凌晨|半夜/.test(period)&&h===12) h=0;
         const total = h * 60 + min;
         if (!out.includes(total)) out.push(total);
+        lastEnd=(m.index||0)+m[0].length;
     }
 
     // 如果没有 HH:MM，再尝试 timeline.time 自身的中文钟点。
@@ -1779,42 +1860,7 @@ function sourceContainsClock(source, targetMinutes) {
     const canonical = sourceTextForTime(source);
     const meta = sourceWorldMetaTextV0112(source);
     const src = [canonical, meta].filter(Boolean).join('\n');
-    if (!src || targetMinutes == null) return false;
-
-    const targetH = Math.floor(targetMinutes / 60);
-    const targetM = targetMinutes % 60;
-
-    // 1. 原文直接出现 HH:MM / HH：MM。
-    for (const m of src.matchAll(/(?:^|[^\d])([01]?\d|2[0-3])[:：]([0-5]\d)/g)) {
-        const h = Number(m[1]);
-        const min = Number(m[2]);
-
-        if (h === targetH && min === targetM)
-            return true;
-    }
-
-    // 2. 带明确时段的中文 X点 / X点XX分。
-    const re = /(?:凌晨|半夜|清晨|早晨|早上|上午|中午|下午|傍晚|晚上|晚间|夜间|深夜)\s*([0-9]{1,2}|[零〇一二两三四五六七八九十]{1,3})\s*(?:点|时)(?:\s*([0-9]{1,2}|[零〇一二两三四五六七八九十]{1,3})\s*分)?/g;
-
-    for (const m of src.matchAll(re)) {
-        const full = m[0];
-        let h = chineseNumberToInt(m[1]);
-        const min = m[2] ? chineseNumberToInt(m[2]) : 0;
-
-        if (h == null || min == null || min < 0 || min >= 60)
-            continue;
-
-        if (/下午|傍晚|晚上|晚间|夜间|深夜/.test(full)) {
-            if (h < 12) h += 12;
-        } else if (/中午/.test(full)) {
-            if (h < 11) h += 12;
-        }
-
-        if (h === targetH && min === targetM)
-            return true;
-    }
-
-    return false;
+    return temporalTextContainsClockV01131(src,targetMinutes);
 }
 
 function verifiedStoryClock(e) {
@@ -1957,9 +2003,30 @@ function sourceDateAnchor(source) {
     const indexes = sourceIndexes(source);
     if (!indexes.length) return null;
 
-    // 1) In a dual-clock MVU card, the same-source reality clock exclusively
-    // owns the absolute calendar. A <date> or prose header may describe the
-    // current dungeon day and must not replace it.
+    // v0.11.30: timeline.date is the active narrative/scene calendar.  A preset
+    // summary attached to the same source is therefore stronger for the story
+    // browser than an underlying MVU reality clock.  The latter is retained in
+    // separate reality_date/reality_time fields by the v0.11.30 repair layer.
+    for (const i of [...indexes].sort((a,b)=>b-a)) {
+        const msg=chat[i];
+        if(!msg || msg.is_user) continue;
+        const prev=(i>0&&chat[i-1]?.is_user)?chat[i-1]:null;
+        const recs=narrativeSummaryRecordsV01130(msg,prev,M());
+        const rec=[...recs].reverse().find(x=>normalizeDateInput(x?.date||''));
+        if(rec?.date){
+            return {
+                date:normalizeDateInput(rec.date)?.iso,
+                source_index:i,
+                source:'#'+i+' <'+(rec.tag||'abstract')+'> time',
+                distance:Math.abs(indexes[0]-i),
+                text:String(rec.event||''),
+                kind:'preset_summary_time'
+            };
+        }
+    }
+
+    // 2) A recognised world/reality clock is authoritative when the active
+    // narrative summary does not provide its own absolute scene date.
     for (const i of [...indexes].sort((a,b)=>b-a)) {
         const meta=extractWorldStateMetadataV0112(chat[i]);
         if (meta?.date && meta.date_reality) {
@@ -1974,7 +2041,7 @@ function sourceDateAnchor(source) {
         }
     }
 
-    // 2) A canonical <date> attached to the same source has highest priority
+    // 3) A canonical <date> attached to the same source has highest priority
     // for ordinary single-clock cards.
     for (const i of [...indexes].sort((a,b)=>b-a)) {
         const text=stripAuxiliaryBlocksV0110(cleanMes(chat[i]));
@@ -1982,7 +2049,7 @@ function sourceDateAnchor(source) {
         if (d) return {date:d,source_index:i,source:'#'+i+' <date>',distance:Math.abs(indexes[0]-i),text,kind:'date_tag'};
     }
 
-    // 3) Structured JSONPatch world date is an end-state candidate for the same
+    // 4) Structured JSONPatch world date is an end-state candidate for the same
     // source. It never bypasses validateSourceDateAnchor() continuity checks.
     for (const i of [...indexes].sort((a,b)=>b-a)) {
         const meta=extractWorldStateMetadataV0112(chat[i]);
@@ -1998,7 +2065,7 @@ function sourceDateAnchor(source) {
         }
     }
 
-    // 4) Fallback to the nearest earlier canonical <date> tag.
+    // 5) Fallback to the nearest earlier canonical <date> tag.
     const first=indexes[0];
     for (let i=first-1;i>=0;i--) {
         const text=stripAuxiliaryBlocksV0110(cleanMes(chat[i]));
@@ -2129,7 +2196,21 @@ function validateSourceDateAnchor(r, currentDate, lastAcceptedAnchorIndex=null) 
 
     const diff = dateDiffDays(currentDate, cand.date);
     if (diff === 0) return {accept:true, reason:'same_date'};
+    if (cand.kind === 'preset_summary_time' && diff != null) {
+        return {
+            accept:true,
+            reason:diff<0
+                ? `authoritative_calendar_segment_switch_${Math.abs(diff)}d`
+                : `authoritative_scene_summary_advance_${diff}d`
+        };
+    }
     if (diff != null && diff < 0) {
+        // v0.11.30: source chronology can legitimately enter a historical
+        // simulation, flashback route, or dated dungeon.  A same-source preset
+        // end summary is strong enough to open a new narrative calendar segment
+        // even though its year is numerically older. The MVU reality clock stays
+        // monotonic on its own separate axis.
+        // Bare prose mentions remain blocked below as possible recollections.
         return {accept:false, reason:'candidate_regression'};
     }
 
@@ -2631,12 +2712,15 @@ function calibrateTimeline(mem=M(), {allowCrossMidnight=true}={}) {
     // "凌晨/半夜" alone NEVER increments the date.
     const axis=rebuildDatesBySourceAxis(mem);
 
-    // 3) Preserve source order inside each date. Time text is diagnostic only.
+    // 3) v0.11.30: source order is the story order, even across calendar
+    // segments.  A plot can move 2026 -> a dated 2003 scenario -> 2026; sorting
+    // by ISO date would place the scenario before the opening and corrupt
+    // continuity.  Clock text remains diagnostic only.
     mem.timeline=(mem.timeline||[]).sort((a,b)=>{
-        const da=isoDateFromAny(a.date)||'9999-99-99', db=isoDateFromAny(b.date)||'9999-99-99';
-        if(da!==db) return da.localeCompare(db);
         const sa=sourceFirst(a.source), sb=sourceFirst(b.source);
         if(sa!==sb) return sa-sb;
+        const da=isoDateFromAny(a.date)||'9999-99-99', db=isoDateFromAny(b.date)||'9999-99-99';
+        if(da!==db) return da.localeCompare(db);
         const ca=verifiedStoryClock(a), cb=verifiedStoryClock(b);
         if(ca!=null && cb!=null && ca!==cb) return ca-cb;
         return 0;
@@ -2652,7 +2736,7 @@ function calibrateTimeline(mem=M(), {allowCrossMidnight=true}={}) {
         confirmed_rollovers:Number(axis.midnight_rollovers||0),
         source_anchor_accepted:Number(axis.source_anchor_accepted||0),
         source_anchor_rejected:Number(axis.source_anchor_rejected||0),
-        ordering:'source_first_date_axis',
+        ordering:'narrative_source_order',
         diagnostics:(axis.diagnostics||[]).slice(-150)
     };
     return mem.timeline_calibration;
@@ -3988,9 +4072,15 @@ function mergeResult(mem, r, endIndex, options={}) {
 
     calibrateTimeline(mem, {allowCrossMidnight:true});
 
-    // 关键同步：模型给出的 current_story_date 不能脱离已校准 timeline 单独前进。
-    // 以 source 最靠后的 timeline 事件日期作为当前主线绝对日期。
+    // v0.11.30 restores the active scene calendar after legacy continuity
+    // calibration.  This is date/time metadata repair only; events and sources
+    // are preserved.
+    repairNarrativeCalendarV01130(mem,endIndex-1);
+
+    // The latest source row, not the numerically greatest ISO date, represents
+    // the active story scene.
     syncCurrentDateFromTimeline(mem, modelCurrentDate);
+    resolveCurrentNarrativeStateV01130(mem,endIndex-1);
 
     // v0.10.6：
     // 只有 timeline/date 校准完成后，才用 canonical story time
@@ -3998,7 +4088,8 @@ function mergeResult(mem, r, endIndex, options={}) {
     guardOpenLoopsTemporalV0105(mem);
     pruneExpiredOpenLoopsV0106(mem);
     unifiedPostProcessV01114(mem,{range:startIndexV0112==null?null:[startIndexV0112,endIndex-1],audit:false});
-    repairSecondaryCalendarLeakV01129(mem,endIndex-1);
+    repairNarrativeCalendarV01130(mem,endIndex-1);
+    resolveCurrentNarrativeStateV01130(mem,endIndex-1);
     restoreMissingCurrentLocationV01129(mem,endIndex-1);
 
     if (options?.advanceCursor !== false) {
@@ -4030,12 +4121,13 @@ const SYSTEM_PROMPT = `你是长线角色扮演的“剧情记忆审计器”。
 绝对规则：
 1. 酒馆消息发送时间/楼层时间戳不是剧情时间，禁止据此推断剧情日期。
 2. 时间证据优先级：用户正文明确时间 > 正文明确相对推进（第二天/几小时后/跨午夜） > 可验证事件连续性 > AI正文中的<date>标签。
-2A. 双时间轴例外：插件标记为“现实主时间轴”的 /世界/现实时间，独占 current_story_date 和 current_story_time；“副本第N天/副本内时间/倒计时”只能作为 timeline 的场景第二时间轴，绝不能据此重算、覆盖或倒退现实日期。
+2A. 双时间轴：timeline.date、current_story_date 和 current_story_time 表示“当前正在演出的剧情/场景时间”；/世界/现实时间表示 MVU 底层现实钟，插件会另行保存。若剧情明确进入带完整绝对日期的历史副本、模拟场景或闪回（例如从 2026 进入 2003），必须保留该场景日期，不能因为年份较小而改回 2026；“副本第N天/倒计时”仍不能自行推算绝对日期。
+2B. 时间精度必须服从证据：只有同 source 的 canonical 正文或允许的当前状态元数据明确出现具体钟点，timeline.time 才能写 HH:MM。只知道时段时写“早晨/上午/中午/下午/晚间/深夜”；连时段也无法确认时写“时间未明确”。预设摘要自行推测出的 15:00、15:20 等分钟不得伪装成“原文明示”，也不得作为后续跨日或倒退判断的钟点锚点。
 3. 如果上一场景是夜晚，后文明确“半夜2点/凌晨2点”等，必须考虑跨日。
 3A. 月份锁：若已有可靠记忆处于某月，而“新增原始聊天”没有明确出现新的年月日、明确“下个月/数周后/一个月后”等跨月推进证据，禁止自行改变月份。
 3B. 单独出现“17日/周五/早晨”等信息时，默认继承当前可靠月份；不得仅凭 AI 的 <date> 标签把 9 月推成 10 月。
 3C. AI 的 <date> 只属于低优先级证据；若它造成无正文证据的跨月、倒退或大跨度跳跃，必须忽略该日期，并维持上一可靠时间。
-3D. 若新增批次提及过去已经发生的日期，只能作为旧事件/回忆补充写入 timeline，不得把 current_story_time 倒退。当前剧情时间必须沿主线单向推进，除非正文明确进入闪回并明确标记。
+3D. 若新增批次只是提及过去日期，只能作为旧事件/回忆补充，不得倒退当前状态；但同 source 的当前状态、结构化剧情摘要或明确场景标记若显示已经进入历史日历，则这是新的剧情时间段，应按 source 顺序采用。
 4. 不得把尚未在“新增原始聊天”中发生的预测、计划、旧总结预告写成已发生事实。
 5. 角色的猜测、医学推断、心理推测等，不可直接升级成事实。
 6. conflicts 的定义必须极严格：只有“同一时间点/同一事实维度上，两条已经确定的剧情事实无法同时成立”才写入 conflicts。
@@ -4053,7 +4145,7 @@ const SYSTEM_PROMPT = `你是长线角色扮演的“剧情记忆审计器”。
 9A. 任何被写成“过去已经发生”的具体事实，都必须由本批新增原始聊天的真实 source，或【已有可靠记忆】中的明确事实/semantic_anchors 支持。禁止为了叙事连贯自行补写过去的对话、约定、物品来源、动机、关系历史、接触、主动/被动或同意/拒绝状态。
 9B. 当前回复中的无害文学性细节若不影响连续性，可以不记录；不得把没有可靠依据的新装饰性细节升级成 timeline/facts/events/semantic_anchors 中的既定历史。证据不足时保持模糊。
 9C. <thinking>/<think>、HTML 草稿注释、故事考据、campus_gossip、小剧场、UpdateVariable、Analysis、JSONPatch、状态占位符、写作规划等辅助/元数据块不是 canonical 剧情正文，即使其中出现人物、地点、日期或行为，也不得进入长期记忆；只有真正正文 <content> 或无标签的剧情正文可作为事实来源。
-9D. 唯一例外：插件可能提供 [SMM_WORLD_STATE_META #N ...]，它只含白名单中的 /世界/当前日期、/世界/当前时间、/世界/当前地点、/世界/现实日期、/世界/现实时间、/世界/现实地点，且只用于校准该 #N assistant 回复结束时的 date/time/location；不得据此创造剧情事实、关系变化、人物行为或其他变量。普通世界状态元数据与正文冲突时正文优先；明确标记“现实主时间轴”的值仅在绝对日期/现实钟点维度优先，副本内叙事时间仍作为第二时间轴保留。
+9D. 唯一例外：插件可能提供 [SMM_WORLD_STATE_META #N ...]，它只含白名单中的 /世界/当前日期、/世界/当前时间、/世界/当前地点、/世界/现实日期、/世界/现实时间、/世界/现实地点，且只用于校准该 #N assistant 回复结束时的 date/time/location；不得据此创造剧情事实、关系变化、人物行为或其他变量。普通世界状态元数据与正文冲突时正文优先；/世界/现实时间是独立 MVU 现实钟。若同 source 的预设剧情摘要明确给出当前场景的完整日期，则 timeline/current_story 使用场景日期，现实钟不得覆盖它。
 10. relationships 只记录文本已经支持的关系状态，不擅自把暧昧升级成恋爱/伴侣。
 10A. characters 只保存人物自身资料与当前即时状态。
 10B. characters 中只允许稳定字段 age/gender/identity/personality，以及当前状态字段 location/companion/physiology/outfit。
@@ -5065,7 +5157,7 @@ ${messagesText(start, end)}
 - 它不是 canonical 剧情正文，禁止转写为对白、动作、人物动机、facts/events/relationships/semantic_anchors。
 - 它只可作为“该 assistant 回复结束时”的结构化日期/时间/地点候选证据。
 - 普通 /世界/当前日期、当前时间、当前地点与 canonical 正文冲突时，以正文事实为准；不得让它覆盖“第二天/跨午夜/到达新地点”等明确叙事。
-- 若元数据明确标记“现实主时间轴”，它独占绝对日期与现实钟点。正文中的“副本第N天/副本内时间/倒计时”仍可写入 timeline.time 作为第二时间轴，但不得覆盖 current_story_date/current_story_time，也不得把“第1天”重新绑定剧情起点。
+- 若元数据标记“MVU现实主时间轴”，只表示它是底层世界现实钟；同 source 的预设剧情摘要若明确给出当前场景完整日期（例如 2003-10-28），timeline/current_story 必须采用场景日期，MVU现实钟由插件另存。只有“副本第N天/倒计时”而没有完整日期时，仍不得自行换算绝对日期。
 - timeline 事件的 source 若包含该 assistant 回复且 time/date 为空，可使用同 source 的结构化元数据补齐；不得把后续楼层的元数据倒灌到更早事件。
 - 除上述白名单路径外，任何 JSONPatch 变量（好感度、状态、数值、分析等）都没有被提供给总结器，也不得进入长期记忆。
 
@@ -5089,9 +5181,10 @@ ${messagesText(start, end)}
 10. current_story_date/current_story_time 必须依据新增原始聊天与可靠连续性推进，不得依据旧总结的日期直接推进。
 【结构化记忆规范】
 - 必须单独输出 current_story_date，格式严格为 YYYY-MM-DD；这是机器计算使用的绝对剧情日期。
-- current_story_time 保存主时间轴钟点，可以保留“秋季学期 周X HH:MM”作为显示时间，但不能代替 current_story_date；存在“现实主时间轴”时不得填写副本内钟点。
+- current_story_time 保存当前正在演出的场景钟点，可以保留“秋季学期 周X HH:MM”作为显示时间，但不能代替 current_story_date。
 - 时间线必须尽量给出具体 YYYY-MM-DD；“秋季学期/周五/上午”只能作为附加描述，不能替代日期。
-- 双时间轴 timeline 可采用“现实日期｜[副本第N轮·第M天 HH:MM]”的含义：date 属于现实主时间轴，time 可保留该事件的副本内标签。不得根据副本轮次或副本第几天自行计算现实日期。
+- 双时间轴中，timeline.date 属于当前剧情场景；若场景只有“副本第N天”而没有完整日历，可在 time 中保留该标签但不得推算日期。/世界/现实时间由插件作为 parallel reality clock 单独保存。
+- timeline.time 只有在同 source 正文或允许的同楼状态元数据明确出现钟点时才写 HH:MM；摘要为了补字段自行推测的精确分钟必须降级为“下午（具体时刻未明确）”等时段，完全无依据则写“时间未明确”。不得用这种推测分钟计算跨日、倒退或事件排序。
 - 人物资料分稳定资料与当前状态。地点、衣着、陪伴者、身体状态属于当前状态，后文更新时覆盖，不要不断堆成数组。
 - 人物别名必须归一；同一人物不得因中英文名/昵称拆成多个实体。
 - 人物关系只有在明确两个人之间存在关系时才记录；多人同场、群体互动不得自动生成多边关系链。
@@ -5321,7 +5414,7 @@ function embeddedSummaryLocalV0114(m) {
     const raw=String(m?.mes||'');
     // Prefer summaries already generated by the roleplay preset. These cost no API
     // and are much safer than re-summarizing prose locally.
-    for(const tag of ['abstract','meow_FM','scene_summary','memory_summary']){
+    for(const tag of ['abstract','meow_FM','scene_summary','memory_summary','story_summary','plot_summary','剧情摘要']){
         const parts=tagBodyLocalV0114(raw,tag);
         if(parts.length) return parts.join('；').slice(0,700);
     }
@@ -5333,7 +5426,7 @@ function summaryBlocksLocalV0115(m) {
     if(!m || m.is_user) return [];
     const raw=String(m?.mes||'');
     const out=[];
-    for(const tag of ['abstract','meow_FM','scene_summary','memory_summary']){
+    for(const tag of ['abstract','meow_FM','scene_summary','memory_summary','story_summary','plot_summary','剧情摘要']){
         const re=new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)<\\/${tag}>`,'gi');
         let hit;
         while((hit=re.exec(raw))){
@@ -6565,28 +6658,504 @@ function restoreMissingCurrentLocationV01129(mem=M(),endInclusive=null) {
     return {changed:true,location:chosen.value,evidence:`${chosen.source}#${chosen.index}`};
 }
 
+// =========================================================
+// v0.11.30 narrative-calendar repair
+//
+// story_start is an immutable origin, not a permanent minimum date.  A card can
+// start in 2026 and then enter a fully dated 2003 simulation.  timeline.date and
+// current_story_date follow the active narrative scene; an MVU reality clock is
+// retained separately as reality_date/reality_time.
+// =========================================================
+function normalizeNarrativeClockV01130(value) {
+    const src=String(value||'').replace(/：/g,':').replace(/[|｜·]/g,' ').trim();
+    if(!src) return null;
+    const re=/(凌晨|清晨|早晨|早上|上午|中午|正午|下午|傍晚|晚上|晚间|夜间|夜晚|深夜)?\s*([01]?\d|2[0-3]):([0-5]\d)/g;
+    const hits=[];
+    let m;
+    while((m=re.exec(src))){
+        let h=Number(m[2]);
+        const period=m[1]||'';
+        if(/下午|傍晚|晚上|晚间|夜间|夜晚|深夜/.test(period)&&h<12) h+=12;
+        if(/凌晨/.test(period)&&h===12) h=0;
+        const clock=`${String(h).padStart(2,'0')}:${m[3]}`;
+        hits.push({period:period==='正午'?'中午':period,clock});
+    }
+    if(hits.length){
+        const first=[hits[0].period,hits[0].clock].filter(Boolean).join(' ');
+        if(hits.length===1) return first;
+        const second=[hits[1].period&&hits[1].period!==hits[0].period?hits[1].period:'',hits[1].clock].filter(Boolean).join(' ');
+        return `${first}-${second}`;
+    }
+    const fuzzy=src.match(/(?:凌晨|清晨|早晨|早上|上午|中午|正午|下午|傍晚|晚上|晚间|夜间|夜晚|深夜)/)?.[0];
+    return fuzzy==='正午'?'中午':(fuzzy||null);
+}
+
+function safeTimelineTimeInfoV01131(entry) {
+    const raw=String(entry?.time||'').trim();
+    const evidence=classifySourceTimeEvidence(entry);
+    if(!raw) return {time:null,evidence,downgraded:false};
+
+    const clocks=clockCandidatesFromTimelineTime(raw);
+    const sceneDate=normalizeDateInput(entry?.date||'')?.iso||null;
+    const sourceMeta=worldStateMetaForSourceV0112(entry?.source);
+    const realityDate=normalizeDateInput(
+        entry?.reality_date||[...sourceMeta].reverse().find(x=>x?.date_reality&&x?.date)?.date||''
+    )?.iso||null;
+    const separateReality=entry?.calendar_axis==='scene'||!!(sceneDate&&realityDate&&sceneDate!==realityDate);
+    const canonical=sourceTextForTime(entry?.source);
+    const allCanonical=clocks.length>0&&clocks.every(x=>temporalTextContainsClockV01131(canonical,x));
+    const exactTrusted=clocks.length>0&&(allCanonical||(!separateReality&&evidence.level==='structured'));
+    if(exactTrusted) return {
+        time:ensureWeekdayTimelineTimeLocalV0119(raw,entry?.date),
+        evidence,downgraded:false
+    };
+
+    if(clocks.length){
+        const parts=[...new Set(clocks.map(timelineDaypartLocalV01118).filter(Boolean))];
+        const base=parts.length===1?`${parts[0]}（具体时刻未明确）`:'时间未明确';
+        return {
+            time:ensureWeekdayTimelineTimeLocalV0119(base,entry?.date),
+            evidence:{
+                level:'inferred',
+                label:parts.length===1?'总结推测时段':'时间未明确',
+                reason:'具体钟点未在 source 正文或允许的同楼状态元数据中得到验证，已移除精确分钟'
+            },
+            downgraded:true
+        };
+    }
+
+    const part=raw.match(/(?:凌晨|半夜|清晨|早晨|早上|上午|中午|正午|下午|傍晚|晚上|晚间|夜间|夜晚|深夜)/)?.[0]||null;
+    if(part&&(evidence.level==='inferred'||evidence.level==='unverified')){
+        const normalizedPart=part==='正午'?'中午':part;
+        const base=/具体时刻未明确|具体时间未明确/.test(raw)?raw:`${normalizedPart}（具体时刻未明确）`;
+        return {
+            time:ensureWeekdayTimelineTimeLocalV0119(base,entry?.date),
+            evidence:{
+                level:'inferred',label:'总结推测时段',
+                reason:'原文未明确具体钟点；仅保留低精度时段，不作为钟点锚点'
+            },
+            downgraded:base!==raw
+        };
+    }
+
+    return {time:raw,evidence,downgraded:false};
+}
+
+function applyTimelineTimePrecisionV01131(entry) {
+    if(!entry||typeof entry!=='object') return {changed:false,downgraded:false};
+    const info=safeTimelineTimeInfoV01131(entry);
+    let changed=false;
+    if((entry.time??null)!==(info.time??null)){entry.time=info.time;changed=true;}
+    for(const [key,value] of [
+        ['time_evidence',info.evidence.level],
+        ['time_evidence_label',info.evidence.label],
+        ['time_evidence_reason',info.evidence.reason]
+    ]){
+        if(entry[key]!==value){entry[key]=value;changed=true;}
+    }
+    return {changed,downgraded:info.downgraded,time:info.time,evidence:info.evidence};
+}
+
+function repairTimelinePrecisionV01131(mem=M(),endInclusive=null,{audit=false}={}) {
+    const chat=C().chat||[];
+    const cap=endInclusive==null
+        ? Math.min(chat.length-1,Math.max(-1,Number(mem?.last_processed_index??chat.length-1)))
+        : Math.min(chat.length-1,Math.max(-1,Number(endInclusive)));
+    const rows=Array.isArray(mem?.timeline)?mem.timeline:[];
+    let scanned=0,changed=0,downgraded=0;
+    for(const e of rows){
+        const last=sourceLast(e?.source);
+        if(last<0||last>cap) continue;
+        scanned++;
+        const result=applyTimelineTimePrecisionV01131(e);
+        if(result.changed) changed++;
+        if(result.downgraded) downgraded++;
+    }
+    if(audit&&changed){
+        mem.audit=Array.isArray(mem.audit)?mem.audit:[];
+        mem.audit.push({
+            at:new Date().toISOString(),type:'timeline_precision_repaired_v01131',
+            scanned,changed,downgraded,api_calls:0,
+            reason:'无同楼原文/状态依据的精确钟点已降级为时段或时间未明确；推测分钟不再作为时间锚点'
+        });
+        if(mem.audit.length>50) mem.audit=mem.audit.slice(-50);
+    }
+    return {scanned,changed,downgraded,api_calls:0};
+}
+
+function narrativeSummaryRecordsV01130(m,userMsg=null,mem=M()) {
+    if(!m||m.is_user) return [];
+    const direct=[];
+    for(const block of rawSummaryBlocksLocalV0119(m)){
+        const serial=childTagTextLocalV0119(block.raw,'serial');
+        const timeRaw=childTagTextLocalV0119(block.raw,'time');
+        const scene=childTagTextLocalV0119(block.raw,'scene');
+        const plot=childTagTextLocalV0119(block.raw,'plot');
+        if(!plot) continue;
+        direct.push({
+            tag:block.tag,
+            record_no:serial.match(/(\d{1,6})/)?.[1]||null,
+            date:normalizeSummaryDateLocalV0115(timeRaw),
+            time:normalizeNarrativeClockV01130(timeRaw),
+            location:scene||null,
+            event:cleanupPresetPlotLocalV0119(plot,280),
+            __direct_preset_plot_v0119:true
+        });
+    }
+    if(direct.length) return direct;
+    return structuredSummaryRecordsLocalV0119(m,userMsg,mem).map(rec=>({
+        ...rec,
+        date:normalizeDateInput(rec?.date||'')?.iso||null,
+        time:normalizeNarrativeClockV01130(rec?.time)||rec?.time||null
+    }));
+}
+
+function markedCurrentStatusV01130(m,index=-1) {
+    if(!m||m.is_user) return null;
+    const visible=cleanMes(m)
+        .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi,'')
+        .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi,'');
+    const text=plainTextLocalV0114(stripAuxiliaryBlocksV0110(visible));
+    if(!text) return null;
+    const patterns=[
+        /(?:即时状态|当前状态|场景档案)[\s\S]{0,260}?(?:当前)?时间\s*[:：]\s*((?:20\d{2})[年\-\/.]\d{1,2}[月\-\/.]\d{1,2}日?)([\s\S]{0,55}?)(?=(?:地点|位置|在场|人物|状态|动作|剧情摘要|世界动态)\s*[:：]?|$)/gi,
+        /(?:当前时间|剧情时间|故事时间|时间)\s*[:：]\s*((?:20\d{2})[年\-\/.]\d{1,2}[月\-\/.]\d{1,2}日?)([^\n]{0,55})/gi
+    ];
+    const hits=[];
+    for(const re of patterns){
+        let match;
+        while((match=re.exec(text))){
+            const date=normalizeSummaryDateLocalV0115(match[1]);
+            const time=normalizeNarrativeClockV01130(match[2]);
+            if(date) hits.push({at:match.index,date,time});
+        }
+    }
+    if(!hits.length) return null;
+    const best=hits.sort((a,b)=>a.at-b.at).at(-1);
+    const tail=text.slice(best.at,Math.min(text.length,best.at+650));
+    const loc=tail.match(/(?:地点|位置)\s*[:：]\s*([\s\S]{2,180}?)(?=\s*(?:在场|人物|状态|动作|剧情摘要|世界动态)\s*[:：]?|$)/i)?.[1]||null;
+    return {
+        index,date:best.date,time:best.time,
+        location:loc?sanitizeWorldMetaValueV0112(loc,180):null,
+        kind:'marked_current_status'
+    };
+}
+
+function unpackSecondarySceneTimeV01130(value) {
+    const raw=String(value||'').trim();
+    const m=raw.match(/^\[\s*(?:场景第二时间轴|副本|场景时间)[·：:]\s*((?:20\d{2})-\d{2}-\d{2})(?:\s+([\s\S]*?))?\s*\]$/);
+    if(!m) return null;
+    return {date:normalizeDateInput(m[1])?.iso||null,time:String(m[2]||'').trim()||null};
+}
+
+function bestNarrativeSummaryForRowV01130(e,mem=M()) {
+    const chat=C().chat||[];
+    const candidates=[];
+    for(const i of sourceIndexes(e?.source)){
+        const msg=chat[i];
+        if(!msg||msg.is_user) continue;
+        const prev=(i>0&&chat[i-1]?.is_user)?chat[i-1]:null;
+        for(const rec of narrativeSummaryRecordsV01130(msg,prev,mem)){
+            if(!rec.date&&!rec.time&&!rec.location) continue;
+            const similarity=textSimilarity(String(e?.event||''),String(rec?.event||''));
+            candidates.push({...rec,index:i,similarity});
+        }
+    }
+    candidates.sort((a,b)=>(a.index-b.index)||(a.similarity-b.similarity));
+    return candidates.at(-1)||null;
+}
+
+function narrativeEvidenceForRowV01130(e,mem=M()) {
+    const chat=C().chat||[];
+    const indexes=[...sourceIndexes(e?.source)].sort((a,b)=>a-b);
+    const summary=bestNarrativeSummaryForRowV01130(e,mem);
+    const unpacked=unpackSecondarySceneTimeV01130(e?.time);
+    let status=null;
+    let prose=null;
+    for(const i of [...indexes].reverse()){
+        if(!status) status=markedCurrentStatusV01130(chat[i],i);
+        const cue=currentStoryCueFromMessageV01121(chat[i],i);
+        if(cue?.date){prose={...cue,kind:'canonical_scene_cue'};break;}
+    }
+    const world=exactWorldStateMetaSameSourceV0117(indexes);
+    let primary=null;
+    if(summary&&(summary.date||summary.time)) primary={...summary,kind:'preset_summary'};
+    else if(unpacked?.date) primary={...unpacked,index:sourceLast(e?.source),kind:'v01129_secondary_label'};
+    else if(status?.date) primary=status;
+    else if(prose?.date) primary=prose;
+    else if(world.date||world.time) primary={
+        date:world.date||null,time:world.time||null,location:world.location||null,
+        index:world.index,kind:world.date_reality||world.time_reality?'world_reality_meta':'world_meta'
+    };
+    return {
+        primary,
+        reality_date:world.date_reality?world.date||null:null,
+        reality_time:world.time_reality?world.time||null:null,
+        reality_index:world.index
+    };
+}
+
+function repairNarrativeCalendarV01130(mem=M(),endInclusive=null) {
+    const timeline=Array.isArray(mem?.timeline)?mem.timeline:[];
+    const chat=C().chat||[];
+    const cap=endInclusive==null
+        ? Math.min(chat.length-1,Math.max(-1,Number(mem?.last_processed_index??chat.length-1)))
+        : Math.min(chat.length-1,Math.max(-1,Number(endInclusive)));
+    if(!timeline.length) return {found:false,changed:false,rows_fixed:0};
+
+    const fingerprint=JSON.stringify([
+        cap,timeline.map(e=>[e?.source||null,e?.date||null,e?.time||null])
+    ]);
+    if(mem?.narrative_calendar_v01130?.version==='0.11.31'&&mem?.narrative_calendar_v01130?.input_fingerprint===fingerprint){
+        return {found:true,changed:false,rows_fixed:0,cached:true};
+    }
+
+    const allRows=timeline.map((e,pos)=>({e,pos,first:sourceFirst(e?.source),last:sourceLast(e?.source)}))
+        .filter(x=>x.first>=0&&x.first<=cap)
+        .sort((a,b)=>(a.first-b.first)||(a.last-b.last)||(a.pos-b.pos));
+    const priorRun=mem?.narrative_calendar_v01130;
+    const fullUpgrade=priorRun?.version!=='0.11.31'||!Number.isInteger(priorRun?.processed_to)||Number(priorRun.processed_to)>cap;
+    const scanFrom=fullUpgrade?0:Math.max(0,Number(priorRun.processed_to)-6);
+    const rows=allRows.filter(x=>x.last>=scanFrom);
+    const earlier=allRows.filter(x=>x.last<scanFrom);
+    let changed=false,rowsFixed=0,timeFixed=0,realityStored=0,timePrecisionDowngraded=0;
+    let segments=earlier.reduce((n,x)=>Math.max(n,Number(x.e?.calendar_segment||0)),0);
+    let directCount=0;
+    let rollingDate=normalizeDateInput(earlier.at(-1)?.e?.date||'')?.iso||isoDateFromAny(mem?.story_start)||null;
+    let previousDirectDate=rollingDate;
+
+    for(const row of rows){
+        const evidence=narrativeEvidenceForRowV01130(row.e,mem);
+        row.evidence=evidence;
+        const p=evidence.primary;
+        if(p?.date){
+            const date=normalizeDateInput(p.date)?.iso||null;
+            if(date){
+                directCount++;
+                if(previousDirectDate){
+                    const diff=dateDiffDaysLocalV0114(previousDirectDate,date);
+                    if(diff!=null&&(diff<0||Math.abs(diff)>62)) segments++;
+                }
+                previousDirectDate=date;
+                rollingDate=date;
+                if(normalizeDateInput(row.e.date||'')?.iso!==date){row.e.date=date;changed=true;rowsFixed++;}
+                if(Number(row.e.calendar_segment??-1)!==segments){row.e.calendar_segment=segments;changed=true;}
+                const axisLabel=(evidence.reality_date&&evidence.reality_date!==date)?'scene':'narrative';
+                if(row.e.calendar_axis!==axisLabel){row.e.calendar_axis=axisLabel;changed=true;}
+                row.direct=true;
+            }
+        }
+        if(p?.time&&(p.kind==='preset_summary'||p.kind==='v01129_secondary_label')){
+            const time=normalizeNarrativeClockV01130(p.time)||String(p.time||'').trim();
+            const safe=safeTimelineTimeInfoV01131({
+                ...row.e,time,
+                reality_date:evidence.reality_date||row.e.reality_date||null,
+                reality_time:evidence.reality_time||row.e.reality_time||null,
+                calendar_axis:(evidence.reality_date&&row.e.date&&evidence.reality_date!==row.e.date)?'scene':row.e.calendar_axis
+            });
+            if(safe.downgraded) timePrecisionDowngraded++;
+            const normalized=safe.time;
+            if(normalized&&String(row.e.time||'')!==normalized){row.e.time=normalized;changed=true;timeFixed++;}
+            if(row.e.time_evidence!==safe.evidence.level||row.e.time_evidence_label!==safe.evidence.label||row.e.time_evidence_reason!==safe.evidence.reason){
+                row.e.time_evidence=safe.evidence.level;
+                row.e.time_evidence_label=safe.evidence.label;
+                row.e.time_evidence_reason=safe.evidence.reason;
+                changed=true;
+            }
+        }
+        if(p?.location&&isMissingStoryValueV0112(row.e.location)){
+            row.e.location=String(p.location).trim();changed=true;
+        }
+        if(evidence.reality_date){
+            if(row.e.reality_date!==evidence.reality_date){row.e.reality_date=evidence.reality_date;changed=true;realityStored++;}
+        }
+        if(evidence.reality_time){
+            if(row.e.reality_time!==evidence.reality_time){row.e.reality_time=evidence.reality_time;changed=true;}
+        }
+    }
+
+    // Fill unlabelled rows only after the first direct scene anchor.  This keeps
+    // the opening 2026 segment intact while repairing rows between 2003 preset
+    // summaries without inventing a new calendar transition.
+    rollingDate=normalizeDateInput(earlier.at(-1)?.e?.date||'')?.iso||null;
+    let rollingSegment=Number(earlier.at(-1)?.e?.calendar_segment||0);
+    const nextDirectByPosition=new Array(rows.length).fill(null);
+    let nextDirect=null;
+    for(let pos=rows.length-1;pos>=0;pos--){
+        nextDirectByPosition[pos]=nextDirect;
+        if(rows[pos].direct) nextDirect=rows[pos];
+    }
+    let previousDirect=null;
+    for(let pos=0;pos<rows.length;pos++){
+        const row=rows[pos];
+        if(row.direct){
+            rollingDate=normalizeDateInput(row.e.date||'')?.iso||rollingDate;
+            rollingSegment=Number(row.e.calendar_segment||0);
+            previousDirect=row;
+            continue;
+        }
+        if(!rollingDate) continue;
+
+        // A source-only row can sit just before the first dated reply of a new
+        // calendar segment. Keeping the previous (for example 2026) date would
+        // be a false assertion. When it is decisively closer to the following
+        // direct scene anchor, attach it to that scene as a contextual date;
+        // an exact clock is still forbidden unless independently verified.
+        const following=nextDirectByPosition[pos];
+        const followingDate=normalizeDateInput(following?.e?.date||'')?.iso||null;
+        const followingSegment=Number(following?.e?.calendar_segment||0);
+        if(previousDirect&&following&&followingDate&&followingSegment!==rollingSegment){
+            const previousDistance=Math.max(0,row.first-previousDirect.last);
+            const followingDistance=Math.max(0,following.first-row.last);
+            if(followingDistance+2<previousDistance){
+                const old=normalizeDateInput(row.e.date||'')?.iso||null;
+                if(old!==followingDate){row.e.date=followingDate;changed=true;rowsFixed++;}
+                if(Number(row.e.calendar_segment??-1)!==followingSegment){row.e.calendar_segment=followingSegment;changed=true;}
+                const nextAxis=following.e.calendar_axis||'scene';
+                const nextReason=`source 更接近后续明确场景 #${following.first}；仅继承场景日期，不推算具体钟点`;
+                for(const [key,value] of [
+                    ['calendar_axis',nextAxis],
+                    ['date_evidence','contextual'],
+                    ['date_evidence_label','邻近场景日期'],
+                    ['date_evidence_reason',nextReason]
+                ]){
+                    if(row.e[key]!==value){row.e[key]=value;changed=true;}
+                }
+                continue;
+            }
+        }
+
+        const sourceText=sourceTextForTime(row.e.source);
+        if(hasNextDayCueTextV0114(sourceText)) rollingDate=addDaysISO(rollingDate,1)||rollingDate;
+        const old=normalizeDateInput(row.e.date||'')?.iso||null;
+        if(old!==rollingDate){row.e.date=rollingDate;row.e.calendar_segment=rollingSegment;changed=true;rowsFixed++;}
+        if(row.e.time){
+            const normalized=ensureWeekdayTimelineTimeLocalV0119(row.e.time,row.e.date);
+            if(normalized&&normalized!==row.e.time){row.e.time=normalized;changed=true;timeFixed++;}
+        }
+    }
+
+    // v0.11.31: sanitize every referenced historical row, including rows that
+    // have no old preset summary. Exact recap guesses are reduced to a broad
+    // daypart (or unknown) and therefore cannot drive later clock continuity.
+    const precision=repairTimelinePrecisionV01131(mem,cap,{audit:false});
+    if(precision.changed) changed=true;
+    const precisionDowngraded=timePrecisionDowngraded+precision.downgraded;
+
+    timeline.sort((a,b)=>(sourceFirst(a?.source)-sourceFirst(b?.source))||(sourceLast(a?.source)-sourceLast(b?.source)));
+    const reality=realityAxisStateV01129(cap);
+    if(reality.latestDate&&mem.current_reality_date!==reality.latestDate){mem.current_reality_date=reality.latestDate;changed=true;}
+    if(reality.latestTime&&mem.current_reality_time!==reality.latestTime){mem.current_reality_time=reality.latestTime;changed=true;}
+
+    const finalFingerprint=JSON.stringify([
+        cap,timeline.map(e=>[e?.source||null,e?.date||null,e?.time||null])
+    ]);
+    mem.narrative_calendar_v01130={
+        version:'0.11.31',at:new Date().toISOString(),input_fingerprint:finalFingerprint,
+        processed_to:cap,scan_from:scanFrom,
+        direct_anchors:directCount,rows_fixed:rowsFixed,time_fixed:timeFixed,
+        time_precision_changed:precision.changed,time_precision_downgraded:precisionDowngraded,
+        reality_fields_stored:realityStored,calendar_segments:segments+1
+    };
+    if(changed){
+        mem.audit=Array.isArray(mem.audit)?mem.audit:[];
+        mem.audit.push({
+            at:new Date().toISOString(),type:'narrative_calendar_repaired_v01131',
+            direct_anchors:directCount,rows_fixed:rowsFixed,time_fixed:timeFixed,
+            time_precision_changed:precision.changed,time_precision_downgraded:precisionDowngraded,
+            calendar_segments:segments+1,
+            reason:'剧情时间线按 source 顺序采用场景日历；MVU 现实钟另存；无原文依据的精确分钟降级为低精度时段'
+        });
+        if(mem.audit.length>50) mem.audit=mem.audit.slice(-50);
+    }
+    return {
+        found:directCount>0,changed,rows_fixed:rowsFixed,time_fixed:timeFixed,
+        time_precision_changed:precision.changed,time_precision_downgraded:precisionDowngraded,
+        direct_anchors:directCount,segments:segments+1
+    };
+}
+
+function resolveCurrentNarrativeStateV01130(mem=M(),endInclusive=null) {
+    const chat=C().chat||[];
+    const cap=endInclusive==null?chat.length-1:Math.min(chat.length-1,Math.max(-1,Number(endInclusive)));
+    const start=Math.max(0,cap-119);
+    const candidates=[];
+    for(let i=start;i<=cap;i++){
+        const msg=chat[i];
+        if(!msg||msg.is_user) continue;
+        const status=markedCurrentStatusV01130(msg,i);
+        if(status) candidates.push({...status,priority:4});
+        const prev=(i>0&&chat[i-1]?.is_user)?chat[i-1]:null;
+        const rec=narrativeSummaryRecordsV01130(msg,prev,mem).at(-1);
+        if(rec&&(rec.date||rec.time||rec.location)) candidates.push({...rec,index:i,kind:'preset_summary',priority:3});
+    }
+    const latest=latestTimelineStateV01121(mem);
+    if(latest.index>=0&&(latest.date||latest.time||latest.location)) candidates.push({...latest,kind:'timeline',priority:2});
+    const world=latestWorldStateFieldsInRangeV01121(start,cap+1);
+    if(world&&(world.date||world.time||world.location)) candidates.push({
+        date:world.date,time:world.time,location:world.location,index:Math.max(world.date_index,world.time_index,world.location_index),
+        kind:world.date_reality||world.time_reality?'world_reality_meta':'world_meta',priority:1
+    });
+    candidates.sort((a,b)=>(Number(a.index)-Number(b.index))||(Number(a.priority)-Number(b.priority)));
+    const chosen=candidates.at(-1);
+    if(!chosen) return {changed:false,source:'none'};
+
+    const before={date:mem.current_story_date||null,time:mem.current_story_time||null,location:mem?.current_scene?.location||null};
+    const nextDate=normalizeDateInput(chosen.date||'')?.iso||before.date||null;
+    let nextTime=normalizeNarrativeClockV01130(chosen.time)||chosen.time||before.time||null;
+    if(chosen.kind==='preset_summary'&&chosen.time){
+        // A recap may state a useful current daypart, but its minute value is
+        // not canonical unless the same reply's story body/state confirms it.
+        nextTime=safeTimelineTimeInfoV01131({
+            date:nextDate,time:nextTime,source:`#${chosen.index}`
+        }).time||before.time||null;
+    }
+    if(nextTime&&nextDate) nextTime=ensureWeekdayTimelineTimeLocalV0119(nextTime,nextDate);
+    const nextLocation=!isMissingStoryValueV0112(chosen.location)?String(chosen.location).trim():before.location;
+    if(!mem.current_scene||typeof mem.current_scene!=='object'||Array.isArray(mem.current_scene)) mem.current_scene={};
+    let changed=false;
+    if((mem.current_story_date||null)!==(nextDate||null)){mem.current_story_date=nextDate;changed=true;}
+    if((mem.current_story_time||null)!==(nextTime||null)){mem.current_story_time=nextTime;changed=true;}
+    if((mem.current_scene.location||null)!==(nextLocation||null)){
+        if(nextLocation) mem.current_scene.location=nextLocation; else delete mem.current_scene.location;
+        changed=true;
+    }
+    if(changed){
+        mem.audit=Array.isArray(mem.audit)?mem.audit:[];
+        mem.audit.push({
+            at:new Date().toISOString(),type:'current_narrative_state_resolved_v01131',
+            before,after:{date:mem.current_story_date||null,time:mem.current_story_time||null,location:mem.current_scene.location||null},
+            source:`${chosen.kind}#${chosen.index}`,
+            reason:'当前剧情状态按最新 source 证据选择，允许明确的场景日历切换，不按年份大小判断新旧'
+        });
+        if(mem.audit.length>50) mem.audit=mem.audit.slice(-50);
+    }
+    return {changed,source:`${chosen.kind}#${chosen.index}`,date:mem.current_story_date||null,time:mem.current_story_time||null,location:mem.current_scene.location||null};
+}
+
 let CURRENT_STATE_SAVE_PENDING_V01121 = false;
 function refreshCurrentStoryStateV01121({persist=true}={}) {
     let result;
     try {
         const mem=M();
-        const temporalRepair=repairRealityAxisTimelineV01127(mem);
-        result = resolveCurrentStoryStateV01121(mem);
-        const secondaryCalendar=repairSecondaryCalendarLeakV01129(mem);
+        // v0.11.30 deliberately does not run the old reality-axis hard guard:
+        // it rewrote a valid 2003 scene calendar into 2026.  Repair only the
+        // timeline date/time fields from their existing source references.
+        const narrativeCalendar=repairNarrativeCalendarV01130(mem);
+        result = resolveCurrentNarrativeStateV01130(mem);
         const locationRepair=restoreMissingCurrentLocationV01129(mem);
-        result.temporal_repair=temporalRepair;
-        result.secondary_calendar=secondaryCalendar;
+        result.narrative_calendar=narrativeCalendar;
         result.location_repair=locationRepair;
-        if(temporalRepair.changed||secondaryCalendar.changed||locationRepair.changed) result.changed=true;
+        if(narrativeCalendar.changed||locationRepair.changed) result.changed=true;
     }
     catch (e) {
-        console.warn('[StoryMemory] v0.11.29 current-state resolver failed', e);
+        console.warn('[StoryMemory] v0.11.31 current-state resolver failed', e);
         return {changed:false,error:String(e?.message||e)};
     }
     if (result.changed && persist && !CURRENT_STATE_SAVE_PENDING_V01121) {
         CURRENT_STATE_SAVE_PENDING_V01121 = true;
         Promise.resolve(saveMeta())
-            .catch(e=>console.warn('[StoryMemory] v0.11.29 current-state save failed',e))
+            .catch(e=>console.warn('[StoryMemory] v0.11.31 current-state save failed',e))
             .finally(()=>{ CURRENT_STATE_SAVE_PENDING_V01121=false; });
     }
     return result;
@@ -6719,7 +7288,7 @@ function rawSummaryBlocksLocalV0119(m) {
     if(!m || m.is_user) return [];
     const raw=String(m?.mes||'');
     const out=[];
-    for(const tag of ['abstract','meow_FM','scene_summary','memory_summary']){
+    for(const tag of ['abstract','meow_FM','scene_summary','memory_summary','story_summary','plot_summary','剧情摘要']){
         const re=new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)<\\/${tag}>`,'gi');
         let hit;
         while((hit=re.exec(raw))) out.push({tag,raw:String(hit[1]||'')});
@@ -6826,7 +7395,10 @@ function timelineDaypartLocalV01118(mins){
     return '深夜';
 }
 function displayTimelineTimeLocalV0119(e) {
-    const raw=ensureWeekdayTimelineTimeLocalV0119(e?.time,e?.date)||String(e?.time||'');
+    // Defensive rendering: even before an upgraded memory has been persisted,
+    // never show an unsupported recap minute as if it were canonical.
+    const safe=safeTimelineTimeInfoV01131(e);
+    const raw=ensureWeekdayTimelineTimeLocalV0119(safe.time,e?.date)||String(safe.time||'');
     if(!raw) return '';
     // v0.11.18: variable-state minute precision is useful for ordering, but noisy in
     // long-term memory UI. Keep exact source/preset times; show only a natural daypart
@@ -6846,32 +7418,45 @@ function displayTimelineTimeLocalV0119(e) {
 function sourceTemporalMetaLocalV0117(indexes,mem=M()){
     const chat=C().chat||[];
     const sorted=[...new Set(indexes||[])].sort((a,b)=>b-a);
-    const out={date:null,time:null,location:null,kind:null,reason:null,reality_axis:false,date_reality:false,time_reality:false};
+    const out={
+        date:null,time:null,location:null,kind:null,reason:null,
+        reality_axis:false,date_reality:false,time_reality:false,
+        reality_date:null,reality_time:null,reality_index:null
+    };
     const wm=exactWorldStateMetaSameSourceV0117(sorted);
-    if(wm.date){ out.date=wm.date; out.date_reality=!!wm.date_reality; }
-    if(wm.time){
+    if(wm.date_reality&&wm.date) out.reality_date=wm.date;
+    if(wm.time_reality&&wm.time) out.reality_time=wm.time;
+    if(out.reality_date||out.reality_time) out.reality_index=wm.index;
+    out.reality_axis=!!wm.reality_axis;
+
+    // v0.11.30: the preset's same-source story summary describes the active
+    // scene clock.  Prefer it for timeline.date/time; keep /world/reality-time
+    // separately instead of letting it overwrite a dated scenario.
+    for(const i of sorted){
+        const m=chat[i];
+        if(!m||m.is_user) continue;
+        const prev=(i>0&&chat[i-1]?.is_user)?chat[i-1]:null;
+        const recs=narrativeSummaryRecordsV01130(m,prev,mem);
+        if(!recs.length) continue;
+        const rec=recs[recs.length-1];
+        if(!out.date&&rec.date){
+            out.date=rec.date;
+            out.kind='preset_summary';
+            out.reason=`同 source #${i} 的 <${rec.tag}> 场景日期`;
+        }
+        if(!out.time&&rec.time){ out.time=rec.time; out.kind='preset_summary'; out.reason=`同 source #${i} 的 <${rec.tag}> 时间`; }
+        if(!out.location&&rec.location) out.location=rec.location;
+        if(out.date&&out.time&&out.location) break;
+    }
+
+    if(!out.date&&wm.date){ out.date=wm.date; out.date_reality=!!wm.date_reality; }
+    if(!out.time&&wm.time){
         out.time=wm.time;
         out.time_reality=!!wm.time_reality;
         out.kind=wm.time_reality||wm.date_reality?'world_reality_meta':'world_meta';
         out.reason=`同 source #${wm.index} 的 ${wm.time_path||wm.date_path||'/世界/当前时间'}`;
     }
-    if(wm.location) out.location=wm.location;
-    out.reality_axis=!!wm.reality_axis;
-
-    if(!out.time||!out.date||!out.location){
-        for(const i of sorted){
-            const m=chat[i];
-            if(!m||m.is_user) continue;
-            const prev=(i>0&&chat[i-1]?.is_user)?chat[i-1]:null;
-            const recs=structuredSummaryRecordsLocalV0119(m,prev,mem);
-            if(!recs.length) continue;
-            const rec=recs[recs.length-1];
-            if(!out.date&&rec.date) out.date=rec.date;
-            if(!out.time&&rec.time){ out.time=rec.time; out.kind='preset_summary'; out.reason=`同 source #${i} 的 <${rec.tag}> 时间`; }
-            if(!out.location&&rec.location) out.location=rec.location;
-            if(out.date&&out.time&&out.location) break;
-        }
-    }
+    if(!out.location&&wm.location) out.location=wm.location;
     if(!out.time){
         const t=localTimeSameMessagesV0114(sorted);
         if(t){ out.time=t; out.kind='raw_source'; out.reason='同 source 原文中的时间'; }
@@ -6924,7 +7509,12 @@ function reconcileTemporalLocalV0117({currentDate=null,previousTime=null,candida
         else{
             const diff=dateDiffDaysLocalV0114(cur,cand);
             if(diff!=null && diff<0){
-                date=cur; notes.push(`拒绝倒退日期 ${cand}`);
+                if(auth==='structured_summary'){
+                    date=cand;
+                    notes.push(`按同 source 权威时间进入新场景日历 ${cand}`);
+                }else{
+                    date=cur; notes.push(`拒绝无场景标记的倒退日期 ${cand}`);
+                }
             }else if(diff===0){
                 date=cur;
             }else if(auth==='world_reality_meta' && diff!=null && diff>0){
@@ -7094,25 +7684,38 @@ function makeLocalTimelineNodesV0117(start,endInclusive,mem=M()){
         const rawTime=localTimeSameMessagesV0114(indexes);
         const rawDate=explicitDateSameMessagesV0114(indexes);
         const rawLoc=localLocationSameMessagesV0114(indexes);
-        const records=structuredSummaryRecordsLocalV0119(assistantMsg,userMsg,mem);
+        const records=narrativeSummaryRecordsV01130(assistantMsg,userMsg,mem);
         const userName=String(userMsg?.name||'').trim();
 
         if(records.length){
             let acceptedRecord=false;
             for(const rec of records){
-                const candidateDate=world.date_reality ? world.date : (rec.date||world.date||rawDate||null);
-                const candidateTime=rec.time||world.time||rawTime||null;
-                const authority=world.date_reality?'world_reality_meta':(rec.date?'structured_summary':(world.date?'world_meta':'raw'));
+                // v0.11.30: <abstract>/<plot> time is the event's narrative
+                // calendar.  /world/reality-time is retained as a parallel clock
+                // and only becomes the visible event date when no scene date was
+                // emitted by the preset.
+                const candidateDate=rec.date||world.date||rawDate||null;
+                const candidateTimeRaw=rec.time||world.time||rawTime||null;
+                const candidateTime=safeTimelineTimeInfoV01131({
+                    date:candidateDate,time:candidateTimeRaw,source,
+                    reality_date:world.date_reality?world.date:null,
+                    calendar_axis:(rec.date&&world.date_reality&&world.date&&rec.date!==world.date)?'scene':null
+                }).time;
+                const authority=rec.date?'structured_summary':(world.date?(world.date_reality?'world_reality_meta':'world_meta'):'raw');
                 const tr=reconcileTemporalLocalV0117({currentDate,previousTime,candidateDate,candidateTime,combined:`${combined}\n${rec.event||''}`,authority});
                 if(tr.date) currentDate=tr.date;
                 if(tr.time) previousTime=tr.time;
                 const eventText=rec.__direct_preset_plot_v0119 ? cleanupPresetPlotLocalV0119(rec.event,280) : compressEventLocalV0117(rec.event,userName,170);
                 const node={date:tr.date||null,time:ensureWeekdayTimelineTimeLocalV0119(tr.time,tr.date),event:eventText,source,__local_kind_v0119:rec.__direct_preset_plot_v0119?'preset_plot':'structured'};
                 const loc=rec.location||world.location||rawLoc; if(loc) node.location=loc;
+                if(world.date_reality&&world.date) node.reality_date=world.date;
+                if(world.time_reality&&world.time) node.reality_time=world.time;
+                if(node.reality_date&&node.reality_date!==node.date) node.calendar_axis='scene';
                 if(tr.corrected){ node.time_evidence='structured'; node.time_evidence_label='连续性校准时间'; node.time_evidence_reason=tr.reason; }
                 else if(rec.time){ node.time_evidence='structured'; node.time_evidence_label='预设摘要时间'; node.time_evidence_reason=`来自本批 source 的 <${rec.tag}> 结构化记录${rec.record_no?` #${rec.record_no}`:''}`; }
-                else if(world.time){ node.time_evidence='structured'; node.time_evidence_label=world.time_reality?'现实主时间轴':'变量状态时间'; node.time_evidence_reason=`同 source #${world.index} 的 ${world.time_path||'/世界/当前时间'}`; }
+                else if(world.time){ node.time_evidence='structured'; node.time_evidence_label=world.time_reality?'MVU现实时间':'变量状态时间'; node.time_evidence_reason=`同 source #${world.index} 的 ${world.time_path||'/世界/当前时间'}`; }
                 else { const te=classifySourceTimeEvidence(node); node.time_evidence=te.level; node.time_evidence_label=te.label; node.time_evidence_reason=te.reason; }
+                applyTimelineTimePrecisionV01131(node);
                 if(node.event){
                     nodes.push(node);
                     acceptedRecord=true;
@@ -7126,7 +7729,11 @@ function makeLocalTimelineNodesV0117(start,endInclusive,mem=M()){
             }
         }else{
             const candidateDate=world.date||rawDate||null;
-            const candidateTime=world.time||rawTime||null;
+            const candidateTimeRaw=world.time||rawTime||null;
+            const candidateTime=safeTimelineTimeInfoV01131({
+                date:candidateDate,time:candidateTimeRaw,source,
+                reality_date:world.date_reality?world.date:null
+            }).time;
             const authority=world.date?(world.date_reality?'world_reality_meta':'world_meta'):'raw';
             const tr=reconcileTemporalLocalV0117({currentDate,previousTime,candidateDate,candidateTime,combined,authority});
             if(tr.date) currentDate=tr.date;
@@ -7135,9 +7742,12 @@ function makeLocalTimelineNodesV0117(start,endInclusive,mem=M()){
             if(event){
                 const node={date:tr.date||null,time:ensureWeekdayTimelineTimeLocalV0119(tr.time,tr.date),event,source,__local_kind_v0115:'fallback'};
                 const loc=world.location||rawLoc; if(loc) node.location=loc;
+                if(world.date_reality&&world.date) node.reality_date=world.date;
+                if(world.time_reality&&world.time) node.reality_time=world.time;
                 if(tr.corrected){ node.time_evidence='structured'; node.time_evidence_label='连续性校准时间'; node.time_evidence_reason=tr.reason; }
-                else if(world.time){ node.time_evidence='structured'; node.time_evidence_label=world.time_reality?'现实主时间轴':'变量状态时间'; node.time_evidence_reason=`同 source #${world.index} 的 ${world.time_path||'/世界/当前时间'}`; }
+                else if(world.time){ node.time_evidence='structured'; node.time_evidence_label=world.time_reality?'MVU现实时间':'变量状态时间'; node.time_evidence_reason=`同 source #${world.index} 的 ${world.time_path||'/世界/当前时间'}`; }
                 else { const te=classifySourceTimeEvidence(node); node.time_evidence=te.level; node.time_evidence_label=te.label; node.time_evidence_reason=te.reason; }
+                applyTimelineTimePrecisionV01131(node);
                 nodes.push(node); triage.factualFallbackNodes++; for(const q of indexes) triage.reliable.push(q);
             }else{
                 // Do not create a visible blank/placeholder event. This pair is
@@ -7165,6 +7775,10 @@ function repairExistingTimelineTemporalV0117(mem,start=0,endInclusive=null){
     const rows=Array.isArray(mem?.timeline)?mem.timeline:[];
     const chat=C().chat||[];
     const maxEnd=Number.isInteger(endInclusive)?endInclusive:Math.max(0,chat.length-1);
+    // Remove unsupported minute precision before any continuity calculation;
+    // otherwise a recap guess such as 15:00 could create false clock rollback
+    // or midnight-rollover decisions.
+    const precision=repairTimelinePrecisionV01131(mem,maxEnd,{audit:false});
     const ordered=rows.map((e,pos)=>({e,pos,first:sourceFirst(e?.source)})).filter(x=>x.first>=0).sort((a,b)=>a.first-b.first||a.pos-b.pos);
     let currentDate=priorReliableDateV0114(mem,start);
     let previousTime=null;
@@ -7212,13 +7826,17 @@ function repairExistingTimelineTemporalV0117(mem,start=0,endInclusive=null){
         if((isMissingStoryValueV0112(e?.location))&&meta.location){ e.location=meta.location; locationFixed++; }
         if(tr.time){
             if(tr.corrected){ e.time_evidence='structured'; e.time_evidence_label='连续性校准时间'; e.time_evidence_reason=tr.reason; }
-            else if(meta.kind==='world_meta'||meta.kind==='world_reality_meta'){ e.time_evidence='structured'; e.time_evidence_label=meta.kind==='world_reality_meta'?'现实主时间轴':'变量状态时间'; e.time_evidence_reason=meta.reason||'同 source 世界状态时间'; }
+            else if(meta.kind==='world_meta'||meta.kind==='world_reality_meta'){ e.time_evidence='structured'; e.time_evidence_label=meta.kind==='world_reality_meta'?'MVU现实时间':'变量状态时间'; e.time_evidence_reason=meta.reason||'同 source 世界状态时间'; }
             else if(meta.kind==='preset_summary'){ e.time_evidence='structured'; e.time_evidence_label='预设摘要时间'; e.time_evidence_reason=meta.reason||'同 source 预设摘要时间'; }
         }
         if(tr.date) currentDate=tr.date;
         if(tr.time) previousTime=tr.time;
     }
-    return {scanned,timeFixed,dateFixed,locationFixed,weekdayFixed,regressionBlocked,start,endInclusive:maxEnd};
+    return {
+        scanned,timeFixed,dateFixed,locationFixed,weekdayFixed,regressionBlocked,
+        precision_changed:precision.changed,precision_downgraded:precision.downgraded,
+        start,endInclusive:maxEnd
+    };
 }
 
 function timelineEntryFullyInsideRangeV0115(e,start,endInclusive){
@@ -7785,9 +8403,13 @@ function persistedLocalTimelineNodeV01129(node) {
         generation_mode:'local_zero_api'
     };
     if(node?.location) out.location=String(node.location).trim();
-    for(const key of ['time_evidence','time_evidence_label','time_evidence_reason']){
+    for(const key of [
+        'time_evidence','time_evidence_label','time_evidence_reason',
+        'reality_date','reality_time','calendar_axis'
+    ]){
         if(node?.[key]!=null&&String(node[key]).trim()) out[key]=String(node[key]).trim();
     }
+    if(Number.isInteger(Number(node?.calendar_segment))) out.calendar_segment=Number(node.calendar_segment);
     return out;
 }
 
@@ -7815,11 +8437,13 @@ async function summarizeRangeLocalV01129(start,end,options={}) {
         mem.last_processed_index=endInclusive;
 
         const temporalRepair=repairExistingTimelineTemporalV0117(mem,start,endInclusive);
+        const narrativeCalendar=repairNarrativeCalendarV01130(mem,endInclusive);
         const dateSync=syncCurrentDateFromTimeline(mem,null);
         const currentStateSync=syncCurrentStoryStateFromLatestMetaV0116(mem,endInclusive);
-        const currentResolver=resolveCurrentStoryStateV01121(mem);
+        const currentResolver=resolveCurrentNarrativeStateV01130(mem,endInclusive);
         const unified=unifiedPostProcessV01114(mem,{range:[start,endInclusive],audit:false});
-        const secondaryCalendar=repairSecondaryCalendarLeakV01129(mem,endInclusive);
+        const narrativeCalendarFinal=repairNarrativeCalendarV01130(mem,endInclusive);
+        const currentResolverFinal=resolveCurrentNarrativeStateV01130(mem,endInclusive);
         const locationRepair=restoreMissingCurrentLocationV01129(mem,endInclusive);
 
         mem.audit=Array.isArray(mem.audit)?mem.audit:[];
@@ -7839,9 +8463,9 @@ async function summarizeRangeLocalV01129(start,end,options={}) {
             temporal_repair:temporalRepair,
             date_sync:dateSync,
             current_state_sync:currentStateSync,
-            current_resolver_changed:!!currentResolver?.changed,
+            current_resolver_changed:!!(currentResolver?.changed||currentResolverFinal?.changed),
             unified_changed:!!unified?.changed,
-            secondary_calendar:secondaryCalendar,
+            narrative_calendar:narrativeCalendarFinal?.changed?narrativeCalendarFinal:narrativeCalendar,
             location_repair:locationRepair
         });
         mem.audit.push({
@@ -8044,7 +8668,7 @@ function stat() {
 function panelHTML() {
     return `<div id="${PANEL_ID}" class="smm2-hidden">
       <div class="smm2-card">
-        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.29</span></div><button id="smm2_close">×</button></div>
+        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.31</span></div><button id="smm2_close">×</button></div>
         <div id="smm2_stats" class="smm2-stats"></div>
         <div class="smm2-grid">
           <button id="smm2_new">总结新增</button>
@@ -8205,9 +8829,17 @@ function chronologicalCopy(items) {
             const sortKey = p
                 ? Date.UTC(p.y, p.m - 1, p.d, Math.floor(p.minutes/60), p.minutes%60)
                 : Number.MAX_SAFE_INTEGER;
-            return { item, index, known: !!p, sortKey };
+            const sourceKey=sourceFirst(item?.source);
+            return { item, index, known: !!p, sortKey, sourceKey };
         })
         .sort((a,b) => {
+            // v0.11.30: narrative chronology follows source order across dated
+            // scenario/calendar switches.  Fall back to ISO time only for old
+            // rows that have no usable source.
+            const as=Number.isFinite(a.sourceKey)&&a.sourceKey!==Number.MAX_SAFE_INTEGER;
+            const bs=Number.isFinite(b.sourceKey)&&b.sourceKey!==Number.MAX_SAFE_INTEGER;
+            if(as&&bs&&a.sourceKey!==b.sourceKey) return a.sourceKey-b.sourceKey;
+            if(as!==bs) return as?-1:1;
             if (a.known && b.known) return a.sortKey - b.sortKey || a.index - b.index;
             if (a.known !== b.known) return a.known ? -1 : 1;
             return a.index - b.index;
@@ -8218,21 +8850,22 @@ function chronologicalCopy(items) {
 function groupTimelineByDay(items) {
     const sorted = chronologicalCopy((items||[]).filter(x=>!x?.__coverage_only_v01110));
     const groups = [];
-    const byKey = new Map();
 
     for (const item of sorted) {
         const p = storyDateParts(item);
         const key = p?.key || '__unknown__';
-        if (!byKey.has(key)) {
-            const g = {
+        const segment=Number(item?.calendar_segment||0);
+        let g=groups.at(-1);
+        if (!g || g.key!==key || g.segment!==segment) {
+            g = {
                 key,
                 label: p?.label || '日期未确定',
+                segment,
                 items: []
             };
-            byKey.set(key, g);
             groups.push(g);
         }
-        byKey.get(key).items.push(item);
+        g.items.push(item);
     }
     return groups;
 }
@@ -9202,23 +9835,28 @@ function bindHistoryBrowserV4() {
 }
 
 function legacyDaysGrouped(mem=M()) {
-    // 查看模式不得修改真实记忆。过去这里直接 calibrateTimeline(mem)
-    // 会在“仅仅打开时间线”时重新写入日期/合并事件。
+    // 查看模式不得修改或重新校准真实记忆。v0.11.30 also keeps
+    // sequential calendar segments in source order (2026 opening -> 2003
+    // scenario), rather than lexicographically sorting 2003 before 2026.
     const view = JSON.parse(JSON.stringify(mem || {}));
-    calibrateTimeline(view, {allowCrossMidnight:false});
-    const groups = new Map();
-    for (const e of (view.timeline || [])) {
-        const d = isoDateFromAny(e.date) || isoDateFromAny(`${e.date||''} ${e.time||''}`) || '日期未定';
-        if (!groups.has(d)) groups.set(d, []);
-        groups.get(d).push(e);
-    }
-    const keys=[...groups.keys()].sort((a,b)=>{
-        if(a==='日期未定') return 1;
-        if(b==='日期未定') return -1;
-        return a.localeCompare(b);
+    const ordered=(view.timeline||[]).sort((a,b)=>{
+        const sa=sourceFirst(a?.source),sb=sourceFirst(b?.source);
+        if(sa!==sb) return sa-sb;
+        return sourceLast(a?.source)-sourceLast(b?.source);
     });
-    return keys.map(date=>{
-        const events=groups.get(date).sort((a,b)=>{
+    const groups=[];
+    for (const e of ordered) {
+        const d = isoDateFromAny(e.date) || isoDateFromAny(`${e.date||''} ${e.time||''}`) || '日期未定';
+        const segment=Number(e?.calendar_segment||0);
+        let group=groups.at(-1);
+        if(!group||group.date!==d||group.segment!==segment){
+            group={date:d,segment,events:[]};
+            groups.push(group);
+        }
+        group.events.push(e);
+    }
+    return groups.map(group=>{
+        const events=group.events.sort((a,b)=>{
             const sa=sourceFirst(a.source), sb=sourceFirst(b.source);
             const aHasSource=sa!==Number.MAX_SAFE_INTEGER, bHasSource=sb!==Number.MAX_SAFE_INTEGER;
             if(aHasSource && bHasSource && sa!==sb) return sa-sb;
@@ -9231,7 +9869,7 @@ function legacyDaysGrouped(mem=M()) {
             if(ca==null && cb!=null) return 1;
             return 0;
         });
-        return {date,events};
+        return {date:group.date,segment:group.segment,events};
     });
 }
 
@@ -9384,8 +10022,9 @@ function legacyReadableHTML(mem=M()) {
           <div><b>查看模式：</b>${esc(viewLabel)}</div>
           <div><b>已重建：</b>${processed}/${total} 条</div>
           <div><b>剧情起点：</b>${esc(mem.story_start||'未建立')}</div>
-          <div><b>当前绝对日期：</b>${esc(date)}</div>
+          <div><b>当前剧情日期：</b>${esc(date)}</div>
           <div><b>显示时间：</b>${esc(mem.current_story_time||'未建立')}</div>
+          ${(mem.current_reality_date||mem.current_reality_time)?`<div><b>MVU现实时间轴：</b>${esc([mem.current_reality_date,mem.current_reality_time].filter(Boolean).join(' '))}</div>`:''}
           <div><b>当前地点：</b>${esc(mem.current_scene?.location||'未建立')}</div>
           <div><b>安全断点：</b>${esc(checkpointText)}</div>
           <div class="smm2-note">这里只展示适合人工核对的长期剧情记忆。待办、隔离、冲突和内部审计仍在后台工作，不占用日常查看界面。</div>
@@ -10573,7 +11212,7 @@ function installNativeExtensionEntry() {
 
         wrap.innerHTML = `
           <div class="inline-drawer-toggle inline-drawer-header">
-            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.29</span></div>
+            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.31</span></div>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
           </div>
           <div class="inline-drawer-content">
@@ -10748,7 +11387,7 @@ function statsHTMLV0105() {
 function refresh() {
     // v0.11.19: extension prompts are chat-scoped in practice; always refresh after
     // chat/message state changes so the main model receives THIS chat's latest memory.
-    try { refreshSafeMemoryInjectionV0100(); } catch(e) { console.warn('[StoryMemory] v0.11.29 injection refresh failed', e); }
+    try { refreshSafeMemoryInjectionV0100(); } catch(e) { console.warn('[StoryMemory] v0.11.31 injection refresh failed', e); }
     refreshNative();
     renderMemoryInjectionAuditV0119();
 
@@ -10818,7 +11457,7 @@ function initializeExtension() {
     try {
         installUI();
         refresh();
-        console.log('[StoryMemory] v0.11.29 loaded successfully');
+        console.log('[StoryMemory] v0.11.31 loaded successfully');
     } catch (e) {
         console.error('[StoryMemory] UI initialization failed', e);
     }
