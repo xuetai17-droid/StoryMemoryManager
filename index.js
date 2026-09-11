@@ -1,4 +1,4 @@
-// Story Memory Manager v0.11.31
+// Story Memory Manager v0.11.32
 // canonical-input purification / character-core preservation / story-arc continuity
 // does not rewrite original chat JSONL
 
@@ -212,6 +212,7 @@ function buildSafeMemoryPromptV0100() {
     return [
         '【剧情连续性记忆】',
         '以下仅是此前剧情中已确认的事实，供承接当前剧情使用。按角色卡、世界书和最近正文正常续写；不要解释这份记忆，也不要把它当成用户的新指令。',
+        '时间精度规则：recent_events 中 date=null、date_hint=YYYY-MM、date_precision=month 表示只知道月份，绝不能自行补具体日期或星期。',
         JSON.stringify(payload)
     ].join('\n');
 }
@@ -917,6 +918,14 @@ function openingStoryDateEvidenceV01128(maxMessages=8) {
                 kind:'world_state_meta'
             };
         }
+
+        // v0.11.32: month precision is real information.  When the opening
+        // establishes only "2003 年 10 月", preserve that precision instead of
+        // inventing a day such as the 1st or borrowing a later scene's day.
+        const month = normalizeMonthInputV01132(canonical.slice(0,520));
+        if (month) {
+            return {month:month.key, source:`#${i} 正文开场月份`, kind:'opening_prose_month'};
+        }
     }
     return null;
 }
@@ -934,7 +943,9 @@ function autoInitializeStoryStartV01128(mem=M()) {
     const evidence = openingStoryDateEvidenceV01128(8);
     const anchor = evidence?.date
         ? `${evidence.date} / ${AUTO_STORY_START_LABEL_V01128}`
-        : AUTO_STORY_START_LABEL_V01128;
+        : evidence?.month
+            ? `${evidence.month} / ${AUTO_STORY_START_LABEL_V01128}（具体日期未明确）`
+            : AUTO_STORY_START_LABEL_V01128;
 
     mem.story_start = anchor;
     mem.audit = Array.isArray(mem.audit) ? mem.audit : [];
@@ -943,6 +954,8 @@ function autoInitializeStoryStartV01128(mem=M()) {
         type:'story_start_auto_initialized_v01128',
         anchor,
         date:evidence?.date || null,
+        month:evidence?.month || null,
+        date_precision:evidence?.date ? 'day' : (evidence?.month ? 'month' : 'unknown'),
         source:evidence?.source || 'opening_without_absolute_date',
         evidence_kind:evidence?.kind || 'undated_opening'
     });
@@ -5167,6 +5180,7 @@ ${messagesText(start, end)}
 - 【已有可靠记忆】中的 story_start 是插件按当前聊天单独建立的硬锚点，必须原样返回。
 - 禁止把当前批次日期、最近日期、副本第几天或模型推测日期改写成新的 story_start。
 - story_start 为“本聊天剧情正式起点”且未带日期时，表示开场没有可靠绝对日期；不得为了补全字段自行添加日期。
+- story_start 形如“2003-10 / 本聊天剧情正式起点（具体日期未明确）”时，只确认到月份；禁止补成 2003-10-01、2003-10-15 或任何具体日期。
 
 【source 强制规则】
 1. timeline 中每一条事件的 source 必须直接引用“新增原始聊天”中的真实 #消息编号。
@@ -5181,6 +5195,7 @@ ${messagesText(start, end)}
 10. current_story_date/current_story_time 必须依据新增原始聊天与可靠连续性推进，不得依据旧总结的日期直接推进。
 【结构化记忆规范】
 - 必须单独输出 current_story_date，格式严格为 YYYY-MM-DD；这是机器计算使用的绝对剧情日期。
+- 旧 timeline 若出现 date=null、date_hint=YYYY-MM、date_precision=month，表示该事件只确认到月份。不得借用后续事件的具体日补写它；新输出的 date 应保持 null。
 - current_story_time 保存当前正在演出的场景钟点，可以保留“秋季学期 周X HH:MM”作为显示时间，但不能代替 current_story_date。
 - 时间线必须尽量给出具体 YYYY-MM-DD；“秋季学期/周五/上午”只能作为附加描述，不能替代日期。
 - 双时间轴中，timeline.date 属于当前剧情场景；若场景只有“副本第N天”而没有完整日历，可在 time 中保留该标签但不得推算日期。/世界/现实时间由插件作为 parallel reality clock 单独保存。
@@ -6904,9 +6919,12 @@ function repairNarrativeCalendarV01130(mem=M(),endInclusive=null) {
     if(!timeline.length) return {found:false,changed:false,rows_fixed:0};
 
     const fingerprint=JSON.stringify([
-        cap,timeline.map(e=>[e?.source||null,e?.date||null,e?.time||null])
+        cap,mem?.story_start||null,timeline.map(e=>[
+            e?.source||null,e?.date||null,e?.date_hint||null,
+            e?.date_precision||null,e?.time||null
+        ])
     ]);
-    if(mem?.narrative_calendar_v01130?.version==='0.11.31'&&mem?.narrative_calendar_v01130?.input_fingerprint===fingerprint){
+    if(mem?.narrative_calendar_v01130?.version==='0.11.32'&&mem?.narrative_calendar_v01130?.input_fingerprint===fingerprint){
         return {found:true,changed:false,rows_fixed:0,cached:true};
     }
 
@@ -6914,13 +6932,15 @@ function repairNarrativeCalendarV01130(mem=M(),endInclusive=null) {
         .filter(x=>x.first>=0&&x.first<=cap)
         .sort((a,b)=>(a.first-b.first)||(a.last-b.last)||(a.pos-b.pos));
     const priorRun=mem?.narrative_calendar_v01130;
-    const fullUpgrade=priorRun?.version!=='0.11.31'||!Number.isInteger(priorRun?.processed_to)||Number(priorRun.processed_to)>cap;
+    const fullUpgrade=priorRun?.version!=='0.11.32'||!Number.isInteger(priorRun?.processed_to)||Number(priorRun.processed_to)>cap;
     const scanFrom=fullUpgrade?0:Math.max(0,Number(priorRun.processed_to)-6);
     const rows=allRows.filter(x=>x.last>=scanFrom);
     const earlier=allRows.filter(x=>x.last<scanFrom);
     let changed=false,rowsFixed=0,timeFixed=0,realityStored=0,timePrecisionDowngraded=0;
     let segments=earlier.reduce((n,x)=>Math.max(n,Number(x.e?.calendar_segment||0)),0);
     let directCount=0;
+    const storyStartInfo=storyStartDescriptorV01132(mem?.story_start);
+    const storyStartMonth=storyStartInfo.precision==='month'?storyStartInfo.month:null;
     let rollingDate=normalizeDateInput(earlier.at(-1)?.e?.date||'')?.iso||isoDateFromAny(mem?.story_start)||null;
     let previousDirectDate=rollingDate;
 
@@ -6939,6 +6959,15 @@ function repairNarrativeCalendarV01130(mem=M(),endInclusive=null) {
                 previousDirectDate=date;
                 rollingDate=date;
                 if(normalizeDateInput(row.e.date||'')?.iso!==date){row.e.date=date;changed=true;rowsFixed++;}
+                if(clearTimelineMonthPrecisionV01132(row.e)) changed=true;
+                const directDateReason=`同 source 的${p.kind==='preset_summary'?'预设剧情摘要':'正文/状态'}明确给出完整日期`;
+                for(const [key,value] of [
+                    ['date_evidence','explicit'],
+                    ['date_evidence_label','原文明确日期'],
+                    ['date_evidence_reason',directDateReason]
+                ]){
+                    if(row.e[key]!==value){row.e[key]=value;changed=true;}
+                }
                 if(Number(row.e.calendar_segment??-1)!==segments){row.e.calendar_segment=segments;changed=true;}
                 const axisLabel=(evidence.reality_date&&evidence.reality_date!==date)?'scene':'narrative';
                 if(row.e.calendar_axis!==axisLabel){row.e.calendar_axis=axisLabel;changed=true;}
@@ -6994,13 +7023,28 @@ function repairNarrativeCalendarV01130(mem=M(),endInclusive=null) {
             previousDirect=row;
             continue;
         }
+
+        // A month-only opening remains month-only until the first independently
+        // dated source.  This is the normal representation for a story known to
+        // start in October 2003 when its exact opening day was never stated.
+        if(!rollingDate&&storyStartMonth){
+            if(setTimelineMonthPrecisionV01132(row.e,storyStartMonth,{
+                evidence:'story_start_month',
+                label:'剧情起点月份',
+                reason:'剧情起点只确认到月份；等待后续原文建立具体日期'
+            })){
+                changed=true;rowsFixed++;
+            }
+            continue;
+        }
         if(!rollingDate) continue;
 
         // A source-only row can sit just before the first dated reply of a new
         // calendar segment. Keeping the previous (for example 2026) date would
         // be a false assertion. When it is decisively closer to the following
-        // direct scene anchor, attach it to that scene as a contextual date;
-        // an exact clock is still forbidden unless independently verified.
+        // direct scene anchor, attach it only to that scene's MONTH.  Borrowing
+        // the later anchor's exact day would fabricate precision for the older
+        // row; an exact clock is likewise forbidden unless independently verified.
         const following=nextDirectByPosition[pos];
         const followingDate=normalizeDateInput(following?.e?.date||'')?.iso||null;
         const followingSegment=Number(following?.e?.calendar_segment||0);
@@ -7008,19 +7052,17 @@ function repairNarrativeCalendarV01130(mem=M(),endInclusive=null) {
             const previousDistance=Math.max(0,row.first-previousDirect.last);
             const followingDistance=Math.max(0,following.first-row.last);
             if(followingDistance+2<previousDistance){
-                const old=normalizeDateInput(row.e.date||'')?.iso||null;
-                if(old!==followingDate){row.e.date=followingDate;changed=true;rowsFixed++;}
+                const followingMonth=followingDate.slice(0,7);
+                if(setTimelineMonthPrecisionV01132(row.e,followingMonth,{
+                    evidence:'contextual_month',
+                    label:'邻近场景月份',
+                    reason:`source 更接近后续明确场景 #${following.first}；仅继承场景月份，具体日期未明确`
+                })){
+                    changed=true;rowsFixed++;
+                }
                 if(Number(row.e.calendar_segment??-1)!==followingSegment){row.e.calendar_segment=followingSegment;changed=true;}
                 const nextAxis=following.e.calendar_axis||'scene';
-                const nextReason=`source 更接近后续明确场景 #${following.first}；仅继承场景日期，不推算具体钟点`;
-                for(const [key,value] of [
-                    ['calendar_axis',nextAxis],
-                    ['date_evidence','contextual'],
-                    ['date_evidence_label','邻近场景日期'],
-                    ['date_evidence_reason',nextReason]
-                ]){
-                    if(row.e[key]!==value){row.e[key]=value;changed=true;}
-                }
+                if(row.e.calendar_axis!==nextAxis){row.e.calendar_axis=nextAxis;changed=true;}
                 continue;
             }
         }
@@ -7035,7 +7077,7 @@ function repairNarrativeCalendarV01130(mem=M(),endInclusive=null) {
         }
     }
 
-    // v0.11.31: sanitize every referenced historical row, including rows that
+    // v0.11.32: sanitize every referenced historical row, including rows that
     // have no old preset summary. Exact recap guesses are reduced to a broad
     // daypart (or unknown) and therefore cannot drive later clock continuity.
     const precision=repairTimelinePrecisionV01131(mem,cap,{audit:false});
@@ -7048,10 +7090,13 @@ function repairNarrativeCalendarV01130(mem=M(),endInclusive=null) {
     if(reality.latestTime&&mem.current_reality_time!==reality.latestTime){mem.current_reality_time=reality.latestTime;changed=true;}
 
     const finalFingerprint=JSON.stringify([
-        cap,timeline.map(e=>[e?.source||null,e?.date||null,e?.time||null])
+        cap,mem?.story_start||null,timeline.map(e=>[
+            e?.source||null,e?.date||null,e?.date_hint||null,
+            e?.date_precision||null,e?.time||null
+        ])
     ]);
     mem.narrative_calendar_v01130={
-        version:'0.11.31',at:new Date().toISOString(),input_fingerprint:finalFingerprint,
+        version:'0.11.32',at:new Date().toISOString(),input_fingerprint:finalFingerprint,
         processed_to:cap,scan_from:scanFrom,
         direct_anchors:directCount,rows_fixed:rowsFixed,time_fixed:timeFixed,
         time_precision_changed:precision.changed,time_precision_downgraded:precisionDowngraded,
@@ -7060,16 +7105,16 @@ function repairNarrativeCalendarV01130(mem=M(),endInclusive=null) {
     if(changed){
         mem.audit=Array.isArray(mem.audit)?mem.audit:[];
         mem.audit.push({
-            at:new Date().toISOString(),type:'narrative_calendar_repaired_v01131',
+            at:new Date().toISOString(),type:'narrative_calendar_repaired_v01132',
             direct_anchors:directCount,rows_fixed:rowsFixed,time_fixed:timeFixed,
             time_precision_changed:precision.changed,time_precision_downgraded:precisionDowngraded,
             calendar_segments:segments+1,
-            reason:'剧情时间线按 source 顺序采用场景日历；MVU 现实钟另存；无原文依据的精确分钟降级为低精度时段'
+            reason:'剧情时间线按 source 顺序采用场景日历；月份已知但日期未知时保留月级精度；无原文依据的精确分钟降级为低精度时段'
         });
         if(mem.audit.length>50) mem.audit=mem.audit.slice(-50);
     }
     return {
-        found:directCount>0,changed,rows_fixed:rowsFixed,time_fixed:timeFixed,
+        found:directCount>0||!!storyStartMonth,changed,rows_fixed:rowsFixed,time_fixed:timeFixed,
         time_precision_changed:precision.changed,time_precision_downgraded:precisionDowngraded,
         direct_anchors:directCount,segments:segments+1
     };
@@ -7149,13 +7194,13 @@ function refreshCurrentStoryStateV01121({persist=true}={}) {
         if(narrativeCalendar.changed||locationRepair.changed) result.changed=true;
     }
     catch (e) {
-        console.warn('[StoryMemory] v0.11.31 current-state resolver failed', e);
+        console.warn('[StoryMemory] v0.11.32 current-state resolver failed', e);
         return {changed:false,error:String(e?.message||e)};
     }
     if (result.changed && persist && !CURRENT_STATE_SAVE_PENDING_V01121) {
         CURRENT_STATE_SAVE_PENDING_V01121 = true;
         Promise.resolve(saveMeta())
-            .catch(e=>console.warn('[StoryMemory] v0.11.31 current-state save failed',e))
+            .catch(e=>console.warn('[StoryMemory] v0.11.32 current-state save failed',e))
             .finally(()=>{ CURRENT_STATE_SAVE_PENDING_V01121=false; });
     }
     return result;
@@ -8405,6 +8450,7 @@ function persistedLocalTimelineNodeV01129(node) {
     if(node?.location) out.location=String(node.location).trim();
     for(const key of [
         'time_evidence','time_evidence_label','time_evidence_reason',
+        'date_hint','date_precision','date_evidence','date_evidence_label','date_evidence_reason',
         'reality_date','reality_time','calendar_axis'
     ]){
         if(node?.[key]!=null&&String(node[key]).trim()) out[key]=String(node[key]).trim();
@@ -8668,7 +8714,7 @@ function stat() {
 function panelHTML() {
     return `<div id="${PANEL_ID}" class="smm2-hidden">
       <div class="smm2-card">
-        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.31</span></div><button id="smm2_close">×</button></div>
+        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.32</span></div><button id="smm2_close">×</button></div>
         <div id="smm2_stats" class="smm2-stats"></div>
         <div class="smm2-grid">
           <button id="smm2_new">总结新增</button>
@@ -8690,8 +8736,8 @@ function panelHTML() {
         </label>
         <label>每 <input id="smm2_trigger" type="number" min="1" max="50"> 条新消息总结一次</label>
         <label>每批最多 <input id="smm2_batch" type="number" min="4" max="60"> 条消息</label>
-        <label>剧情起点（首次总结自动建立，之后锁定）<input id="smm2_start" type="text" placeholder="无需填写；也可在首次总结前手动指定"></label>
-        <div class="smm2-note">记忆与剧情起点均按“聊天”隔离。首次总结会从开场正文或可靠现实时间变量自动识别；开场没有绝对日期时只标记“本聊天剧情正式起点”，不会编造日期。酒馆楼层时间不会作为剧情时间。</div>
+        <label>剧情起点（首次自动建立；识别错误可确认修正）<input id="smm2_start" type="text" placeholder="如 2003-10（具体日期未知）"></label>
+        <div class="smm2-note">只知道月份时填写 YYYY-MM，例如 2003-10；SMM 会显示“具体日期未明确”，不会补成某一天。修正只作用于当前聊天，不清空记忆、不重总结、不调用 API，也不修改原始 JSONL。</div>
       </div>
     </div>`;
 }
@@ -8708,6 +8754,110 @@ function normalizeDateInput(s) {
         iso: `${m[1]}-${String(m[2]).padStart(2,'0')}-${String(m[3]).padStart(2,'0')}`,
         cn: `${m[1]}年${Number(m[2])}月${Number(m[3])}日`
     };
+}
+
+// =========================================================
+// v0.11.32: partial calendar precision.
+// A known month is not an unknown date, but it is also not permission to invent
+// a day.  Store the month separately so all existing exact-date code remains
+// strict and cannot silently turn 2003-10 into 2003-10-01.
+// =========================================================
+const STORY_START_MONTH_LABEL_V01132 = '本聊天剧情正式起点（具体日期未明确）';
+
+function normalizeMonthInputV01132(value) {
+    const text=String(value||'').trim();
+    if(!text) return null;
+    const m=text.match(/(?:^|[^0-9])((?:18|19|20|21)\d{2})\s*(?:[-\/.年])\s*(\d{1,2})(?:\s*月)?(?=$|[^0-9])/);
+    if(!m) return null;
+    const month=Number(m[2]);
+    if(month<1||month>12) return null;
+    return {
+        y:Number(m[1]),m:month,
+        key:`${m[1]}-${String(month).padStart(2,'0')}`,
+        label:`${m[1]}年${month}月（具体日期未明确）`
+    };
+}
+
+function storyStartDescriptorV01132(value) {
+    const raw=String(value||'').trim();
+    if(!raw) return {raw,precision:'unknown',date:null,month:null};
+    const exact=isoDateFromAny(raw);
+    if(exact) return {raw,precision:'day',date:exact,month:exact.slice(0,7)};
+    const month=normalizeMonthInputV01132(raw);
+    if(month) return {raw,precision:'month',date:null,month:month.key,label:month.label};
+    return {raw,precision:'unknown',date:null,month:null};
+}
+
+function normalizeStoryStartValueV01132(value) {
+    const raw=String(value||'').trim();
+    if(!raw) return '';
+    const descriptor=storyStartDescriptorV01132(raw);
+    const tail=raw.match(/\s+\/\s+(.+)$/)?.[1]?.trim()||'';
+    if(descriptor.precision==='day'){
+        return `${descriptor.date} / ${tail||AUTO_STORY_START_LABEL_V01128}`;
+    }
+    if(descriptor.precision==='month'){
+        return `${descriptor.month} / ${tail||STORY_START_MONTH_LABEL_V01132}`;
+    }
+    return raw;
+}
+
+function timelineMonthHintV01132(item) {
+    const precision=String(item?.date_precision||'').trim().toLowerCase();
+    if(precision&&precision!=='month') return null;
+    return normalizeMonthInputV01132(item?.date_hint||'');
+}
+
+function timelineDateGroupV01132(item) {
+    const exact=normalizeDateInput(item?.date||'');
+    if(exact){
+        return {
+            precision:'day',key:exact.iso,label:exact.cn,
+            y:exact.y,m:exact.m,d:exact.d,minutes:parseClockMinutes(item?.time||'')
+        };
+    }
+    const month=timelineMonthHintV01132(item);
+    if(month){
+        return {
+            precision:'month',key:`__month__${month.key}`,label:month.label,
+            y:month.y,m:month.m,d:1,minutes:parseClockMinutes(item?.time||'')
+        };
+    }
+    const legacy=storyDateParts(item);
+    return legacy?{...legacy,precision:'day'}:null;
+}
+
+function stripUnverifiedWeekdayV01132(value) {
+    return String(value||'')
+        .replace(/(^|\s)周[日一二三四五六天](?=\s|$|[，,。；;])/g,'$1')
+        .replace(/\s{2,}/g,' ')
+        .trim();
+}
+
+function setTimelineMonthPrecisionV01132(item,monthValue,options={}) {
+    if(!item||typeof item!=='object') return false;
+    const month=normalizeMonthInputV01132(monthValue);
+    if(!month) return false;
+    let changed=false;
+    const set=(key,value)=>{if(item[key]!==value){item[key]=value;changed=true;}};
+    set('date',null);
+    set('date_hint',month.key);
+    set('date_precision','month');
+    set('date_evidence',options.evidence||'month_only');
+    set('date_evidence_label',options.label||'月份已知·日期未明确');
+    set('date_evidence_reason',options.reason||'只确认到月份；禁止推算具体日期');
+    const time=stripUnverifiedWeekdayV01132(item.time);
+    if(String(item.time||'').trim()!==time){item.time=time||null;changed=true;}
+    return changed;
+}
+
+function clearTimelineMonthPrecisionV01132(item) {
+    if(!item||typeof item!=='object') return false;
+    let changed=false;
+    for(const key of ['date_hint','date_precision']){
+        if(Object.hasOwn(item,key)){delete item[key];changed=true;}
+    }
+    return changed;
 }
 
 function replaceDateFormsInString(text, from, to) {
@@ -8733,6 +8883,139 @@ function deepReplaceDate(value, from, to) {
         return out;
     }
     return value;
+}
+
+function correctStoryStartV01132(mem=M(),proposedValue='') {
+    const before=String(mem?.story_start||'').trim();
+    const normalized=normalizeStoryStartValueV01132(proposedValue);
+    if(!normalized) return {ok:false,changed:false,reason:'empty'};
+    if(normalized===before) return {ok:true,changed:false,anchor:normalized,rows_relabelled:0};
+
+    const beforeInfo=storyStartDescriptorV01132(before);
+    const nextInfo=storyStartDescriptorV01132(normalized);
+    const timeline=Array.isArray(mem?.timeline)?mem.timeline:[];
+    const chat=C().chat||[];
+    const cap=Math.min(chat.length-1,Math.max(-1,Number(mem?.last_processed_index??chat.length-1)));
+    const rows=timeline.map((e,pos)=>({
+        e,pos,first:sourceFirst(e?.source),last:sourceLast(e?.source)
+    })).filter(x=>x.first>=0&&x.first<=cap)
+      .sort((a,b)=>(a.first-b.first)||(a.last-b.last)||(a.pos-b.pos));
+
+    const evidenceRows=rows.map(row=>{
+        const evidence=narrativeEvidenceForRowV01130(row.e,mem);
+        const directDate=normalizeDateInput(evidence?.primary?.date||'')?.iso||null;
+        return {...row,directDate};
+    });
+    const firstDirectSource=evidenceRows.find(x=>x.directDate)?.first??Number.MAX_SAFE_INTEGER;
+    let rowsRelabelled=0;
+
+    mem.story_start=normalized;
+    if(nextInfo.precision==='month'){
+        for(const row of evidenceRows){
+            if(row.directDate){
+                if(clearTimelineMonthPrecisionV01132(row.e)) rowsRelabelled++;
+                continue;
+            }
+            if(row.first>=firstDirectSource) continue;
+            if(setTimelineMonthPrecisionV01132(row.e,nextInfo.month,{
+                evidence:'manual_story_start_month',
+                label:'剧情起点月份',
+                reason:'用户修正剧情起点：月份已知，具体日期未明确'
+            })){
+                row.e.calendar_axis='narrative';
+                row.e.calendar_segment=0;
+                rowsRelabelled++;
+            }
+        }
+    }else if(nextInfo.precision==='day'){
+        for(const row of evidenceRows){
+            if(row.directDate||row.first>=firstDirectSource) continue;
+            const old=normalizeDateInput(row.e.date||'')?.iso||null;
+            if(old!==nextInfo.date){row.e.date=nextInfo.date;rowsRelabelled++;}
+            clearTimelineMonthPrecisionV01132(row.e);
+            row.e.calendar_axis='narrative';
+            row.e.calendar_segment=0;
+            row.e.date_evidence='manual_story_start_day';
+            row.e.date_evidence_label='人工修正剧情起点';
+            row.e.date_evidence_reason='用户明确指定了剧情开场日期';
+        }
+    }
+
+    // A copied/incorrect start can also leave a parallel reality clock behind.
+    // Remove it only when this chat itself contains no reality-axis evidence.
+    const reality=realityAxisStateV01129(cap);
+    let staleRealityCleared=false;
+    if(!reality.found){
+        if(mem.current_reality_date||mem.current_reality_time) staleRealityCleared=true;
+        mem.current_reality_date=null;
+        mem.current_reality_time=null;
+        for(const row of timeline){
+            for(const key of ['reality_date','reality_time']){
+                if(Object.hasOwn(row,key)){delete row[key];staleRealityCleared=true;}
+            }
+        }
+    }
+
+    delete mem.narrative_calendar_v01130;
+    const repaired=repairNarrativeCalendarV01130(mem,cap);
+    const latestDate=latestTimelineDateBySource(mem);
+    const currentDate=normalizeDateInput(mem?.current_story_date||'')?.iso||null;
+    if(latestDate&&beforeInfo.month&&currentDate?.slice(0,7)===beforeInfo.month){
+        mem.current_story_date=latestDate;
+    }
+    resolveCurrentNarrativeStateV01130(mem,cap);
+    restoreMissingCurrentLocationV01129(mem,cap);
+
+    mem.audit=Array.isArray(mem.audit)?mem.audit:[];
+    mem.audit.push({
+        at:new Date().toISOString(),type:'story_start_corrected_v01132',
+        before:before||null,after:normalized,
+        precision:nextInfo.precision,rows_relabelled:rowsRelabelled,
+        stale_reality_cleared:staleRealityCleared,
+        api_calls:0,processed_to:Number(mem.last_processed_index??-1)
+    });
+    if(mem.audit.length>50) mem.audit=mem.audit.slice(-50);
+    return {
+        ok:true,changed:true,anchor:normalized,precision:nextInfo.precision,
+        rows_relabelled:rowsRelabelled,stale_reality_cleared:staleRealityCleared,
+        repaired
+    };
+}
+
+async function commitStoryStartInputV01132(input,refreshView=refreshNative) {
+    if(HISTORY_RUNNING||BUSY){
+        toast('请等待当前总结或重建结束后再修正剧情起点。','warning');
+        input.value=M().story_start||'';
+        return;
+    }
+    const proposed=normalizeStoryStartValueV01132(input?.value||'');
+    const mem=M();
+    const existing=String(mem.story_start||'').trim();
+    if(!proposed){
+        toast('已处理过的聊天不能把剧情起点清空。日期不明确时可填写月份，例如 2003-10。','warning');
+        input.value=existing;
+        return;
+    }
+    if(proposed===existing){input.value=existing;return;}
+
+    if(existing&&Number(mem.last_processed_index??-1)>=0){
+        const accepted=globalThis.confirm?.(
+            `确认修正当前聊天的剧情起点？\n\n原起点：${existing}\n新起点：${proposed}\n\n`+
+            '只会修正 SMM 的时间元数据；保留已有事件、人物、关系、处理进度和原始聊天，也不会调用 API。'
+        );
+        if(!accepted){input.value=existing;return;}
+    }
+
+    const result=correctStoryStartV01132(mem,proposed);
+    if(!result.ok){input.value=existing;return;}
+    await saveMeta();
+    refresh();
+    refreshNative();
+    if(typeof refreshView==='function') refreshView();
+    toast(
+        `剧情起点已修正为 ${result.anchor}；${result.rows_relabelled} 条开场时间线已按真实精度重标（0 API）。`,
+        'success'
+    );
 }
 
 async function correctMemoryDate() {
@@ -8825,7 +9108,7 @@ function storyDateParts(item) {
 function chronologicalCopy(items) {
     return (Array.isArray(items) ? items : [])
         .map((item, index) => {
-            const p = storyDateParts(item);
+            const p = timelineDateGroupV01132(item);
             const sortKey = p
                 ? Date.UTC(p.y, p.m - 1, p.d, Math.floor(p.minutes/60), p.minutes%60)
                 : Number.MAX_SAFE_INTEGER;
@@ -8852,7 +9135,7 @@ function groupTimelineByDay(items) {
     const groups = [];
 
     for (const item of sorted) {
-        const p = storyDateParts(item);
+        const p = timelineDateGroupV01132(item);
         const key = p?.key || '__unknown__';
         const segment=Number(item?.calendar_segment||0);
         let g=groups.at(-1);
@@ -9846,7 +10129,10 @@ function legacyDaysGrouped(mem=M()) {
     });
     const groups=[];
     for (const e of ordered) {
-        const d = isoDateFromAny(e.date) || isoDateFromAny(`${e.date||''} ${e.time||''}`) || '日期未定';
+        const dateGroup=timelineDateGroupV01132(e);
+        const d = dateGroup?.precision==='month'
+            ? dateGroup.label
+            : (dateGroup?.key || '日期未定');
         const segment=Number(e?.calendar_segment||0);
         let group=groups.at(-1);
         if(!group||group.date!==d||group.segment!==segment){
@@ -10103,7 +10389,7 @@ function memoryReadableHTML() {
       <div class="smm2-memory-view">
         <div class="smm2-memory-top">
           <div><b>数据结构：</b>v4 标准化</div>
-          <div><b>剧情起点：</b>${esc(mem.story_start || '未建立')} <span class="smm2-lock">🔒</span></div>
+          <div><b>剧情起点：</b>${esc(mem.story_start || '未建立')} <span class="smm2-lock">（可确认修正）</span></div>
           <div><b>当前剧情日期：</b>${esc(effectiveCurrentDate(mem) || '未建立')}</div>
           <div><b>显示时间：</b>${esc(mem.current_story_time || '未建立')}</div>
           <div><b>当前地点：</b>${esc(mem.current_scene?.location||'未建立')}</div>
@@ -10609,12 +10895,12 @@ function nativeManagerHTML() {
             </label>
 
             <label class="smm107-span-all">
-              剧情起点（首次总结自动建立，之后锁定）
-              <input id="smm2_native_start" type="text" placeholder="无需填写；也可在首次总结前手动指定">
+              剧情起点（首次自动建立；识别错误可确认修正）
+              <input id="smm2_native_start" type="text" placeholder="如 2003-10（具体日期未知）">
             </label>
 
             <div class="smm2-note smm107-span-all">
-              记忆与剧情起点均按“聊天”隔离。首次总结会从开场正文或可靠现实时间变量自动识别起点；开场没有绝对日期时只建立无日期起点，不会自行编日期。酒馆楼层发送时间不作为剧情时间。
+              只知道月份时填写 YYYY-MM，例如 2003-10；SMM 会保留“具体日期未明确”，不会补成某一天。已建立的错误起点也可在确认后安全修正：保留全部记忆和处理进度，0 API，不修改原聊天。
             </div>
           </div>
         </details>
@@ -11097,17 +11383,7 @@ function bindNativeManager() {
     };
 
     q('smm2_native_start').onchange = async e => {
-        const proposed = e.target.value.trim();
-        const m = M();
-        const existing = String(m.story_start || '').trim();
-        if (existing && m.last_processed_index >= 0 && proposed !== existing) {
-            toast(`剧情起点已锁定为 ${existing}。如确需修改，请先清空本聊天记忆后重新建立。`, 'warning');
-            e.target.value = existing;
-            return;
-        }
-        m.story_start = proposed || null;
-        await saveMeta();
-        refreshNative();
+        await commitStoryStartInputV01132(e.target,refreshNative);
     };
 }
 
@@ -11212,7 +11488,7 @@ function installNativeExtensionEntry() {
 
         wrap.innerHTML = `
           <div class="inline-drawer-toggle inline-drawer-header">
-            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.31</span></div>
+            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.32</span></div>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
           </div>
           <div class="inline-drawer-content">
@@ -11302,17 +11578,7 @@ function bind() {
     $('smm2_trigger').onchange=e=>{s.triggerMessages=Math.max(1,Number(e.target.value)||8);saveSettings();};
     $('smm2_batch').onchange=e=>{s.batchMessages=Math.max(4,Number(e.target.value)||30);saveSettings();};
     $('smm2_start').onchange=async e=>{
-        const proposed=e.target.value.trim();
-        const m=M();
-        const existing=String(m.story_start||'').trim();
-        if(existing && m.last_processed_index>=0 && proposed!==existing){
-            toast(`剧情起点已锁定为 ${existing}。如确需修改，请先清空本聊天记忆后重新建立。`,'warning');
-            e.target.value=existing;
-            return;
-        }
-        m.story_start=proposed||null;
-        await saveMeta();
-        refresh();
+        await commitStoryStartInputV01132(e.target,refresh);
     };
 }
 
@@ -11387,7 +11653,7 @@ function statsHTMLV0105() {
 function refresh() {
     // v0.11.19: extension prompts are chat-scoped in practice; always refresh after
     // chat/message state changes so the main model receives THIS chat's latest memory.
-    try { refreshSafeMemoryInjectionV0100(); } catch(e) { console.warn('[StoryMemory] v0.11.31 injection refresh failed', e); }
+    try { refreshSafeMemoryInjectionV0100(); } catch(e) { console.warn('[StoryMemory] v0.11.32 injection refresh failed', e); }
     refreshNative();
     renderMemoryInjectionAuditV0119();
 
@@ -11457,7 +11723,7 @@ function initializeExtension() {
     try {
         installUI();
         refresh();
-        console.log('[StoryMemory] v0.11.31 loaded successfully');
+        console.log('[StoryMemory] v0.11.32 loaded successfully');
     } catch (e) {
         console.error('[StoryMemory] UI initialization failed', e);
     }
