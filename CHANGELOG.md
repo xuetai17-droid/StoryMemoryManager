@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.11.34 HYBRID
+
+- 修复 0 API fallback 将 user 输入与 assistant 回复拼接、甚至在回复难以提取时只保存 user 原句的问题。
+- fallback 改为严格 assistant-only；user 文本仅用于识别回复中的逐字回显，不直接进入 canonical timeline。
+- 新增角色回复候选句评分，降低纯氛围描写、无主体片段、UI/模板文字进入时间线的概率。
+- 新增每聊天一次的旧本地时间线安全迁移：移除 v0.11.34 以前的 `local_zero_api` 条目并按原 source 从角色回复重建。
+- 无可靠角色回复事实的旧条目回到 deferred；本地阶段总结同步重建或失效，避免继续传播错误玩家原句。
+- 迁移保留 story start、人物关系、处理游标、AI/导入记忆和聊天 JSONL；全程 0 API。
+
 ## v0.11.33 HYBRID
 
 - 修复本地模式推进 `last_processed_index` 后，大量普通剧情楼层只进入 `local_deferred_ranges`、时间线和人物仍近乎为空的问题。

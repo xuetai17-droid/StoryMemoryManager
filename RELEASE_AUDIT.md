@@ -1,7 +1,11 @@
-# v0.11.33 HYBRID Release Audit
+# v0.11.34 HYBRID Release Audit
 
-- 基线：v0.11.32 HYBRID；月份精度、剧情起点安全修正、无依据分钟降级、场景/现实双时间轴、0 API、30 条批次与 524 保底均保留。
-- manifest version 与两个可见徽标：0.11.33。
+- 基线：v0.11.33 HYBRID；状态栏白名单、deferred 补录、月份精度、双时间轴、0 API、30 条批次与 524 保底均保留。
+- manifest version 与两个可见徽标：0.11.34。
+- 新问题复现：旧 fallback 会先尝试 assistant，再退回 user，并在 extractive 路径拼接 user + assistant；因此角色回复提取失败时，时间线可能全部是玩家输入。
+- 修复边界：非结构化本地事件只允许来自 assistant；user 仅作为不持久化的回显比对上下文。
+- 旧数据迁移：仅替换旧 `local_zero_api` 行，保留 AI/导入数据和游标；失败整体回滚，不修改原聊天。
+- 阶段派生数据：受影响的本地阶段总结随修复后的 canonical timeline 重建；存在 deferred 时不保留失去依据的本地阶段结论。
 - 实际导出审计：样本记忆 `last_processed_index=48`，但只有 2 条 timeline；45 楼位于 `local_deferred_ranges`。新版统计不再把这 49 楼显示成“已成功重建”。
 - 角色卡审计：上传卡没有 `<abstract>/<plot>` 剧情摘要输出约定；它实际输出 `<status>`，包含 `$2时间`、人物地点、内心、待办、弹幕和头条。
 - 状态白名单：只接收 `$2时间` 与 `地点/位置`；内心、真我、待办、弹幕、头条不会进入 timeline/event。
@@ -11,4 +15,4 @@
 - 人物：状态栏明确命名的人物可保存其最新地点及 source；不从世界书推断人物身份或关系。
 - UI：显示“已扫描 / 待扫描 / 待补录 / 时间线”，新增一键补录按钮；阶段总结在 deferred 清零前停止。
 - API 与 JSONL：上述路径 API 调用数为 0；无聊天写入、删除、清空或全量重建。
-- 验证：JS syntax、manifest JSON、v0.11.27、v0.11.29/v0.11.32 与 v0.11.33 回归均通过；ZIP 需保持六文件清单并复验完整性。
+- 验证：JS syntax、manifest JSON、v0.11.27、v0.11.29/v0.11.32、v0.11.33 与 v0.11.34 回归均须通过；ZIP 保持六文件清单并复验完整性。

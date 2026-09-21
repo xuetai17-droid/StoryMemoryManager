@@ -1,4 +1,4 @@
-// Story Memory Manager v0.11.33
+// Story Memory Manager v0.11.34
 // canonical-input purification / character-core preservation / story-arc continuity
 // does not rewrite original chat JSONL
 
@@ -7539,28 +7539,61 @@ function labeledSummaryRecordsLocalV01133(m,userMsg=null,mem=M()) {
     return out;
 }
 
-// 0-API mode cannot perform a semantic rewrite, but it can still preserve a
-// concise verbatim extract from the actual user/assistant turn. This is used
-// only after structured/labeled summaries fail, and never invents facts.
-function extractiveFallbackEventLocalV01133(userMsg,assistantMsg,userName='') {
+// v0.11.34: an unconfirmed USER message is a proposed action/dialogue, not a
+// canonical outcome.  Earlier local fallback joined USER + ASSISTANT text and
+// could therefore fill the timeline with the player's own input whenever the
+// reply was hard to parse.  Local extraction must now come from the role reply
+// only.  USER text is accepted only as non-persisted context for detecting a
+// verbatim echo.
+function assistantNarrativeEventLocalV01134(assistantMsg,userMsg=null,userName='',maxLen=230) {
     const assistantRaw=String(assistantMsg?.mes||'');
     if(assistantRaw&&/<!doctype\s+html/i.test(assistantRaw)&&!/<content\b/i.test(assistantRaw)) return '';
 
-    const u=userMsg?userActionLocalV0114(userMsg,190):'';
-    const a=assistantMsg?responseActionLocalV0114(assistantMsg,230):'';
-    let event='';
-    const who=String(userName||'USER').trim()||'USER';
-    if(u&&a) event=`${who}：${u}；${a}`;
-    else if(u) event=`${who}：${u}`;
-    else if(a) event=a;
-    else if(assistantMsg) event=extractiveSummaryLocalV0114(assistantMsg,220);
-    if(!event) return '';
+    const body=cleanMesForSummaryV0110(assistantMsg);
+    const candidates=sentenceCandidatesLocalV0114(body)
+        .map((s,i)=>({s:String(s||'').trim(),i}))
+        .filter(x=>x.s)
+        .filter(x=>!/(?:输出格式|字段规范|严格遵守|点击进入|CLICK TO ENTER|世界书绑定|角色设定|系统提示|status_rule|即时状态|今日待办|观众弹幕|今日头条)/i.test(x.s))
+        .filter(x=>!/(?:function\s*\(|const\s+\w+\s*=|document\.|className=|<\/html>)/i.test(x.s));
+    if(!candidates.length) return '';
+
+    const assistantName=String(assistantMsg?.name||'').trim();
+    const knownNames=[...new Set([assistantName,...Object.keys(M()?.characters||{})]
+        .map(x=>String(x||'').trim()).filter(x=>x.length>=2))];
+    const escRe=x=>String(x).replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+    const nameRe=knownNames.length?new RegExp(knownNames.map(escRe).join('|')):null;
+    const strong=/来到|到达|离开|进入|返回|前往|醒来|睡去|发现|遇到|收到|告诉|询问|回答|答应|拒绝|决定|确认|约定|联系|检查|治疗|受伤|袭击|威胁|救下|保护|表白|邀请|警告|提出|要求|同意|上课|训练|赶到|逃离|推开|打开|关闭|发动|带走|带回|拥抱|抱住|亲吻|吻|承诺|坦白|结婚|分手|死亡|失踪|回家|出发|抵达|搬到|留下|得知|通知|安排|交给|取出|放下|接过|递给|签下|完成|通过|失败/;
+    const atmosphere=/^(?:那|这)?(?:声音|风|雨|雪|阳光|月光|灯光|空气|夜色|天色|走廊|房间|窗外|沉默|气氛)[^。！？!?]{0,90}(?:落|照|吹|撞|沉|静|暗|亮|停|散|弥漫)/;
+    const userText=userMsg?plainTextLocalV0114(cleanMesForSummaryV0110(userMsg)):'';
+
+    const ranked=candidates.map(x=>{
+        let score=scoreSentenceLocalV0114(x.s,x.i,candidates.length);
+        if(nameRe?.test(x.s)) score+=4;
+        if(strong.test(x.s)) score+=5;
+        if(/因此|于是|随后|最终|已经|结果|这才|从此|确认|决定/.test(x.s)) score+=1.5;
+        if(atmosphere.test(x.s)) score-=6;
+        if(/^(?:他|她|他们|她们|那人|男人|女人)?\s*(?:看着|望着|笑了|沉默|没说话|顿了顿)[^。！？!?]{0,45}[。！？!?]?$/.test(x.s)) score-=4;
+        // Some frontends quote the entire USER message inside the assistant
+        // payload. A byte-for-byte echo still is not an assistant-confirmed fact.
+        const key=timelineTextKeyV01114(x.s);
+        const userKey=timelineTextKeyV01114(userText);
+        if(key&&userKey&&key.length>=12&&(userKey.includes(key)||timelineDiceV01114(key,userKey)>=0.9)) score-=8;
+        return {...x,score,strong:strong.test(x.s)};
+    }).sort((a,b)=>b.score-a.score||a.i-b.i);
+
+    const best=ranked[0];
+    if(!best || best.score<4.5 || (!best.strong&&!nameRe?.test(best.s)&&best.s.length<45)) return '';
+    const selected=[best];
+    const second=ranked.find(x=>x!==best&&x.score>=Math.max(5,best.score-2.5)&&Math.abs(x.i-best.i)<=2);
+    if(second) selected.push(second);
+    selected.sort((a,b)=>a.i-b.i);
+    let event=selected.map(x=>x.s).join(' ');
 
     event=cleanupEventLocalV0117(event,userName);
-    if(event.length>230){
-        const cut=event.slice(0,230);
+    if(event.length>maxLen){
+        const cut=event.slice(0,maxLen);
         const stop=Math.max(cut.lastIndexOf('。'),cut.lastIndexOf('；'));
-        event=(stop>=130?cut.slice(0,stop+1):cut).trim();
+        event=(stop>=Math.floor(maxLen*.56)?cut.slice(0,stop+1):cut).trim();
     }
     if(event&&!/[。！？!?]$/.test(event)) event+='。';
     if(!event||event.length<7) return '';
@@ -7570,6 +7603,12 @@ function extractiveFallbackEventLocalV01133(userMsg,assistantMsg,userName='') {
     const meaningful=/来到|到达|离开|进入|返回|前往|醒来|睡去|发现|遇到|收到|告诉|询问|回答|答应|拒绝|决定|确认|约定|联系|检查|治疗|受伤|袭击|威胁|救下|保护|表白|邀请|警告|提出|要求|同意|上课|训练|赶到|逃离|推开|打开|关闭|发动|带走|带回|拥抱|抱住|亲吻|吻|承诺|坦白|结婚|分手|死亡|失踪|回家|出发/;
     if(!meaningful.test(event)&&event.length<40) return '';
     return event;
+}
+
+// Compatibility name retained for older tests/callers. The implementation is
+// intentionally assistant-only as of v0.11.34.
+function extractiveFallbackEventLocalV01133(userMsg,assistantMsg,userName='') {
+    return assistantNarrativeEventLocalV01134(assistantMsg,userMsg,userName,230);
 }
 
 function ignorableLocalPairV01133(userMsg,assistantMsg) {
@@ -7598,9 +7637,10 @@ function ensureWeekdayTimelineTimeLocalV0119(time,date) {
 function fallbackEventLocalV0119(userMsg,assistantMsg,userName='') {
     const strong=/来到|到达|离开|进入|返回|前往|醒来|睡去|发现|遇到|收到|告诉|询问|回答|答应|拒绝|决定|确认|约定|带离|带回|送往|联系|检查|治疗|受伤|袭击|威胁|救下|救出|阻止|保护|召集|表白|邀请|警告|提出|要求|同意|上课|参加训练|进行训练|训练结束|赶到|逃离/;
     const micro=/乳头|乳尖|乳房|阴道|小穴|肉棒|龟头|精液|潮吹|自慰|抽插|后庭|子宫|阴蒂|穴口|爱液|淫水|高潮|体液|红肿|C罩杯/i;
+    // Canonical fallback is assistant-only. A USER turn may state an intention,
+    // a correction or an attempted action whose outcome the reply rejects.
     const candidates=[];
     if(assistantMsg) candidates.push(responseActionLocalV0114(assistantMsg,300));
-    if(userMsg) candidates.push(userActionLocalV0114(userMsg,220));
     for(const raw of candidates){
         const c=compressEventLocalV0116(raw,userName,190);
         if(c && c.length>=28 && strong.test(c) && !micro.test(c) && !/^[）)】〉》\]，。；:：]/.test(c) && !/没什么区别|像平时.*一样/.test(c)) return cleanupEventLocalV0117(c,userName);
@@ -7943,7 +7983,7 @@ function makeLocalTimelineNodesV0117(start,endInclusive,mem=M()){
                 if(tr.date) currentDate=tr.date;
                 if(tr.time) previousTime=tr.time;
                 const eventText=rec.__direct_preset_plot_v0119 ? cleanupPresetPlotLocalV0119(rec.event,280) : compressEventLocalV0117(rec.event,userName,170);
-                const node={date:tr.date||null,time:ensureWeekdayTimelineTimeLocalV0119(tr.time,tr.date),event:eventText,source,__local_kind_v0119:rec.__direct_preset_plot_v0119?'preset_plot':'structured'};
+                const node={date:tr.date||null,time:ensureWeekdayTimelineTimeLocalV0119(tr.time,tr.date),event:eventText,source,__local_kind_v0119:rec.__direct_preset_plot_v0119?'preset_plot':'structured',event_origin:'assistant_preset'};
                 const loc=rec.location||status?.location||world.location||rawLoc; if(loc) node.location=loc;
                 if(world.date_reality&&world.date) node.reality_date=world.date;
                 if(world.time_reality&&world.time) node.reality_time=world.time;
@@ -7980,7 +8020,7 @@ function makeLocalTimelineNodesV0117(start,endInclusive,mem=M()){
             const strongEvent=fallbackEventLocalV0119(userMsg,assistantMsg,userName);
             const event=strongEvent||extractiveFallbackEventLocalV01133(userMsg,assistantMsg,userName);
             if(event){
-                const node={date:tr.date||null,time:ensureWeekdayTimelineTimeLocalV0119(tr.time,tr.date),event,source,__local_kind_v0115:'fallback',__local_kind_v0119:strongEvent?'factual':'extractive'};
+                const node={date:tr.date||null,time:ensureWeekdayTimelineTimeLocalV0119(tr.time,tr.date),event,source,__local_kind_v0115:'fallback',__local_kind_v0119:strongEvent?'factual':'extractive',event_origin:'assistant_reply'};
                 const loc=status?.location||world.location||rawLoc; if(loc) node.location=loc;
                 if(world.date_reality&&world.date) node.reality_date=world.date;
                 if(world.time_reality&&world.time) node.reality_time=world.time;
@@ -8690,7 +8730,9 @@ function persistedLocalTimelineNodeV01129(node) {
         time:String(node?.time||'').trim()||null,
         event:String(node?.event||'').replace(/\s+/g,' ').trim(),
         source:String(node?.source||'').trim(),
-        generation_mode:'local_zero_api'
+        generation_mode:'local_zero_api',
+        event_origin:String(node?.event_origin||'assistant_reply'),
+        local_extraction_version:'v0.11.34'
     };
     if(node?.location) out.location=String(node.location).trim();
     for(const key of [
@@ -8702,6 +8744,156 @@ function persistedLocalTimelineNodeV01129(node) {
     }
     if(Number.isInteger(Number(node?.calendar_segment))) out.calendar_segment=Number(node.calendar_segment);
     return out;
+}
+
+function rebuildLocalStagesAfterAssistantRepairV01134(mem,targetIndexes) {
+    const previous=Array.isArray(mem?.stage_summaries)?mem.stage_summaries:[];
+    if(!previous.length) return {before:0,after:0,rebuilt:false,removed:0};
+    const hitsTarget=stage=>{
+        const a=Number(stage?.start_index),b=Number(stage?.end_index);
+        if(!Number.isInteger(a)||!Number.isInteger(b)) return true;
+        for(let i=a;i<=b;i++) if(targetIndexes.has(i)) return true;
+        return false;
+    };
+    const allLocal=previous.every(x=>String(x?.generation_mode||'').startsWith('local'));
+    if(!allLocal){
+        const kept=previous.filter(x=>!hitsTarget(x));
+        mem.stage_summaries=kept;
+        if(!kept.length){
+            mem.stage_summary_last_index=-1;
+            mem.stage_summary_updated_at=null;
+        }
+        return {before:previous.length,after:kept.length,rebuilt:false,removed:previous.length-kept.length};
+    }
+
+    const ready=stageSummaryReadinessV01121(mem);
+    if(!ready.ready){
+        mem.stage_summaries=[];
+        mem.stage_summary_last_index=-1;
+        mem.stage_summary_updated_at=null;
+        return {before:previous.length,after:0,rebuilt:false,removed:previous.length,reason:ready.reason};
+    }
+    const chunks=chunkStageTimelineV01121(stageTimelineRowsV01121(mem));
+    const stages=normalizeAllStageSummariesV01121(chunks.map((chunk,i)=>{
+        const row=localStageFallbackV01126(chunk,mem,i+1,'v0.11.34 角色回复优先迁移后本地重建');
+        row.generation_mode='local_zero_api';
+        return row;
+    }));
+    mem.stage_summaries=stages;
+    mem.stage_summary_last_index=ready.last;
+    mem.stage_summary_updated_at=new Date().toISOString();
+    return {before:previous.length,after:stages.length,rebuilt:true,removed:0};
+}
+
+// One-time per-chat migration for entries created before v0.11.34. It replaces
+// only legacy local_zero_api rows. AI memory, manually imported memory, story
+// start, characters and the processed cursor are preserved; original chat JSONL
+// is never written.
+async function repairLegacyUserDerivedTimelineV01134({save=true,notifyUser=false}={}) {
+    const mem=M();
+    const chat=C().chat||[];
+    const cap=Math.min(chat.length-1,Math.max(-1,Number(mem?.last_processed_index??-1)));
+    const legacy=(Array.isArray(mem?.timeline)?mem.timeline:[]).filter(x=>
+        String(x?.generation_mode||'')==='local_zero_api' &&
+        String(x?.local_extraction_version||'')!=='v0.11.34' &&
+        validRealSourceV0112(x?.source)
+    );
+    const alreadyDone=mem?.local_assistant_only_repair_v01134?.complete===true;
+    if(!legacy.length){
+        if(!alreadyDone){
+            mem.local_assistant_only_repair_v01134={complete:true,at:new Date().toISOString(),legacy_rows:0,api_calls:0};
+            if(save) await saveMeta();
+        }
+        return {changed:false,removed:0,added:0,deferred:localDeferredCountV01133(mem),legacy:0};
+    }
+    if(cap<0) return {changed:false,removed:0,added:0,deferred:0,legacy:legacy.length};
+
+    const snapshot=cloneJSONV0112(mem);
+    try{
+        const targetIndexes=new Set();
+        for(const row of legacy){
+            for(const i of sourceIndexes(row.source)) if(i>=0&&i<=cap) targetIndexes.add(i);
+        }
+        const ranges=compactRangesLocalV01111([...targetIndexes]);
+        const rebuilt=[];
+        let checked=0,reliable=0,ignored=0;
+        for(const [start,endInclusive] of ranges){
+            const raw=makeLocalTimelineNodesV0117(start,endInclusive,snapshot);
+            const triage=localTriageStatsV01111(raw,start,endInclusive);
+            const nodes=raw.filter(node=>{
+                const ids=sourceIndexes(node?.source);
+                return ids.length>0 && ids.every(i=>targetIndexes.has(i));
+            }).map(persistedLocalTimelineNodeV01129).filter(x=>x.event&&x.source);
+            rebuilt.push(...nodes);
+            checked+=triage.checked;
+            reliable+=triage.reliable;
+            ignored+=triage.ignored||0;
+            replaceLocalDeferredRangeV01129(mem,start,endInclusive,triage.needs_ai_ranges);
+        }
+
+        const legacySet=new Set(legacy);
+        mem.timeline=(Array.isArray(mem.timeline)?mem.timeline:[]).filter(x=>!legacySet.has(x));
+        const beforeAdd=mem.timeline.length;
+        mem.timeline=uniqMerge(mem.timeline,rebuilt,x=>JSON.stringify([x.date,x.time,x.location||'',x.event,x.source]));
+        mem.timeline.sort((a,b)=>sourceFirst(a?.source)-sourceFirst(b?.source));
+        const added=Math.max(0,mem.timeline.length-beforeAdd);
+
+        repairExistingTimelineTemporalV0117(mem,0,cap);
+        repairNarrativeCalendarV01130(mem,cap);
+        syncCurrentDateFromTimeline(mem,null);
+        syncCurrentStoryStateFromLatestMetaV0116(mem,cap);
+        resolveCurrentNarrativeStateV01130(mem,cap);
+        restoreMissingCurrentLocationV01129(mem,cap);
+        const stages=rebuildLocalStagesAfterAssistantRepairV01134(mem,targetIndexes);
+
+        mem.local_assistant_only_repair_v01134={
+            complete:true,at:new Date().toISOString(),legacy_rows:legacy.length,
+            rows_added:added,checked,reliable,ignored,
+            deferred:localDeferredCountV01133(mem),api_calls:0
+        };
+        mem.audit=Array.isArray(mem.audit)?mem.audit:[];
+        mem.audit.push({
+            at:mem.local_assistant_only_repair_v01134.at,
+            type:'assistant_only_local_timeline_repair_v01134',api_calls:0,
+            legacy_rows_removed:legacy.length,assistant_rows_added:added,
+            checked,reliable,ignored,deferred:localDeferredCountV01133(mem),
+            stages,processed_cursor_preserved:Number(snapshot.last_processed_index??-1),
+            original_chat_modified:false
+        });
+        if(mem.audit.length>50) mem.audit=mem.audit.slice(-50);
+        if(save) await saveMeta();
+        if(notifyUser){
+            toast(`已修复旧版 0 API 时间线：移除 ${legacy.length} 条旧抽取，按角色回复重建 ${added} 条；待补录 ${localDeferredCountV01133(mem)} 楼。`,'success');
+        }
+        return {changed:true,removed:legacy.length,added,deferred:localDeferredCountV01133(mem),legacy:legacy.length,stages};
+    }catch(e){
+        restoreObjectInPlaceV0112(mem,snapshot);
+        if(save){ try{await saveMeta();}catch(_){} }
+        throw e;
+    }
+}
+
+let ASSISTANT_ONLY_REPAIR_RUNNING_V01134=false;
+async function ensureAssistantOnlyLocalMemoryV01134({notifyUser=true}={}) {
+    if(ASSISTANT_ONLY_REPAIR_RUNNING_V01134||BUSY||HISTORY_RUNNING||GAP_REPAIR_RUNNING_V0112) return null;
+    const mem=M();
+    const legacy=(Array.isArray(mem?.timeline)?mem.timeline:[]).some(x=>
+        String(x?.generation_mode||'')==='local_zero_api' &&
+        String(x?.local_extraction_version||'')!=='v0.11.34'
+    );
+    if(!legacy&&mem?.local_assistant_only_repair_v01134?.complete===true) return null;
+    ASSISTANT_ONLY_REPAIR_RUNNING_V01134=true;
+    try{
+        const result=await repairLegacyUserDerivedTimelineV01134({save:true,notifyUser:notifyUser&&legacy});
+        refresh(); refreshNative();
+        return result;
+    }catch(e){
+        console.error('[StoryMemory] v0.11.34 assistant-only local repair failed',e);
+        if(notifyUser) toast(`旧版本地摘要修复失败，原记忆已恢复：${e?.message||e}`,'error');
+        return null;
+    }finally{
+        ASSISTANT_ONLY_REPAIR_RUNNING_V01134=false;
+    }
 }
 
 async function backfillDeferredLocalV01133({save=true}={}) {
@@ -8891,6 +9083,9 @@ async function summarizeRangeConfiguredV01129(start,end,options={}) {
 async function summarizeNew(force=false) {
     if (BUSY) return;
     const c = C(), s = S(), mem = M(), chat = c.chat || [];
+    if(localSummaryModeV01129()){
+        await ensureAssistantOnlyLocalMemoryV01134({notifyUser:true});
+    }
     const start = Math.max(0, Number(mem.last_processed_index ?? -1) + 1);
     const pending = chat.length - start;
     const deferredBefore=localSummaryModeV01129()?localDeferredCountV01133(mem):0;
@@ -9051,7 +9246,7 @@ function stat() {
 function panelHTML() {
     return `<div id="${PANEL_ID}" class="smm2-hidden">
       <div class="smm2-card">
-        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.33</span></div><button id="smm2_close">×</button></div>
+        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.34</span></div><button id="smm2_close">×</button></div>
         <div id="smm2_stats" class="smm2-stats"></div>
         <div class="smm2-grid">
           <button id="smm2_new">总结新增</button>
@@ -11759,7 +11954,7 @@ function refreshNative() {
     const localMode=String(s.summaryMode||'local')!=='ai';
     const modeStatus=document.getElementById('smm129_mode_status');
     if(modeStatus) modeStatus.textContent=localMode
-        ? '当前为 0 API：优先读取 abstract / plot / 可识别的剧情摘要；否则从真实对话抽取可追溯原句。<status> 只提供时间和地点，不会把内心、待办、弹幕或头条写入正史。无法安全抽取的原文不会被自动隐藏。'
+        ? '当前为 0 API：优先读取角色回复中的 abstract / plot / 可识别剧情摘要；否则只从角色回复抽取可追溯事实，玩家输入不会单独写入正史。<status> 只提供时间和地点，不会把内心、待办、弹幕或头条写入正史。无法安全抽取的原文不会被自动隐藏。'
         : '当前为 AI 总结；遇到 524 / 120 秒超时时，当批会本地保底并自动切回 0 API。';
     const newBtn=document.getElementById('smm2_native_new');
     if(newBtn) newBtn.textContent=localMode?'总结新增（0 API）':'总结新增（AI）';
@@ -11836,7 +12031,7 @@ function installNativeExtensionEntry() {
 
         wrap.innerHTML = `
           <div class="inline-drawer-toggle inline-drawer-header">
-            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.33</span></div>
+            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.34</span></div>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
           </div>
           <div class="inline-drawer-content">
@@ -12002,7 +12197,7 @@ function statsHTMLV0105() {
 function refresh() {
     // v0.11.19: extension prompts are chat-scoped in practice; always refresh after
     // chat/message state changes so the main model receives THIS chat's latest memory.
-    try { refreshSafeMemoryInjectionV0100(); } catch(e) { console.warn('[StoryMemory] v0.11.33 injection refresh failed', e); }
+    try { refreshSafeMemoryInjectionV0100(); } catch(e) { console.warn('[StoryMemory] v0.11.34 injection refresh failed', e); }
     refreshNative();
     renderMemoryInjectionAuditV0119();
 
@@ -12067,18 +12262,24 @@ function initializeExtension() {
         }
     };
 
-    safeOn('CHAT_CHANGED', () => setTimeout(() => { installUI(); refresh(); }, 150));
+    const scheduleAssistantOnlyRepair=()=>setTimeout(()=>{
+        ensureAssistantOnlyLocalMemoryV01134({notifyUser:true})
+            .catch(e=>console.warn('[StoryMemory] v0.11.34 scheduled repair failed',e));
+    },350);
+
+    safeOn('CHAT_CHANGED', () => setTimeout(() => { installUI(); refresh(); scheduleAssistantOnlyRepair(); }, 150));
     safeOn('MESSAGE_RECEIVED', () => setTimeout(async () => { refresh(); await maybeAuto(); }, 100));
     safeOn('MESSAGE_SENT', () => setTimeout(refresh, 50));
     safeOn('MESSAGE_EDITED', () => setTimeout(refresh, 50));
     safeOn('MESSAGE_DELETED', () => setTimeout(refresh, 50));
-    safeOn('APP_READY', () => setTimeout(() => { installUI(); refresh(); }, 100));
-    safeOn('APP_INITIALIZED', () => setTimeout(() => { installUI(); refresh(); }, 100));
+    safeOn('APP_READY', () => setTimeout(() => { installUI(); refresh(); scheduleAssistantOnlyRepair(); }, 100));
+    safeOn('APP_INITIALIZED', () => setTimeout(() => { installUI(); refresh(); scheduleAssistantOnlyRepair(); }, 100));
 
     try {
         installUI();
         refresh();
-        console.log('[StoryMemory] v0.11.33 loaded successfully');
+        scheduleAssistantOnlyRepair();
+        console.log('[StoryMemory] v0.11.34 loaded successfully');
     } catch (e) {
         console.error('[StoryMemory] UI initialization failed', e);
     }
