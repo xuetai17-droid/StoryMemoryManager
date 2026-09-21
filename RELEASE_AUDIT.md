@@ -1,18 +1,13 @@
-# v0.11.34 HYBRID Release Audit
+# v0.11.35 HYBRID Release Audit
 
-- 基线：v0.11.33 HYBRID；状态栏白名单、deferred 补录、月份精度、双时间轴、0 API、30 条批次与 524 保底均保留。
-- manifest version 与两个可见徽标：0.11.34。
-- 新问题复现：旧 fallback 会先尝试 assistant，再退回 user，并在 extractive 路径拼接 user + assistant；因此角色回复提取失败时，时间线可能全部是玩家输入。
-- 修复边界：非结构化本地事件只允许来自 assistant；user 仅作为不持久化的回显比对上下文。
-- 旧数据迁移：仅替换旧 `local_zero_api` 行，保留 AI/导入数据和游标；失败整体回滚，不修改原聊天。
-- 阶段派生数据：受影响的本地阶段总结随修复后的 canonical timeline 重建；存在 deferred 时不保留失去依据的本地阶段结论。
-- 实际导出审计：样本记忆 `last_processed_index=48`，但只有 2 条 timeline；45 楼位于 `local_deferred_ranges`。新版统计不再把这 49 楼显示成“已成功重建”。
-- 角色卡审计：上传卡没有 `<abstract>/<plot>` 剧情摘要输出约定；它实际输出 `<status>`，包含 `$2时间`、人物地点、内心、待办、弹幕和头条。
-- 状态白名单：只接收 `$2时间` 与 `地点/位置`；内心、真我、待办、弹幕、头条不会进入 timeline/event。
-- 本地保底：结构化摘要与有边界的可见剧情摘要优先；否则抽取真实对话原句。短应答、纯注视、角色选择 HTML 与模板说明保持 deferred/ignored。
-- 旧楼层补录：直接消费现有 deferred 范围，保留 timeline、人物、剧情起点、`last_processed_index` 和原聊天；失败原位回滚。
-- 当前状态：最新同楼 `<status>` 可建立/修正剧情日期、分钟与单一明确地点；多人物并行地点不猜测当前路线。
-- 人物：状态栏明确命名的人物可保存其最新地点及 source；不从世界书推断人物身份或关系。
-- UI：显示“已扫描 / 待扫描 / 待补录 / 时间线”，新增一键补录按钮；阶段总结在 deferred 清零前停止。
-- API 与 JSONL：上述路径 API 调用数为 0；无聊天写入、删除、清空或全量重建。
-- 验证：JS syntax、manifest JSON、v0.11.27、v0.11.29/v0.11.32、v0.11.33 与 v0.11.34 回归均须通过；ZIP 保持六文件清单并复验完整性。
+- 基线：v0.11.34 HYBRID；assistant-only、本地 deferred、月份精度、双时间轴、0 API、30 条批次与 524 保底均保留。
+- manifest version 与两个可见徽标：0.11.35。
+- 问题复现：角色回复已有完整可视摘要，但它使用通用“摘要”面板且可能位于 `<content>` 外；旧解析器丢弃该面板后，只从普通正文抽取零散句。
+- 新解析边界：只从 assistant 原始回复读取有摘要标题且带时间/人物元数据的区块；提示模板、脚本、样式和状态栏非事实字段不进入事件。
+- 摘要保真：保存完整摘要正文（上限 800 字）及 `recap_start_date` / `recap_end_date`；时间线以范围末日归档。
+- 优先级：结构化摘要/角色卡摘要 > assistant 已确认事实句 > deferred；user 仅用于回显检测，永不直接持久化。
+- 旧数据迁移：仅替换 v0.11.35 以前的 `local_zero_api` 行，按原 source 重读 assistant 回复；AI/导入数据、story start、人物关系和游标保持不变。
+- 阶段派生数据：受旧条目影响的本地阶段总结随 canonical timeline 重建；仍有 deferred 时移除失去依据的本地阶段结论。
+- 状态白名单：仍只接收 `<status>` 中时间与可判定地点；内心、真我、待办、弹幕和头条不进入 timeline/event。
+- API 与 JSONL：摘要读取与迁移均为 0 API；不写入、删除或改动原始聊天 JSONL。
+- 验证：JS syntax、manifest JSON、v0.11.27、v0.11.29/v0.11.32、v0.11.33、v0.11.34 与 v0.11.35 回归均通过；ZIP 保持六文件清单并复验完整性。

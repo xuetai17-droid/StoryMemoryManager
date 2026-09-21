@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.11.35 HYBRID
+
+- 新增角色卡/预设通用摘要面板解析，识别 `摘要：标题`、时间范围、人物元数据和完整摘要正文。
+- 摘要可以位于 `<content>` 之外；SMM 从原始 assistant 消息读取有边界区块，同时继续排除 `<status>`、内心、待办、弹幕、头条、脚本和样式。
+- 保存摘要范围的 `recap_start_date` / `recap_end_date`，timeline 使用摘要末日，不以玩家输入中的日期替代。
+- 0 API 本地优先级调整为角色回复既有摘要优先，其次才是 assistant 事实句；user 输入继续禁止直接写入 canonical timeline。
+- 新增每聊天一次的 v0.11.35 安全迁移：重扫旧 `local_zero_api` source，将旧的玩家句子/碎片句替换为角色卡摘要或可靠角色回复事实；无法确认者回到 deferred。
+- 迁移不调用 API、不改聊天 JSONL，并保留剧情起点、人物关系、游标和非本地记忆。
+
 ## v0.11.34 HYBRID
 
 - 修复 0 API fallback 将 user 输入与 assistant 回复拼接、甚至在回复难以提取时只保存 user 原句的问题。

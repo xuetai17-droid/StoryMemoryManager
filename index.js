@@ -1,4 +1,4 @@
-// Story Memory Manager v0.11.34
+// Story Memory Manager v0.11.35
 // canonical-input purification / character-core preservation / story-arc continuity
 // does not rewrite original chat JSONL
 
@@ -6923,6 +6923,8 @@ function narrativeSummaryRecordsV01130(m,userMsg=null,mem=M()) {
         });
     }
     if(direct.length) return direct;
+    const cardRecap=roleCardRecapRecordsV01135(m,userMsg,mem);
+    if(cardRecap.length) return cardRecap;
     const labeled=labeledSummaryRecordsLocalV01133(m,userMsg,mem);
     if(labeled.length) return labeled;
     return structuredSummaryRecordsLocalV0119(m,userMsg,mem).map(rec=>({
@@ -7539,6 +7541,119 @@ function labeledSummaryRecordsLocalV01133(m,userMsg=null,mem=M()) {
     return out;
 }
 
+function recapDateRangeV01135(text) {
+    const src=String(text||'').replace(/：/g,':');
+    const range=src.match(/(20\d{2})[年\-\/.](\d{1,2})[月\-\/.](\d{1,2})日?\s*(?:→|~|～|—|–|至|到)\s*(?:(20\d{2})[年\-\/.])?(?:(\d{1,2})[月\-\/.])?(\d{1,2})日?/);
+    if(range){
+        const sy=Number(range[1]),sm=Number(range[2]),sd=Number(range[3]);
+        const ey=Number(range[4]||sy),em=Number(range[5]||sm),ed=Number(range[6]);
+        const start=normalizeDateInput(`${sy}-${String(sm).padStart(2,'0')}-${String(sd).padStart(2,'0')}`)?.iso||null;
+        const end=normalizeDateInput(`${ey}-${String(em).padStart(2,'0')}-${String(ed).padStart(2,'0')}`)?.iso||null;
+        if(start||end) return {start,end:end||start};
+    }
+    const dates=[...src.matchAll(/(20\d{2})[年\-\/.](\d{1,2})[月\-\/.](\d{1,2})日?/g)]
+        .map(x=>normalizeDateInput(`${x[1]}-${String(Number(x[2])).padStart(2,'0')}-${String(Number(x[3])).padStart(2,'0')}`)?.iso||null)
+        .filter(Boolean);
+    return dates.length?{start:dates[0],end:dates.at(-1)}:{start:null,end:null};
+}
+
+function cleanRoleCardRecapBlockV01135(raw) {
+    let text=String(raw||'')
+        .replace(/<!--([\s\S]*?)-->/g,'')
+        .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi,'')
+        .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi,'');
+    text=stripAuxiliaryBlocksV0110(text);
+    return plainTextLocalV0114(text)
+        .replace(/[ \t]+/g,' ')
+        .replace(/\n{3,}/g,'\n\n')
+        .trim();
+}
+
+// v0.11.35: some cards/presets render an already-written recap panel rather
+// than <abstract><plot>. Typical visible form:
+// 摘要：标题 / 时间 2026-08-03→08-27 / 人物 ... / recap prose.
+// It is canonical assistant output and should outrank sentence extraction.
+function roleCardRecapRecordsV01135(m,userMsg=null,mem=M()) {
+    if(!m||m.is_user) return [];
+    const raw=cleanMes(m);
+    if(!raw||/<!doctype\s+html/i.test(raw)&&!/摘要\s*[:：]/.test(raw)) return [];
+    const candidates=[];
+    const add=(value,kind)=>{
+        const v=String(value||'').trim();
+        if(v&&/摘要\s*[:：]/.test(v)) candidates.push({raw:v,kind});
+    };
+    const detailRe=/<details\b[^>]*>[\s\S]*?<\/details>/gi;
+    let hit;
+    while((hit=detailRe.exec(raw))) add(hit[0],'details');
+    for(const tag of ['recap','story_recap','chapter_summary','summary_card','剧情摘要','故事摘要','本轮摘要','情节摘要']){
+        const re=new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)<\\/${tag}>`,'gi');
+        while((hit=re.exec(raw))) add(hit[1],tag);
+    }
+    // Prefer the bounded recap widget.  Scanning the whole reply is only a
+    // compatibility fallback for cards whose regex renderer does not leave a
+    // dedicated wrapper in the stored message; otherwise unrelated widgets
+    // after the recap could be appended to the canonical event.
+    if(!candidates.length) add(raw,'visible');
+
+    const status=extractRoleplayStatusMetadataV01133(m);
+    const out=[];
+    const seen=new Set();
+    for(const candidate of candidates){
+        const text=cleanRoleCardRecapBlockV01135(candidate.raw);
+        if(!text) continue;
+        const header=text.match(/(?:^|\n|[＊*✦❖◈◇]\s*)摘要\s*[:：]\s*(.{1,90}?)(?=\s+(?:时间|日期|人物|角色)\s*[:：]?|\n|$)/i);
+        if(!header) continue;
+        const fromHeader=text.slice(Math.max(0,header.index||0)).trim();
+        const metaWindow=fromHeader.slice(0,700);
+        if(!/(?:时间|日期)\s*[:：]?\s*20\d{2}/.test(metaWindow) && !/(?:人物|角色)\s*[:：]?/.test(metaWindow)) continue;
+        if(/(?:输出格式|字段规范|以下示例|请生成|必须输出|写作要求|提示词)/i.test(fromHeader.slice(0,260))) continue;
+
+        const title=String(header[1]||'').replace(/[＊*✦❖◈◇]/g,'').trim().slice(0,90);
+        const lines=fromHeader.split(/\n+/).map(x=>x.trim()).filter(Boolean);
+        const bodyLines=[];
+        let headerPassed=false;
+        for(const line of lines){
+            if(!headerPassed&&/摘要\s*[:：]/.test(line)){headerPassed=true;continue;}
+            if(!headerPassed) continue;
+            if(/^(?:时间|日期|人物|角色|地点)\s*[:：]?/.test(line)) continue;
+            bodyLines.push(line);
+        }
+        let body=bodyLines.join(' ').replace(/\s+/g,' ').trim();
+        if(body.length<35){
+            body=fromHeader
+                .replace(/^[\s＊*✦❖◈◇]*摘要\s*[:：]\s*.{1,90}?(?=\s+(?:时间|日期|人物|角色)\s*[:：]?|\n|$)/i,'')
+                .replace(/(?:时间|日期)\s*[:：]?\s*20\d{2}[\s\S]{0,180}?(?=(?:人物|角色)\s*[:：]?)/i,'')
+                .replace(/(?:人物|角色)\s*[:：]?\s*[^。！？!?]{0,220}(?=[。！？!?]|$)/i,'')
+                .replace(/\s+/g,' ').trim();
+        }
+        if(body.length<35) continue;
+        if(body.length>760){
+            const cut=body.slice(0,760);
+            const stop=Math.max(cut.lastIndexOf('。'),cut.lastIndexOf('；'));
+            body=(stop>=470?cut.slice(0,stop+1):cut).trim();
+        }
+        const event=cleanupPresetPlotLocalV0119(`${title?title+'：':''}${body}`,800);
+        if(!event||event.length<40) continue;
+        const range=recapDateRangeV01135(fromHeader);
+        const key=timelineTextKeyV01114(event);
+        if(!key||seen.has(key)) continue;
+        seen.add(key);
+        out.push({
+            tag:'role_card_recap',record_no:null,
+            date:range.end||status?.date||null,
+            time:status?.time||null,
+            location:status?.location||null,
+            event,
+            recap_start_date:range.start||null,
+            recap_end_date:range.end||null,
+            __direct_preset_plot_v0119:true,
+            __role_card_recap_v01135:true,
+            __recap_kind_v01135:candidate.kind
+        });
+    }
+    return out;
+}
+
 // v0.11.34: an unconfirmed USER message is a proposed action/dialogue, not a
 // canonical outcome.  Earlier local fallback joined USER + ASSISTANT text and
 // could therefore fill the timeline with the player's own input whenever the
@@ -7934,14 +8049,15 @@ function localTriageStatsV01111(nodes,start,endInclusive){
         preset_plot_nodes:Number(t.presetPlotNodes||0),
         factual_fallback_nodes:Number(t.factualFallbackNodes||0),
         extractive_nodes:Number(t.extractiveNodes||0),
-        status_nodes:Number(t.statusNodes||0)
+        status_nodes:Number(t.statusNodes||0),
+        role_card_recap_nodes:Number(t.roleCardRecapNodes||0)
     };
 }
 
 function makeLocalTimelineNodesV0117(start,endInclusive,mem=M()){
     const chat=C().chat||[];
     const nodes=[];
-    const triage={reliable:[],needsAI:[],ignored:[],presetPlotNodes:0,factualFallbackNodes:0,extractiveNodes:0,statusNodes:0};
+    const triage={reliable:[],needsAI:[],ignored:[],presetPlotNodes:0,factualFallbackNodes:0,extractiveNodes:0,statusNodes:0,roleCardRecapNodes:0};
     let currentDate=priorReliableDateV0114(mem,start);
     let previousTime=null;
     let i=start;
@@ -7982,8 +8098,17 @@ function makeLocalTimelineNodesV0117(start,endInclusive,mem=M()){
                 const tr=reconcileTemporalLocalV0117({currentDate,previousTime,candidateDate,candidateTime,combined:`${combined}\n${rec.event||''}`,authority});
                 if(tr.date) currentDate=tr.date;
                 if(tr.time) previousTime=tr.time;
-                const eventText=rec.__direct_preset_plot_v0119 ? cleanupPresetPlotLocalV0119(rec.event,280) : compressEventLocalV0117(rec.event,userName,170);
-                const node={date:tr.date||null,time:ensureWeekdayTimelineTimeLocalV0119(tr.time,tr.date),event:eventText,source,__local_kind_v0119:rec.__direct_preset_plot_v0119?'preset_plot':'structured',event_origin:'assistant_preset'};
+                const isCardRecap=!!rec.__role_card_recap_v01135;
+                const eventText=isCardRecap
+                    ? cleanupPresetPlotLocalV0119(rec.event,800)
+                    : (rec.__direct_preset_plot_v0119 ? cleanupPresetPlotLocalV0119(rec.event,280) : compressEventLocalV0117(rec.event,userName,170));
+                const node={
+                    date:tr.date||null,time:ensureWeekdayTimelineTimeLocalV0119(tr.time,tr.date),event:eventText,source,
+                    __local_kind_v0119:isCardRecap?'role_card_recap':(rec.__direct_preset_plot_v0119?'preset_plot':'structured'),
+                    event_origin:isCardRecap?'assistant_recap':'assistant_preset'
+                };
+                if(rec.recap_start_date) node.recap_start_date=rec.recap_start_date;
+                if(rec.recap_end_date) node.recap_end_date=rec.recap_end_date;
                 const loc=rec.location||status?.location||world.location||rawLoc; if(loc) node.location=loc;
                 if(world.date_reality&&world.date) node.reality_date=world.date;
                 if(world.time_reality&&world.time) node.reality_time=world.time;
@@ -7998,6 +8123,7 @@ function makeLocalTimelineNodesV0117(start,endInclusive,mem=M()){
                     nodes.push(node);
                     acceptedRecord=true;
                     if(rec.__direct_preset_plot_v0119) triage.presetPlotNodes++;
+                    if(isCardRecap) triage.roleCardRecapNodes++;
                     if(status) triage.statusNodes++;
                 }
             }
@@ -8042,11 +8168,13 @@ function makeLocalTimelineNodesV0117(start,endInclusive,mem=M()){
         const idx=[...sourceIndexes(n?.source)].sort((a,b)=>a-b);
         let userName=''; for(const j of idx){ if(chat[j]?.is_user){ userName=String(chat[j]?.name||'').trim(); if(userName) break; } }
         const x={...n};
-        x.event=x.__local_kind_v0119==='preset_plot'
+        x.event=x.__local_kind_v0119==='role_card_recap'
+            ? cleanupPresetPlotLocalV0119(x.event,800)
+            : (x.__local_kind_v0119==='preset_plot'
             ? cleanupPresetPlotLocalV0119(x.event,280)
             : (x.__local_kind_v0119==='extractive'
                 ? cleanupEventLocalV0117(x.event,userName).slice(0,230)
-                : compressEventLocalV0117(x.event,userName,170));
+                : compressEventLocalV0117(x.event,userName,170)));
         if(x.date&&x.time) x.time=ensureWeekdayTimelineTimeLocalV0119(x.time,x.date);
         return x;
     }).filter(x=>String(x?.event||'').trim());
@@ -8732,13 +8860,14 @@ function persistedLocalTimelineNodeV01129(node) {
         source:String(node?.source||'').trim(),
         generation_mode:'local_zero_api',
         event_origin:String(node?.event_origin||'assistant_reply'),
-        local_extraction_version:'v0.11.34'
+        local_extraction_version:'v0.11.35'
     };
     if(node?.location) out.location=String(node.location).trim();
     for(const key of [
         'time_evidence','time_evidence_label','time_evidence_reason',
         'date_hint','date_precision','date_evidence','date_evidence_label','date_evidence_reason',
-        'reality_date','reality_time','calendar_axis'
+        'reality_date','reality_time','calendar_axis',
+        'recap_start_date','recap_end_date'
     ]){
         if(node?.[key]!=null&&String(node[key]).trim()) out[key]=String(node[key]).trim();
     }
@@ -8746,7 +8875,7 @@ function persistedLocalTimelineNodeV01129(node) {
     return out;
 }
 
-function rebuildLocalStagesAfterAssistantRepairV01134(mem,targetIndexes) {
+function rebuildLocalStagesAfterRecapRepairV01135(mem,targetIndexes) {
     const previous=Array.isArray(mem?.stage_summaries)?mem.stage_summaries:[];
     if(!previous.length) return {before:0,after:0,rebuilt:false,removed:0};
     const hitsTarget=stage=>{
@@ -8775,7 +8904,7 @@ function rebuildLocalStagesAfterAssistantRepairV01134(mem,targetIndexes) {
     }
     const chunks=chunkStageTimelineV01121(stageTimelineRowsV01121(mem));
     const stages=normalizeAllStageSummariesV01121(chunks.map((chunk,i)=>{
-        const row=localStageFallbackV01126(chunk,mem,i+1,'v0.11.34 角色回复优先迁移后本地重建');
+        const row=localStageFallbackV01126(chunk,mem,i+1,'v0.11.35 角色卡摘要优先迁移后本地重建');
         row.generation_mode='local_zero_api';
         return row;
     }));
@@ -8785,23 +8914,27 @@ function rebuildLocalStagesAfterAssistantRepairV01134(mem,targetIndexes) {
     return {before:previous.length,after:stages.length,rebuilt:true,removed:0};
 }
 
-// One-time per-chat migration for entries created before v0.11.34. It replaces
+// One-time per-chat migration for entries created before v0.11.35. It replaces
 // only legacy local_zero_api rows. AI memory, manually imported memory, story
 // start, characters and the processed cursor are preserved; original chat JSONL
 // is never written.
-async function repairLegacyUserDerivedTimelineV01134({save=true,notifyUser=false}={}) {
+async function repairLegacyLocalTimelineV01135({save=true,notifyUser=false}={}) {
     const mem=M();
     const chat=C().chat||[];
     const cap=Math.min(chat.length-1,Math.max(-1,Number(mem?.last_processed_index??-1)));
     const legacy=(Array.isArray(mem?.timeline)?mem.timeline:[]).filter(x=>
         String(x?.generation_mode||'')==='local_zero_api' &&
-        String(x?.local_extraction_version||'')!=='v0.11.34' &&
+        String(x?.local_extraction_version||'')!=='v0.11.35' &&
         validRealSourceV0112(x?.source)
     );
-    const alreadyDone=mem?.local_assistant_only_repair_v01134?.complete===true;
+    const alreadyDone=mem?.local_recap_repair_v01135?.complete===true;
     if(!legacy.length){
         if(!alreadyDone){
-            mem.local_assistant_only_repair_v01134={complete:true,at:new Date().toISOString(),legacy_rows:0,api_calls:0};
+            const at=new Date().toISOString();
+            mem.local_recap_repair_v01135={complete:true,at,legacy_rows:0,api_calls:0};
+            // Keep the previous migration marker for compatibility with
+            // diagnostics/tests that still display the v0.11.34 repair state.
+            mem.local_assistant_only_repair_v01134={complete:true,at,legacy_rows:0,api_calls:0,superseded_by:'v0.11.35'};
             if(save) await saveMeta();
         }
         return {changed:false,removed:0,added:0,deferred:localDeferredCountV01133(mem),legacy:0};
@@ -8844,17 +8977,21 @@ async function repairLegacyUserDerivedTimelineV01134({save=true,notifyUser=false
         syncCurrentStoryStateFromLatestMetaV0116(mem,cap);
         resolveCurrentNarrativeStateV01130(mem,cap);
         restoreMissingCurrentLocationV01129(mem,cap);
-        const stages=rebuildLocalStagesAfterAssistantRepairV01134(mem,targetIndexes);
+        const stages=rebuildLocalStagesAfterRecapRepairV01135(mem,targetIndexes);
 
-        mem.local_assistant_only_repair_v01134={
+        mem.local_recap_repair_v01135={
             complete:true,at:new Date().toISOString(),legacy_rows:legacy.length,
             rows_added:added,checked,reliable,ignored,
             deferred:localDeferredCountV01133(mem),api_calls:0
         };
+        mem.local_assistant_only_repair_v01134={
+            ...mem.local_recap_repair_v01135,
+            superseded_by:'v0.11.35'
+        };
         mem.audit=Array.isArray(mem.audit)?mem.audit:[];
         mem.audit.push({
-            at:mem.local_assistant_only_repair_v01134.at,
-            type:'assistant_only_local_timeline_repair_v01134',api_calls:0,
+            at:mem.local_recap_repair_v01135.at,
+            type:'role_card_recap_priority_repair_v01135',api_calls:0,
             legacy_rows_removed:legacy.length,assistant_rows_added:added,
             checked,reliable,ignored,deferred:localDeferredCountV01133(mem),
             stages,processed_cursor_preserved:Number(snapshot.last_processed_index??-1),
@@ -8863,7 +9000,7 @@ async function repairLegacyUserDerivedTimelineV01134({save=true,notifyUser=false
         if(mem.audit.length>50) mem.audit=mem.audit.slice(-50);
         if(save) await saveMeta();
         if(notifyUser){
-            toast(`已修复旧版 0 API 时间线：移除 ${legacy.length} 条旧抽取，按角色回复重建 ${added} 条；待补录 ${localDeferredCountV01133(mem)} 楼。`,'success');
+            toast(`已升级旧版 0 API 时间线：优先读取角色卡摘要，重建 ${added} 条；待补录 ${localDeferredCountV01133(mem)} 楼。`,'success');
         }
         return {changed:true,removed:legacy.length,added,deferred:localDeferredCountV01133(mem),legacy:legacy.length,stages};
     }catch(e){
@@ -8873,26 +9010,31 @@ async function repairLegacyUserDerivedTimelineV01134({save=true,notifyUser=false
     }
 }
 
-let ASSISTANT_ONLY_REPAIR_RUNNING_V01134=false;
-async function ensureAssistantOnlyLocalMemoryV01134({notifyUser=true}={}) {
-    if(ASSISTANT_ONLY_REPAIR_RUNNING_V01134||BUSY||HISTORY_RUNNING||GAP_REPAIR_RUNNING_V0112) return null;
+// Compatibility wrapper kept for v0.11.34 regression callers.
+async function repairLegacyUserDerivedTimelineV01134(options={}) {
+    return repairLegacyLocalTimelineV01135(options);
+}
+
+let LOCAL_RECAP_REPAIR_RUNNING_V01135=false;
+async function ensureRoleCardRecapMemoryV01135({notifyUser=true}={}) {
+    if(LOCAL_RECAP_REPAIR_RUNNING_V01135||BUSY||HISTORY_RUNNING||GAP_REPAIR_RUNNING_V0112) return null;
     const mem=M();
     const legacy=(Array.isArray(mem?.timeline)?mem.timeline:[]).some(x=>
         String(x?.generation_mode||'')==='local_zero_api' &&
-        String(x?.local_extraction_version||'')!=='v0.11.34'
+        String(x?.local_extraction_version||'')!=='v0.11.35'
     );
-    if(!legacy&&mem?.local_assistant_only_repair_v01134?.complete===true) return null;
-    ASSISTANT_ONLY_REPAIR_RUNNING_V01134=true;
+    if(!legacy&&mem?.local_recap_repair_v01135?.complete===true) return null;
+    LOCAL_RECAP_REPAIR_RUNNING_V01135=true;
     try{
-        const result=await repairLegacyUserDerivedTimelineV01134({save:true,notifyUser:notifyUser&&legacy});
+        const result=await repairLegacyLocalTimelineV01135({save:true,notifyUser:notifyUser&&legacy});
         refresh(); refreshNative();
         return result;
     }catch(e){
-        console.error('[StoryMemory] v0.11.34 assistant-only local repair failed',e);
+        console.error('[StoryMemory] v0.11.35 role-card recap repair failed',e);
         if(notifyUser) toast(`旧版本地摘要修复失败，原记忆已恢复：${e?.message||e}`,'error');
         return null;
     }finally{
-        ASSISTANT_ONLY_REPAIR_RUNNING_V01134=false;
+        LOCAL_RECAP_REPAIR_RUNNING_V01135=false;
     }
 }
 
@@ -9084,7 +9226,7 @@ async function summarizeNew(force=false) {
     if (BUSY) return;
     const c = C(), s = S(), mem = M(), chat = c.chat || [];
     if(localSummaryModeV01129()){
-        await ensureAssistantOnlyLocalMemoryV01134({notifyUser:true});
+        await ensureRoleCardRecapMemoryV01135({notifyUser:true});
     }
     const start = Math.max(0, Number(mem.last_processed_index ?? -1) + 1);
     const pending = chat.length - start;
@@ -9246,7 +9388,7 @@ function stat() {
 function panelHTML() {
     return `<div id="${PANEL_ID}" class="smm2-hidden">
       <div class="smm2-card">
-        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.34</span></div><button id="smm2_close">×</button></div>
+        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.35</span></div><button id="smm2_close">×</button></div>
         <div id="smm2_stats" class="smm2-stats"></div>
         <div class="smm2-grid">
           <button id="smm2_new">总结新增</button>
@@ -12031,7 +12173,7 @@ function installNativeExtensionEntry() {
 
         wrap.innerHTML = `
           <div class="inline-drawer-toggle inline-drawer-header">
-            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.34</span></div>
+            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.35</span></div>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
           </div>
           <div class="inline-drawer-content">
@@ -12197,7 +12339,7 @@ function statsHTMLV0105() {
 function refresh() {
     // v0.11.19: extension prompts are chat-scoped in practice; always refresh after
     // chat/message state changes so the main model receives THIS chat's latest memory.
-    try { refreshSafeMemoryInjectionV0100(); } catch(e) { console.warn('[StoryMemory] v0.11.34 injection refresh failed', e); }
+    try { refreshSafeMemoryInjectionV0100(); } catch(e) { console.warn('[StoryMemory] v0.11.35 injection refresh failed', e); }
     refreshNative();
     renderMemoryInjectionAuditV0119();
 
@@ -12262,24 +12404,24 @@ function initializeExtension() {
         }
     };
 
-    const scheduleAssistantOnlyRepair=()=>setTimeout(()=>{
-        ensureAssistantOnlyLocalMemoryV01134({notifyUser:true})
-            .catch(e=>console.warn('[StoryMemory] v0.11.34 scheduled repair failed',e));
+    const scheduleRoleCardRecapRepair=()=>setTimeout(()=>{
+        ensureRoleCardRecapMemoryV01135({notifyUser:true})
+            .catch(e=>console.warn('[StoryMemory] v0.11.35 scheduled repair failed',e));
     },350);
 
-    safeOn('CHAT_CHANGED', () => setTimeout(() => { installUI(); refresh(); scheduleAssistantOnlyRepair(); }, 150));
+    safeOn('CHAT_CHANGED', () => setTimeout(() => { installUI(); refresh(); scheduleRoleCardRecapRepair(); }, 150));
     safeOn('MESSAGE_RECEIVED', () => setTimeout(async () => { refresh(); await maybeAuto(); }, 100));
     safeOn('MESSAGE_SENT', () => setTimeout(refresh, 50));
     safeOn('MESSAGE_EDITED', () => setTimeout(refresh, 50));
     safeOn('MESSAGE_DELETED', () => setTimeout(refresh, 50));
-    safeOn('APP_READY', () => setTimeout(() => { installUI(); refresh(); scheduleAssistantOnlyRepair(); }, 100));
-    safeOn('APP_INITIALIZED', () => setTimeout(() => { installUI(); refresh(); scheduleAssistantOnlyRepair(); }, 100));
+    safeOn('APP_READY', () => setTimeout(() => { installUI(); refresh(); scheduleRoleCardRecapRepair(); }, 100));
+    safeOn('APP_INITIALIZED', () => setTimeout(() => { installUI(); refresh(); scheduleRoleCardRecapRepair(); }, 100));
 
     try {
         installUI();
         refresh();
-        scheduleAssistantOnlyRepair();
-        console.log('[StoryMemory] v0.11.34 loaded successfully');
+        scheduleRoleCardRecapRepair();
+        console.log('[StoryMemory] v0.11.35 loaded successfully');
     } catch (e) {
         console.error('[StoryMemory] UI initialization failed', e);
     }
