@@ -1,4 +1,4 @@
-// Story Memory Manager v0.11.32
+// Story Memory Manager v0.11.33
 // canonical-input purification / character-core preservation / story-arc continuity
 // does not rewrite original chat JSONL
 
@@ -530,7 +530,7 @@ function stripAuxiliaryBlocksV0110(text) {
 
     const tags = [
         'campus_gossip', 'UpdateVariable', 'JSONPatch', 'Analysis',
-        'StatusPlaceHolderImpl', 'thinking', 'think'
+        'StatusPlaceHolderImpl', 'status', 'status_rule', 'thinking', 'think'
     ];
     for (const tag of tags) {
         const paired = new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}>`, 'gi');
@@ -548,8 +548,12 @@ function stripAuxiliaryBlocksV0110(text) {
             : block;
     });
 
+    // Script/style payloads belong to presentation widgets, not the story.
+    t = t.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '');
+    t = t.replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '');
+
     // Orphan wrappers left by malformed templates.
-    t = t.replace(/<\/?(?:campus_gossip|UpdateVariable|JSONPatch|Analysis|StatusPlaceHolderImpl)\b[^>]*>/gi, '');
+    t = t.replace(/<\/?(?:campus_gossip|UpdateVariable|JSONPatch|Analysis|StatusPlaceHolderImpl|status|status_rule)\b[^>]*>/gi, '');
     return t.replace(/^\s*###\s*正文\s*/i, '').trim();
 }
 
@@ -568,6 +572,84 @@ function cleanMesForSummaryV0110(m) {
     if (bodies.length) t = bodies.join('\n\n');
 
     return stripAuxiliaryBlocksV0110(t);
+}
+
+// v0.11.33: many role cards expose their trustworthy end-of-reply clock and
+// location through a compact <status> block.  This is not a plot summary, and
+// fields such as inner thoughts, headlines, comments and todo lists must never
+// enter canonical memory.  Admit only the explicitly allow-listed time and
+// location rows.
+function extractRoleplayStatusMetadataV01133(m, index=-1) {
+    if (!m || m.is_user) return null;
+    const raw=String(m?.mes||'');
+    if(!raw) return null;
+    const blocks=[];
+    const re=/<status\b[^>]*>([\s\S]*?)<\/status>/gi;
+    let hit;
+    while((hit=re.exec(raw))) blocks.push(String(hit[1]||''));
+    if(!blocks.length) return null;
+
+    let date=null,time=null,timeRaw=null;
+    const locations=[];
+    for(const block of blocks){
+        const tm=block.match(/\$(?:2|T)\s*(?:时间|时空)\s*丨\s*([^丨\r\n]{2,140}?)\s*丨/i);
+        if(tm){
+            timeRaw=sanitizeWorldMetaValueV0112(tm[1],140);
+            date=normalizeSummaryDateLocalV0115(timeRaw)||date;
+            time=normalizeNarrativeClockV01130(timeRaw)||time;
+        }
+        const lr=/\$([A-Za-z0-9]*)\s*([^丨\r\n$]{0,36}?)(?:地点|位置)\s*丨\s*([^丨\r\n]{1,180}?)\s*丨/g;
+        let lm;
+        while((lm=lr.exec(block))){
+            const label=sanitizeWorldMetaValueV0112(lm[2],48);
+            const value=sanitizeWorldMetaValueV0112(lm[3],180);
+            if(!value||/^(?:未建立|未知|不明|无|暂无|（.*当前地点.*）|\(.*当前地点.*\))$/.test(value)) continue;
+            locations.push({code:String(lm[1]||'').trim(),label:label||'',value});
+        }
+    }
+
+    const unique=[];
+    const seen=new Set();
+    for(const row of locations){
+        const key=`${row.label}\u0000${row.value}`;
+        if(seen.has(key)) continue;
+        seen.add(key); unique.push(row);
+    }
+    const assistantName=String(m?.name||'').trim();
+    let selected=null;
+    if(unique.length===1) selected=unique[0];
+    if(!selected){
+        const prose=plainTextLocalV0114(cleanMesForSummaryV0110(m));
+        const mentioned=unique.filter(x=>x.label&&prose.includes(x.label));
+        if(mentioned.length===1) selected=mentioned[0];
+    }
+    if(!selected&&assistantName){
+        const named=unique.filter(x=>x.label&&(assistantName.includes(x.label)||x.label.includes(assistantName)));
+        // A multi-character status represents parallel locations. Never pick
+        // the card's default H row merely because the card itself has that name.
+        if(named.length===1&&unique.length===1) selected=named[0];
+    }
+
+    if(!date&&!time&&!selected&&!unique.length) return null;
+    return {
+        index,
+        date:date||null,
+        time:time||null,
+        time_raw:timeRaw||null,
+        location:selected?.value||null,
+        location_character:selected?.label||null,
+        locations:unique,
+        kind:'roleplay_status'
+    };
+}
+
+function latestRoleplayStatusSameSourceV01133(indexes) {
+    const chat=C().chat||[];
+    for(const i of [...new Set(indexes||[])].sort((a,b)=>b-a)){
+        const meta=extractRoleplayStatusMetadataV01133(chat[i],i);
+        if(meta) return meta;
+    }
+    return null;
 }
 
 // v0.11.2: structured world-state metadata bridge.
@@ -1635,6 +1717,16 @@ function sourceWorldMetaTextV0112(source) {
         .join('\n');
 }
 
+function sourceRoleplayStatusTextV01133(source) {
+    const chat=C().chat||[];
+    return sourceIndexes(source)
+        .map(i=>extractRoleplayStatusMetadataV01133(chat[i],i))
+        .filter(Boolean)
+        .map(x=>[x.time_raw||[x.date,x.time].filter(Boolean).join(' '),x.location].filter(Boolean).join(' | '))
+        .filter(Boolean)
+        .join('\n');
+}
+
 function temporalTextContainsClockV01131(text,targetMinutes) {
     const src=String(text||'');
     if(!src||targetMinutes==null) return false;
@@ -1673,7 +1765,9 @@ function classifySourceTimeEvidence(e) {
     }
 
     const src = sourceTextForTime(e?.source);
-    const meta = sourceWorldMetaTextV0112(e?.source);
+    const worldMeta = sourceWorldMetaTextV0112(e?.source);
+    const statusMeta = sourceRoleplayStatusTextV01133(e?.source);
+    const meta=[worldMeta,statusMeta].filter(Boolean).join('\n');
     if (!src && !meta) {
         return {level:'unverified', label:'无法验证', reason:'找不到 source 对应的原始聊天或世界状态元数据'};
     }
@@ -1688,7 +1782,8 @@ function classifySourceTimeEvidence(e) {
             return {
                 clock:hh2+':'+mm,
                 inCanonical:temporalTextContainsClockV01131(src,minutes),
-                inMeta:temporalTextContainsClockV01131(meta,minutes)
+                inMeta:temporalTextContainsClockV01131(meta,minutes),
+                inStatus:temporalTextContainsClockV01131(statusMeta,minutes)
             };
         });
         const missing=checks.filter(x=>!x.inCanonical&&!x.inMeta);
@@ -1702,8 +1797,8 @@ function classifySourceTimeEvidence(e) {
             };
             return {
                 level:anyCanonical?'partial':'structured',
-                label:anyCanonical?'原文/变量时间已验证':'变量状态时间',
-                reason:'时间由 canonical 正文与/或 UpdateVariable 的三个世界状态字段验证：'+checks.map(x=>x.clock).join('、')
+                label:anyCanonical?'原文/状态时间已验证':(checks.some(x=>x.inStatus)?'角色卡状态栏时间':'变量状态时间'),
+                reason:'时间由 canonical 正文、角色卡状态栏与/或 UpdateVariable 白名单字段验证：'+checks.map(x=>x.clock).join('、')
             };
         }
         const found=checks.filter(x=>x.inCanonical||x.inMeta);
@@ -1719,8 +1814,9 @@ function classifySourceTimeEvidence(e) {
 
     const chineseHour = time.match(/(?:凌晨|半夜|早晨|早上|上午|中午|下午|傍晚|晚上|晚间|夜间|深夜)?\s*(\d{1,2})(?:点|时)/);
     if (chineseHour) {
-        const token=chineseHour[0].replace(/\s+/g,''), c=(src||'').replace(/\s+/g,''), m=(meta||'').replace(/\s+/g,'');
+        const token=chineseHour[0].replace(/\s+/g,''), c=(src||'').replace(/\s+/g,''), m=(meta||'').replace(/\s+/g,''), st=(statusMeta||'').replace(/\s+/g,'');
         if (c.includes(token)) return {level:'explicit',label:'原文明确时间',reason:`source canonical 正文中找到“${token}”`};
+        if (st.includes(token)) return {level:'structured',label:'角色卡状态栏时间',reason:`同 source 的 <status> 白名单时间字段中找到“${token}”`};
         if (m.includes(token)) return {level:'structured',label:'变量状态时间',reason:`UpdateVariable 世界状态元数据中找到“${token}”`};
         return {level:'inferred',label:'总结推测时间',reason:'具体钟点只存在于记忆 time 字段'};
     }
@@ -1729,6 +1825,7 @@ function classifySourceTimeEvidence(e) {
     const hit=dayparts.find(x=>time.includes(x));
     if (hit) {
         if ((src||'').includes(hit)) return {level:'fuzzy',label:'原文模糊时段',reason:`source canonical 正文中存在“${hit}”`};
+        if ((statusMeta||'').includes(hit)) return {level:'structured',label:'角色卡状态栏时段',reason:`同 source 的 <status> 白名单时间字段中存在“${hit}”`};
         if ((meta||'').includes(hit)) return {level:'structured',label:'变量状态时段',reason:`UpdateVariable 世界状态元数据中存在“${hit}”`};
         return {level:'inferred',label:'总结推测时段',reason:`“${hit}”只存在于记忆 time 字段`};
     }
@@ -4648,7 +4745,9 @@ function stageTimelineRowsV01121(mem=M()) {
 function stageSummaryReadinessV01121(mem=M()) {
     const rows=stageTimelineRowsV01121(mem);
     const gaps=timelineCoverageGapsV0112(mem);
+    const deferred=localDeferredCountV01133(mem);
     const last=rows.length ? Math.max(...rows.map(x=>x.__last)) : -1;
+    if(deferred) return {ready:false,reason:`仍有 ${deferred} 楼已扫描但尚未形成记忆；请先运行“补录已跳过楼层（0 API）”`,events:rows.length,last};
     if(gaps.length) return {ready:false,reason:`时间线仍有断档 #${gaps[0].start}-#${gaps[0].end}`,events:rows.length,last};
     if(rows.length<6) return {ready:false,reason:`有效时间线只有 ${rows.length} 条；建议至少积累 6 条后再生成`,events:rows.length,last};
     return {ready:true,reason:'可以生成阶段大总结',events:rows.length,last};
@@ -5634,6 +5733,8 @@ function explicitDateSameMessagesV0114(indexes) {
     const chat=C().chat||[];
     for(const i of [...indexes].sort((a,b)=>b-a)){
         const raw=String(chat[i]?.mes||'');
+        const status=extractRoleplayStatusMetadataV01133(chat[i],i);
+        if(status?.date) return status.date;
         const d=extractDateTagFromMessage(raw);
         if(d) return d;
         const meta=extractWorldStateMetadataV0112(chat[i]);
@@ -5690,6 +5791,8 @@ function chooseLocalDateV0114(candidate,currentDate,combined,prevTime,nextTime,i
 function localTimeSameMessagesV0114(indexes) {
     const chat=C().chat||[];
     for(const i of [...indexes].sort((a,b)=>b-a)){
+        const status=extractRoleplayStatusMetadataV01133(chat[i],i);
+        if(status?.time) return status.time;
         const meta=extractWorldStateMetadataV0112(chat[i]);
         if(meta?.time) return meta.time;
     }
@@ -5703,6 +5806,8 @@ function localTimeSameMessagesV0114(indexes) {
 function localLocationSameMessagesV0114(indexes) {
     const chat=C().chat||[];
     for(const i of [...indexes].sort((a,b)=>b-a)){
+        const status=extractRoleplayStatusMetadataV01133(chat[i],i);
+        if(status?.location) return status.location;
         const meta=extractWorldStateMetadataV0112(chat[i]);
         if(meta?.location) return meta.location;
     }
@@ -6818,6 +6923,8 @@ function narrativeSummaryRecordsV01130(m,userMsg=null,mem=M()) {
         });
     }
     if(direct.length) return direct;
+    const labeled=labeledSummaryRecordsLocalV01133(m,userMsg,mem);
+    if(labeled.length) return labeled;
     return structuredSummaryRecordsLocalV0119(m,userMsg,mem).map(rec=>({
         ...rec,
         date:normalizeDateInput(rec?.date||'')?.iso||null,
@@ -6827,6 +6934,8 @@ function narrativeSummaryRecordsV01130(m,userMsg=null,mem=M()) {
 
 function markedCurrentStatusV01130(m,index=-1) {
     if(!m||m.is_user) return null;
+    const roleStatus=extractRoleplayStatusMetadataV01133(m,index);
+    if(roleStatus&&(roleStatus.date||roleStatus.time||roleStatus.location)) return roleStatus;
     const visible=cleanMes(m)
         .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi,'')
         .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi,'');
@@ -6924,7 +7033,7 @@ function repairNarrativeCalendarV01130(mem=M(),endInclusive=null) {
             e?.date_precision||null,e?.time||null
         ])
     ]);
-    if(mem?.narrative_calendar_v01130?.version==='0.11.32'&&mem?.narrative_calendar_v01130?.input_fingerprint===fingerprint){
+    if(mem?.narrative_calendar_v01130?.version==='0.11.33'&&mem?.narrative_calendar_v01130?.input_fingerprint===fingerprint){
         return {found:true,changed:false,rows_fixed:0,cached:true};
     }
 
@@ -6932,7 +7041,7 @@ function repairNarrativeCalendarV01130(mem=M(),endInclusive=null) {
         .filter(x=>x.first>=0&&x.first<=cap)
         .sort((a,b)=>(a.first-b.first)||(a.last-b.last)||(a.pos-b.pos));
     const priorRun=mem?.narrative_calendar_v01130;
-    const fullUpgrade=priorRun?.version!=='0.11.32'||!Number.isInteger(priorRun?.processed_to)||Number(priorRun.processed_to)>cap;
+    const fullUpgrade=priorRun?.version!=='0.11.33'||!Number.isInteger(priorRun?.processed_to)||Number(priorRun.processed_to)>cap;
     const scanFrom=fullUpgrade?0:Math.max(0,Number(priorRun.processed_to)-6);
     const rows=allRows.filter(x=>x.last>=scanFrom);
     const earlier=allRows.filter(x=>x.last<scanFrom);
@@ -7096,7 +7205,7 @@ function repairNarrativeCalendarV01130(mem=M(),endInclusive=null) {
         ])
     ]);
     mem.narrative_calendar_v01130={
-        version:'0.11.32',at:new Date().toISOString(),input_fingerprint:finalFingerprint,
+        version:'0.11.33',at:new Date().toISOString(),input_fingerprint:finalFingerprint,
         processed_to:cap,scan_from:scanFrom,
         direct_anchors:directCount,rows_fixed:rowsFixed,time_fixed:timeFixed,
         time_precision_changed:precision.changed,time_precision_downgraded:precisionDowngraded,
@@ -7194,13 +7303,13 @@ function refreshCurrentStoryStateV01121({persist=true}={}) {
         if(narrativeCalendar.changed||locationRepair.changed) result.changed=true;
     }
     catch (e) {
-        console.warn('[StoryMemory] v0.11.32 current-state resolver failed', e);
+        console.warn('[StoryMemory] v0.11.33 current-state resolver failed', e);
         return {changed:false,error:String(e?.message||e)};
     }
     if (result.changed && persist && !CURRENT_STATE_SAVE_PENDING_V01121) {
         CURRENT_STATE_SAVE_PENDING_V01121 = true;
         Promise.resolve(saveMeta())
-            .catch(e=>console.warn('[StoryMemory] v0.11.32 current-state save failed',e))
+            .catch(e=>console.warn('[StoryMemory] v0.11.33 current-state save failed',e))
             .finally(()=>{ CURRENT_STATE_SAVE_PENDING_V01121=false; });
     }
     return result;
@@ -7400,6 +7509,77 @@ function structuredSummaryRecordsLocalV0119(m,userMsg=null,mem=M()) {
     return structuredSummaryRecordsLocalV0117(m,userMsg,mem);
 }
 
+// Some presets expose a visible “剧情摘要” panel without an <abstract>/<plot>
+// wrapper. Accept only its bounded visible prose. A navigation tab whose only
+// content is “即时状态 / 剧情摘要 / 世界动态” is deliberately ignored.
+function labeledSummaryRecordsLocalV01133(m,userMsg=null,mem=M()) {
+    if(!m||m.is_user) return [];
+    const text=plainTextLocalV0114(cleanMesForSummaryV0110(m));
+    if(!text) return [];
+    const re=/(?:^|[\n。！？!?])\s*(?:剧情摘要|故事摘要|本轮摘要|情节摘要)\s*[:：]?\s*([\s\S]{12,900}?)(?=(?:\n|\s{2,})(?:即时状态|当前状态|场景档案|世界动态|人物状态|今日待办|弹幕|今日头条)\s*[:：]?|$)/gi;
+    const out=[];
+    let hit;
+    while((hit=re.exec(text))){
+        let event=String(hit[1]||'').trim();
+        if(!event||/(?:输出格式|严格遵守|字段规范|以下示例|<status|status_rule|必须在正文末尾)/i.test(event)) continue;
+        if(/^(?:即时状态|剧情摘要|世界动态|[\s·丨|])+$/i.test(event)) continue;
+        event=cleanupPresetPlotLocalV0119(event,280);
+        if(event.length<12) continue;
+        const status=extractRoleplayStatusMetadataV01133(m);
+        out.push({
+            tag:'labeled_plot_summary',record_no:null,
+            date:status?.date||normalizeSummaryDateLocalV0115(event),
+            time:status?.time||null,
+            location:status?.location||null,
+            event,
+            __direct_preset_plot_v0119:true,
+            __labeled_summary_v01133:true
+        });
+    }
+    return out;
+}
+
+// 0-API mode cannot perform a semantic rewrite, but it can still preserve a
+// concise verbatim extract from the actual user/assistant turn. This is used
+// only after structured/labeled summaries fail, and never invents facts.
+function extractiveFallbackEventLocalV01133(userMsg,assistantMsg,userName='') {
+    const assistantRaw=String(assistantMsg?.mes||'');
+    if(assistantRaw&&/<!doctype\s+html/i.test(assistantRaw)&&!/<content\b/i.test(assistantRaw)) return '';
+
+    const u=userMsg?userActionLocalV0114(userMsg,190):'';
+    const a=assistantMsg?responseActionLocalV0114(assistantMsg,230):'';
+    let event='';
+    const who=String(userName||'USER').trim()||'USER';
+    if(u&&a) event=`${who}：${u}；${a}`;
+    else if(u) event=`${who}：${u}`;
+    else if(a) event=a;
+    else if(assistantMsg) event=extractiveSummaryLocalV0114(assistantMsg,220);
+    if(!event) return '';
+
+    event=cleanupEventLocalV0117(event,userName);
+    if(event.length>230){
+        const cut=event.slice(0,230);
+        const stop=Math.max(cut.lastIndexOf('。'),cut.lastIndexOf('；'));
+        event=(stop>=130?cut.slice(0,stop+1):cut).trim();
+    }
+    if(event&&!/[。！？!?]$/.test(event)) event+='。';
+    if(!event||event.length<7) return '';
+    if(/(?:输出格式|字段规范|严格遵守|点击进入|CLICK TO ENTER|世界书绑定|角色设定|系统提示|status_rule)/i.test(event)) return '';
+    if(/(?:function\s*\(|const\s+\w+\s*=|document\.|className=|<\/html>)/i.test(event)) return '';
+    if(/乳头|乳尖|阴道|小穴|肉棒|龟头|精液|潮吹|自慰|抽插|后庭|子宫|阴蒂|穴口|爱液|淫水|高潮|体液/i.test(event)) return '';
+    const meaningful=/来到|到达|离开|进入|返回|前往|醒来|睡去|发现|遇到|收到|告诉|询问|回答|答应|拒绝|决定|确认|约定|联系|检查|治疗|受伤|袭击|威胁|救下|保护|表白|邀请|警告|提出|要求|同意|上课|训练|赶到|逃离|推开|打开|关闭|发动|带走|带回|拥抱|抱住|亲吻|吻|承诺|坦白|结婚|分手|死亡|失踪|回家|出发/;
+    if(!meaningful.test(event)&&event.length<40) return '';
+    return event;
+}
+
+function ignorableLocalPairV01133(userMsg,assistantMsg) {
+    const raw=String(assistantMsg?.mes||'');
+    if(raw&&/<!doctype\s+html/i.test(raw)&&!/<content\b/i.test(raw)) return true;
+    const u=userMsg?userActionLocalV0114(userMsg,120):'';
+    const a=assistantMsg?plainTextLocalV0114(cleanMesForSummaryV0110(assistantMsg)):'';
+    return !u&&!a;
+}
+
 function ensureWeekdayTimelineTimeLocalV0119(time,date) {
     let t=String(time||'').trim();
     const iso=normalizeDateInput(date)?.iso||null;
@@ -7494,6 +7674,13 @@ function sourceTemporalMetaLocalV0117(indexes,mem=M()){
         if(out.date&&out.time&&out.location) break;
     }
 
+    const status=latestRoleplayStatusSameSourceV01133(sorted);
+    if(status){
+        if(!out.date&&status.date){ out.date=status.date; out.kind='roleplay_status'; out.reason=`同 source #${status.index} 的 <status> 时间字段`; }
+        if(!out.time&&status.time){ out.time=status.time; out.kind='roleplay_status'; out.reason=`同 source #${status.index} 的 <status> 时间字段`; }
+        if(!out.location&&status.location) out.location=status.location;
+    }
+
     if(!out.date&&wm.date){ out.date=wm.date; out.date_reality=!!wm.date_reality; }
     if(!out.time&&wm.time){
         out.time=wm.time;
@@ -7554,7 +7741,7 @@ function reconcileTemporalLocalV0117({currentDate=null,previousTime=null,candida
         else{
             const diff=dateDiffDaysLocalV0114(cur,cand);
             if(diff!=null && diff<0){
-                if(auth==='structured_summary'){
+                if(auth==='structured_summary'||auth==='roleplay_status'){
                     date=cand;
                     notes.push(`按同 source 权威时间进入新场景日历 ${cand}`);
                 }else{
@@ -7566,7 +7753,7 @@ function reconcileTemporalLocalV0117({currentDate=null,previousTime=null,candida
                 date=cand; notes.push(`现实主时间轴推进 ${diff} 天至 ${cand}`);
             }else if(diff===1){
                 // +1 is accepted for structured summary / explicit source date / next-day semantics.
-                if(auth==='structured_summary' || sameSourceAbsoluteDateCueLocalV01110(combined,cand) || hasNextDayCueTextV0114(combined)){
+                if(auth==='structured_summary' || auth==='roleplay_status' || sameSourceAbsoluteDateCueLocalV01110(combined,cand) || hasNextDayCueTextV0114(combined)){
                     date=cand; notes.push(`采用可靠次日日期 ${cand}`);
                 }else if(auth==='world_meta'){
                     // World-state metadata is useful, but old presets sometimes carry stale dates.
@@ -7577,7 +7764,7 @@ function reconcileTemporalLocalV0117({currentDate=null,previousTime=null,candida
                 }else date=cand;
             }else if(diff!=null && diff>1){
                 // Prevent stale world-state dates (e.g. 周五/09-26) from jumping several days.
-                if(auth==='structured_summary' || sameSourceAbsoluteDateCueLocalV01110(combined,cand) || multiDayAdvanceCueLocalV01110(combined)){
+                if(auth==='structured_summary' || auth==='roleplay_status' || sameSourceAbsoluteDateCueLocalV01110(combined,cand) || multiDayAdvanceCueLocalV01110(combined)){
                     date=cand; notes.push(`采用同 source 明确多日推进 ${cand}`);
                 }else{
                     date=cur; notes.push(`拒绝无剧情证据的跨多日跳转 ${cand}`);
@@ -7591,7 +7778,7 @@ function reconcileTemporalLocalV0117({currentDate=null,previousTime=null,candida
     let p=parseStoryClock(previousTime), n=parseStoryClock(time);
     // Midnight rollover: even stale same-day world metadata must not pin 03:xx to the previous day.
     if(date&&cur&&date===cur&&p!=null&&n!=null&&p>=18*60&&n<=8*60&&auth!=='world_reality_meta'){
-        const rawExplicitSameDay = cand && sameSourceAbsoluteDateCueLocalV01110(combined,cand) && auth==='structured_summary';
+        const rawExplicitSameDay = cand && (auth==='structured_summary'||auth==='roleplay_status');
         if(!rawExplicitSameDay){
             date=addDaysISO(cur,1); notes.push('晚间/深夜→凌晨，按 source 顺序跨日 +1');
         }
@@ -7697,20 +7884,24 @@ function localTriageStatsV01111(nodes,start,endInclusive){
     const t=nodes?.__smm_triage_v01111||{};
     const reliable=[...new Set(t.reliable||[])];
     const needsAI=[...new Set(t.needsAI||[])];
+    const ignored=[...new Set(t.ignored||[])];
     return {
         checked:endInclusive-start+1,
         reliable:reliable.length,
         needs_ai:needsAI.length,
+        ignored:ignored.length,
         needs_ai_ranges:compactRangesLocalV01111(needsAI),
         preset_plot_nodes:Number(t.presetPlotNodes||0),
-        factual_fallback_nodes:Number(t.factualFallbackNodes||0)
+        factual_fallback_nodes:Number(t.factualFallbackNodes||0),
+        extractive_nodes:Number(t.extractiveNodes||0),
+        status_nodes:Number(t.statusNodes||0)
     };
 }
 
 function makeLocalTimelineNodesV0117(start,endInclusive,mem=M()){
     const chat=C().chat||[];
     const nodes=[];
-    const triage={reliable:[],needsAI:[],presetPlotNodes:0,factualFallbackNodes:0};
+    const triage={reliable:[],needsAI:[],ignored:[],presetPlotNodes:0,factualFallbackNodes:0,extractiveNodes:0,statusNodes:0};
     let currentDate=priorReliableDateV0114(mem,start);
     let previousTime=null;
     let i=start;
@@ -7725,6 +7916,7 @@ function makeLocalTimelineNodesV0117(start,endInclusive,mem=M()){
         const indexes=[]; for(let k=a;k<=b;k++) indexes.push(k);
         const source=canonicalSourceV0113(indexes)||`#${i}`;
         const combined=indexes.map(k=>cleanMesForSummaryV0110(chat[k])).join('\n');
+        const status=latestRoleplayStatusSameSourceV01133(indexes);
         const world=exactWorldStateMetaSameSourceV0117(indexes);
         const rawTime=localTimeSameMessagesV0114(indexes);
         const rawDate=explicitDateSameMessagesV0114(indexes);
@@ -7739,25 +7931,26 @@ function makeLocalTimelineNodesV0117(start,endInclusive,mem=M()){
                 // calendar.  /world/reality-time is retained as a parallel clock
                 // and only becomes the visible event date when no scene date was
                 // emitted by the preset.
-                const candidateDate=rec.date||world.date||rawDate||null;
-                const candidateTimeRaw=rec.time||world.time||rawTime||null;
+                const candidateDate=rec.date||status?.date||world.date||rawDate||null;
+                const candidateTimeRaw=rec.time||status?.time||world.time||rawTime||null;
                 const candidateTime=safeTimelineTimeInfoV01131({
                     date:candidateDate,time:candidateTimeRaw,source,
                     reality_date:world.date_reality?world.date:null,
                     calendar_axis:(rec.date&&world.date_reality&&world.date&&rec.date!==world.date)?'scene':null
                 }).time;
-                const authority=rec.date?'structured_summary':(world.date?(world.date_reality?'world_reality_meta':'world_meta'):'raw');
+                const authority=rec.date?'structured_summary':(status?.date?'roleplay_status':(world.date?(world.date_reality?'world_reality_meta':'world_meta'):'raw'));
                 const tr=reconcileTemporalLocalV0117({currentDate,previousTime,candidateDate,candidateTime,combined:`${combined}\n${rec.event||''}`,authority});
                 if(tr.date) currentDate=tr.date;
                 if(tr.time) previousTime=tr.time;
                 const eventText=rec.__direct_preset_plot_v0119 ? cleanupPresetPlotLocalV0119(rec.event,280) : compressEventLocalV0117(rec.event,userName,170);
                 const node={date:tr.date||null,time:ensureWeekdayTimelineTimeLocalV0119(tr.time,tr.date),event:eventText,source,__local_kind_v0119:rec.__direct_preset_plot_v0119?'preset_plot':'structured'};
-                const loc=rec.location||world.location||rawLoc; if(loc) node.location=loc;
+                const loc=rec.location||status?.location||world.location||rawLoc; if(loc) node.location=loc;
                 if(world.date_reality&&world.date) node.reality_date=world.date;
                 if(world.time_reality&&world.time) node.reality_time=world.time;
                 if(node.reality_date&&node.reality_date!==node.date) node.calendar_axis='scene';
                 if(tr.corrected){ node.time_evidence='structured'; node.time_evidence_label='连续性校准时间'; node.time_evidence_reason=tr.reason; }
                 else if(rec.time){ node.time_evidence='structured'; node.time_evidence_label='预设摘要时间'; node.time_evidence_reason=`来自本批 source 的 <${rec.tag}> 结构化记录${rec.record_no?` #${rec.record_no}`:''}`; }
+                else if(status?.time){ node.time_evidence='structured'; node.time_evidence_label='角色卡状态栏时间'; node.time_evidence_reason=`同 source #${status.index} 的 <status> 白名单时间字段`; }
                 else if(world.time){ node.time_evidence='structured'; node.time_evidence_label=world.time_reality?'MVU现实时间':'变量状态时间'; node.time_evidence_reason=`同 source #${world.index} 的 ${world.time_path||'/世界/当前时间'}`; }
                 else { const te=classifySourceTimeEvidence(node); node.time_evidence=te.level; node.time_evidence_label=te.label; node.time_evidence_reason=te.reason; }
                 applyTimelineTimePrecisionV01131(node);
@@ -7765,6 +7958,7 @@ function makeLocalTimelineNodesV0117(start,endInclusive,mem=M()){
                     nodes.push(node);
                     acceptedRecord=true;
                     if(rec.__direct_preset_plot_v0119) triage.presetPlotNodes++;
+                    if(status) triage.statusNodes++;
                 }
             }
             if(acceptedRecord){
@@ -7773,31 +7967,33 @@ function makeLocalTimelineNodesV0117(start,endInclusive,mem=M()){
                 for(const q of indexes) triage.needsAI.push(q);
             }
         }else{
-            const candidateDate=world.date||rawDate||null;
-            const candidateTimeRaw=world.time||rawTime||null;
+            const candidateDate=status?.date||world.date||rawDate||null;
+            const candidateTimeRaw=status?.time||world.time||rawTime||null;
             const candidateTime=safeTimelineTimeInfoV01131({
                 date:candidateDate,time:candidateTimeRaw,source,
                 reality_date:world.date_reality?world.date:null
             }).time;
-            const authority=world.date?(world.date_reality?'world_reality_meta':'world_meta'):'raw';
+            const authority=status?.date?'roleplay_status':(world.date?(world.date_reality?'world_reality_meta':'world_meta'):'raw');
             const tr=reconcileTemporalLocalV0117({currentDate,previousTime,candidateDate,candidateTime,combined,authority});
             if(tr.date) currentDate=tr.date;
             if(tr.time) previousTime=tr.time;
-            const event=fallbackEventLocalV0119(userMsg,assistantMsg,userName);
+            const strongEvent=fallbackEventLocalV0119(userMsg,assistantMsg,userName);
+            const event=strongEvent||extractiveFallbackEventLocalV01133(userMsg,assistantMsg,userName);
             if(event){
-                const node={date:tr.date||null,time:ensureWeekdayTimelineTimeLocalV0119(tr.time,tr.date),event,source,__local_kind_v0115:'fallback'};
-                const loc=world.location||rawLoc; if(loc) node.location=loc;
+                const node={date:tr.date||null,time:ensureWeekdayTimelineTimeLocalV0119(tr.time,tr.date),event,source,__local_kind_v0115:'fallback',__local_kind_v0119:strongEvent?'factual':'extractive'};
+                const loc=status?.location||world.location||rawLoc; if(loc) node.location=loc;
                 if(world.date_reality&&world.date) node.reality_date=world.date;
                 if(world.time_reality&&world.time) node.reality_time=world.time;
                 if(tr.corrected){ node.time_evidence='structured'; node.time_evidence_label='连续性校准时间'; node.time_evidence_reason=tr.reason; }
+                else if(status?.time){ node.time_evidence='structured'; node.time_evidence_label='角色卡状态栏时间'; node.time_evidence_reason=`同 source #${status.index} 的 <status> 白名单时间字段`; }
                 else if(world.time){ node.time_evidence='structured'; node.time_evidence_label=world.time_reality?'MVU现实时间':'变量状态时间'; node.time_evidence_reason=`同 source #${world.index} 的 ${world.time_path||'/世界/当前时间'}`; }
                 else { const te=classifySourceTimeEvidence(node); node.time_evidence=te.level; node.time_evidence_label=te.label; node.time_evidence_reason=te.reason; }
                 applyTimelineTimePrecisionV01131(node);
-                nodes.push(node); triage.factualFallbackNodes++; for(const q of indexes) triage.reliable.push(q);
+                nodes.push(node); triage.factualFallbackNodes++; if(!strongEvent) triage.extractiveNodes++; if(status) triage.statusNodes++; for(const q of indexes) triage.reliable.push(q);
             }else{
                 // Do not create a visible blank/placeholder event. This pair is
                 // intentionally deferred to the optional AI queue.
-                for(const q of indexes) triage.needsAI.push(q);
+                for(const q of indexes) (ignorableLocalPairV01133(userMsg,assistantMsg)?triage.ignored:triage.needsAI).push(q);
             }
         }
         i=(b>=i?b+1:i+1);
@@ -7806,7 +8002,11 @@ function makeLocalTimelineNodesV0117(start,endInclusive,mem=M()){
         const idx=[...sourceIndexes(n?.source)].sort((a,b)=>a-b);
         let userName=''; for(const j of idx){ if(chat[j]?.is_user){ userName=String(chat[j]?.name||'').trim(); if(userName) break; } }
         const x={...n};
-        x.event=(x.__local_kind_v0119==='preset_plot' ? cleanupPresetPlotLocalV0119(x.event,280) : compressEventLocalV0117(x.event,userName,170));
+        x.event=x.__local_kind_v0119==='preset_plot'
+            ? cleanupPresetPlotLocalV0119(x.event,280)
+            : (x.__local_kind_v0119==='extractive'
+                ? cleanupEventLocalV0117(x.event,userName).slice(0,230)
+                : compressEventLocalV0117(x.event,userName,170));
         if(x.date&&x.time) x.time=ensureWeekdayTimelineTimeLocalV0119(x.time,x.date);
         return x;
     }).filter(x=>String(x?.event||'').trim());
@@ -7845,13 +8045,13 @@ function repairExistingTimelineTemporalV0117(mem,start=0,endInclusive=null){
         const candidateDate=meta.date||oldDate||null;
         let candidateTime=oldTime;
         const needTime=isMissingStoryValueV0112(oldTime)||isUnresolvedStoryTimeV0112(oldTime);
-        if(needTime&&meta.time) candidateTime=meta.time;
+        if((needTime||meta.kind==='roleplay_status')&&meta.time) candidateTime=meta.time;
         // If the existing weekday contradicts a stronger same-source date and the
         // world/preset metadata also has a time, prefer that structured time.
         if(meta.date&&oldTime&&weekdayIndexTextV0117(oldTime)!=null&&weekdayIndexTextV0117(oldTime)!==weekdayIndexISO_V0117(meta.date)&&meta.time){
             candidateTime=meta.time;
         }
-        const authority=meta.date?(meta.date_reality?'world_reality_meta':(meta.kind==='preset_summary'?'structured_summary':'world_meta')):'raw';
+        const authority=meta.date?(meta.date_reality?'world_reality_meta':(meta.kind==='preset_summary'?'structured_summary':(meta.kind==='roleplay_status'?'roleplay_status':'world_meta'))):'raw';
         const combined=idx.map(i=>cleanMesForSummaryV0110(chat[i])).join('\n');
         const tr=reconcileTemporalLocalV0117({currentDate,previousTime,candidateDate,candidateTime,combined,authority});
 
@@ -7873,6 +8073,7 @@ function repairExistingTimelineTemporalV0117(mem,start=0,endInclusive=null){
             if(tr.corrected){ e.time_evidence='structured'; e.time_evidence_label='连续性校准时间'; e.time_evidence_reason=tr.reason; }
             else if(meta.kind==='world_meta'||meta.kind==='world_reality_meta'){ e.time_evidence='structured'; e.time_evidence_label=meta.kind==='world_reality_meta'?'MVU现实时间':'变量状态时间'; e.time_evidence_reason=meta.reason||'同 source 世界状态时间'; }
             else if(meta.kind==='preset_summary'){ e.time_evidence='structured'; e.time_evidence_label='预设摘要时间'; e.time_evidence_reason=meta.reason||'同 source 预设摘要时间'; }
+            else if(meta.kind==='roleplay_status'){ e.time_evidence='structured'; e.time_evidence_label='角色卡状态栏时间'; e.time_evidence_reason=meta.reason||'同 source <status> 白名单时间字段'; }
         }
         if(tr.date) currentDate=tr.date;
         if(tr.time) previousTime=tr.time;
@@ -8439,6 +8640,50 @@ function localSummaryModeV01129() {
     return String(S().summaryMode||'local') !== 'ai';
 }
 
+function localDeferredRangesV01133(mem=M()) {
+    const chat=C().chat||[];
+    const cap=Math.min(chat.length-1,Math.max(-1,Number(mem?.last_processed_index??-1)));
+    const rows=[];
+    for(const row of (Array.isArray(mem?.local_deferred_ranges)?mem.local_deferred_ranges:[])){
+        const a=Math.max(0,Number(row?.[0])),b=Math.min(cap,Number(row?.[1]));
+        if(Number.isInteger(a)&&Number.isInteger(b)&&b>=a) rows.push([a,b]);
+    }
+    const indexes=[];
+    for(const [a,b] of rows) for(let i=a;i<=b;i++) indexes.push(i);
+    return compactRangesLocalV01111(indexes);
+}
+
+function localDeferredCountV01133(mem=M()) {
+    return localDeferredRangesV01133(mem).reduce((n,[a,b])=>n+b-a+1,0);
+}
+
+function updateCharactersFromStatusRangeV01133(mem,start,endInclusive) {
+    const chat=C().chat||[];
+    mem.characters=mem.characters&&typeof mem.characters==='object'&&!Array.isArray(mem.characters)?mem.characters:{};
+    let changed=0;
+    for(let i=Math.max(0,start);i<=Math.min(endInclusive,chat.length-1);i++){
+        const status=extractRoleplayStatusMetadataV01133(chat[i],i);
+        if(!status) continue;
+        for(const loc of (status.locations||[])){
+            const rawName=String(loc?.label||'').trim();
+            if(!rawName||/^(?:角色|人物|主角|用户|USER|你)$/i.test(rawName)) continue;
+            const name=canonicalPersonName(rawName);
+            if(!name) continue;
+            const old=mem.characters[name]&&typeof mem.characters[name]==='object'?mem.characters[name]:{};
+            const oldIndex=sourceLast(old.location_source);
+            if(old.location&&oldIndex<0) continue;
+            if(oldIndex>i) continue;
+            const value=String(loc.value||'').trim();
+            if(!value) continue;
+            if(old.location!==value||old.location_source!==`#${i}`){
+                mem.characters[name]={...old,location:value,location_source:`#${i}`};
+                changed++;
+            }
+        }
+    }
+    return changed;
+}
+
 function persistedLocalTimelineNodeV01129(node) {
     const out={
         date:normalizeDateInput(node?.date||'')?.iso||null,
@@ -8457,6 +8702,78 @@ function persistedLocalTimelineNodeV01129(node) {
     }
     if(Number.isInteger(Number(node?.calendar_segment))) out.calendar_segment=Number(node.calendar_segment);
     return out;
+}
+
+async function backfillDeferredLocalV01133({save=true}={}) {
+    const mem=M();
+    const snapshot=cloneJSONV0112(mem);
+    const ranges=localDeferredRangesV01133(mem);
+    if(!ranges.length) return {checked:0,added:0,resolved:0,remaining:0,ranges:[]};
+    let checked=0,added=0,resolved=0,ignored=0,extractive=0,statusNodes=0,characters=0;
+    try{
+        for(const [start,endInclusive] of ranges){
+            const rawNodes=makeLocalTimelineNodesV0117(start,endInclusive,mem);
+            const triage=localTriageStatsV01111(rawNodes,start,endInclusive);
+            const nodes=rawNodes
+                .filter(n=>sourceWithinBatchV0112(n?.source,start,endInclusive+1))
+                .map(persistedLocalTimelineNodeV01129)
+                .filter(n=>n.event&&n.source);
+            const before=(mem.timeline||[]).length;
+            mem.timeline=uniqMerge(mem.timeline,nodes,x=>JSON.stringify([x.date,x.time,x.location||'',x.event,x.source]));
+            added+=(mem.timeline||[]).length-before;
+            checked+=triage.checked;
+            resolved+=triage.reliable;
+            ignored+=triage.ignored||0;
+            extractive+=triage.extractive_nodes||0;
+            statusNodes+=triage.status_nodes||0;
+            characters+=updateCharactersFromStatusRangeV01133(mem,start,endInclusive);
+            replaceLocalDeferredRangeV01129(mem,start,endInclusive,triage.needs_ai_ranges);
+        }
+        mem.timeline.sort((a,b)=>sourceFirst(a?.source)-sourceFirst(b?.source));
+        const cap=Math.min((C().chat||[]).length-1,Math.max(-1,Number(mem.last_processed_index??-1)));
+        repairExistingTimelineTemporalV0117(mem,0,cap);
+        repairNarrativeCalendarV01130(mem,cap);
+        syncCurrentDateFromTimeline(mem,null);
+        syncCurrentStoryStateFromLatestMetaV0116(mem,cap);
+        resolveCurrentNarrativeStateV01130(mem,cap);
+        restoreMissingCurrentLocationV01129(mem,cap);
+        mem.audit=Array.isArray(mem.audit)?mem.audit:[];
+        mem.audit.push({
+            at:new Date().toISOString(),type:'local_deferred_backfill_v01133',api_calls:0,
+            ranges,checked,resolved,ignored,extractive_nodes:extractive,status_nodes:statusNodes,
+            characters_updated:characters,nodes_added:added,
+            remaining:localDeferredCountV01133(mem),preserved_cursor:Number(snapshot.last_processed_index??-1)
+        });
+        if(mem.audit.length>50) mem.audit=mem.audit.slice(-50);
+        if(save) await saveMeta();
+        return {checked,added,resolved,ignored,extractive,statusNodes,characters,remaining:localDeferredCountV01133(mem),ranges};
+    }catch(e){
+        restoreObjectInPlaceV0112(mem,snapshot);
+        if(save){ try{await saveMeta();}catch(_){} }
+        throw e;
+    }
+}
+
+async function runDeferredBackfillV01133() {
+    if(BUSY||HISTORY_RUNNING||GAP_REPAIR_RUNNING_V0112) return toast('当前已有总结/重建任务在运行。','warning');
+    const count=localDeferredCountV01133(M());
+    if(!count) return toast('当前没有被跳过且等待补录的楼层。','success');
+    BUSY=true;
+    try{
+        const result=await backfillDeferredLocalV01133({save:true});
+        refresh(); refreshNative();
+        const box=document.getElementById('smm2_native_memory_box');
+        if(box?.dataset.open==='1'){
+            box.innerHTML=memoryReadableHTML();
+            if(M().schema===SMM4_SCHEMA) bindHistoryBrowserV4(); else bindHistoryBrowserLegacy();
+        }
+        toast(`补录完成：检查 ${result.checked} 楼，新增 ${result.added} 条时间线；仍待人工/AI ${result.remaining} 楼。`,'success');
+    }catch(e){
+        console.error('[StoryMemory] v0.11.33 deferred backfill failed',e);
+        toast(`补录失败，原记忆已恢复：${e?.message||e}`,'error');
+    }finally{
+        BUSY=false; refresh(); refreshNative();
+    }
 }
 
 async function summarizeRangeLocalV01129(start,end,options={}) {
@@ -8481,6 +8798,7 @@ async function summarizeRangeLocalV01129(start,end,options={}) {
         addLocalCoverageRangeV01129(mem,start,endInclusive);
         replaceLocalDeferredRangeV01129(mem,start,endInclusive,triage.needs_ai_ranges);
         mem.last_processed_index=endInclusive;
+        const statusCharacters=updateCharactersFromStatusRangeV01133(mem,start,endInclusive);
 
         const temporalRepair=repairExistingTimelineTemporalV0117(mem,start,endInclusive);
         const narrativeCalendar=repairNarrativeCalendarV01130(mem,endInclusive);
@@ -8504,6 +8822,10 @@ async function summarizeRangeLocalV01129(start,end,options={}) {
             deferred_ranges:triage.needs_ai_ranges,
             preset_plot_nodes:triage.preset_plot_nodes,
             factual_fallback_nodes:triage.factual_fallback_nodes,
+            extractive_nodes:triage.extractive_nodes||0,
+            status_nodes:triage.status_nodes||0,
+            ignored:triage.ignored||0,
+            status_characters_updated:statusCharacters,
             nodes_generated:nodes.length,
             nodes_added:mem.timeline.length-before,
             temporal_repair:temporalRepair,
@@ -8520,6 +8842,8 @@ async function summarizeRangeLocalV01129(start,end,options={}) {
             needs_ai_ranges:triage.needs_ai_ranges,
             preset_plot_nodes:triage.preset_plot_nodes,
             factual_fallback_nodes:triage.factual_fallback_nodes,
+            extractive_nodes:triage.extractive_nodes||0,
+            ignored:triage.ignored||0,
             source_mode:'incremental_local_v01129'
         });
         if(mem.audit.length>50) mem.audit=mem.audit.slice(-50);
@@ -8569,8 +8893,9 @@ async function summarizeNew(force=false) {
     const c = C(), s = S(), mem = M(), chat = c.chat || [];
     const start = Math.max(0, Number(mem.last_processed_index ?? -1) + 1);
     const pending = chat.length - start;
-    if (!force && pending < Math.max(1, Number(s.triggerMessages)||8)) return;
-    if (pending <= 0) return toast('当前没有新的消息。');
+    const deferredBefore=localSummaryModeV01129()?localDeferredCountV01133(mem):0;
+    if (!force && pending < Math.max(1, Number(s.triggerMessages)||8) && deferredBefore<=0) return;
+    if (pending <= 0 && deferredBefore<=0) return toast('当前没有新的消息，也没有待补录楼层。');
 
     BUSY = true;
     try {
@@ -8581,6 +8906,12 @@ async function summarizeNew(force=false) {
         const startInit = autoInitializeStoryStartV01128(mem);
         if (startInit.changed) {
             await saveMeta();
+            refresh();
+        }
+
+        let backfill=null;
+        if(localSummaryModeV01129()&&deferredBefore>0){
+            backfill=await backfillDeferredLocalV01133({save:true});
             refresh();
         }
 
@@ -8600,7 +8931,11 @@ async function summarizeNew(force=false) {
             toast('总结已完成，但自动隐藏失败：' + (hideError?.message || hideError), 'warning');
         }
 
-        toast(localSummaryModeV01129()?'剧情记忆已更新（0 API）。':'剧情记忆已更新（AI）。','success');
+        if(backfill){
+            toast(`剧情记忆已更新（0 API）：旧楼层新增 ${backfill.added} 条时间线，仍待人工/AI ${backfill.remaining} 楼。`,'success');
+        }else{
+            toast(localSummaryModeV01129()?'剧情记忆已更新（0 API）。':'剧情记忆已更新（AI）。','success');
+        }
     } catch(e) {
         console.error('[StoryMemory] summarize failed', e);
         toast(`总结失败：${e.message || e}`,'error');
@@ -8705,6 +9040,8 @@ function stat() {
         done:Math.max(0,(m.last_processed_index??-1)+1),
         total,
         pending:Math.max(0,total-((m.last_processed_index??-1)+1)),
+        timeline:(m.timeline||[]).filter(x=>!x?.__coverage_only_v01110).length,
+        deferred:localDeferredCountV01133(m),
         events:(m.events||[]).length,
         loops:(m.open_loops||[]).length,
         conflicts:(m.conflicts||[]).length + (m.quarantined||[]).length
@@ -8714,10 +9051,11 @@ function stat() {
 function panelHTML() {
     return `<div id="${PANEL_ID}" class="smm2-hidden">
       <div class="smm2-card">
-        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.32</span></div><button id="smm2_close">×</button></div>
+        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.33</span></div><button id="smm2_close">×</button></div>
         <div id="smm2_stats" class="smm2-stats"></div>
         <div class="smm2-grid">
           <button id="smm2_new">总结新增</button>
+          <button id="smm133_backfill">补录已跳过楼层（0 API）</button>
           <button id="smm2_rebuild">重扫整条聊天</button>
           <button id="smm2_import">导入记忆 JSON</button>
           <button id="smm2_export">导出记忆 JSON</button>
@@ -10306,7 +10644,8 @@ function legacyReadableHTML(mem=M()) {
       <div class="smm2-memory-view">
         <div class="smm2-memory-top smm52-live-view">
           <div><b>查看模式：</b>${esc(viewLabel)}</div>
-          <div><b>已重建：</b>${processed}/${total} 条</div>
+          <div><b>已扫描：</b>${processed}/${total} 条</div>
+          <div><b>已形成时间线：</b>${(mem.timeline||[]).filter(x=>!x?.__coverage_only_v01110).length} 条　<b>待补录：</b>${localDeferredCountV01133(mem)} 楼</div>
           <div><b>剧情起点：</b>${esc(mem.story_start||'未建立')}</div>
           <div><b>当前剧情日期：</b>${esc(date)}</div>
           <div><b>显示时间：</b>${esc(mem.current_story_time||'未建立')}</div>
@@ -10638,6 +10977,7 @@ function nativeManagerHTML() {
       <div class="smm2-native-grid smm2-main-actions">
         <button id="smm2_native_new" class="menu_button smm2-primary-tool">总结新增</button>
         <button id="smm2_native_view" class="menu_button">查看 / 收起记忆</button>
+        <button id="smm133_native_backfill" class="menu_button smm2-primary-tool">补录已跳过楼层（0 API）</button>
       </div>
 
       <div id="smm2_native_memory_box" data-open="0"></div>
@@ -10913,6 +11253,8 @@ function bindNativeManager() {
     if (!q('smm2_native_new')) return;
 
     q('smm2_native_new').onclick = () => summarizeNew(true);
+    const deferredBackfillBtn=q('smm133_native_backfill');
+    if(deferredBackfillBtn) deferredBackfillBtn.onclick=runDeferredBackfillV01133;
     const stageBuildBtn=q('smm121_build_stages');
     if(stageBuildBtn) stageBuildBtn.onclick=generateStageSummariesV01121;
     refreshStageSummaryStatusV01121();
@@ -11417,10 +11759,16 @@ function refreshNative() {
     const localMode=String(s.summaryMode||'local')!=='ai';
     const modeStatus=document.getElementById('smm129_mode_status');
     if(modeStatus) modeStatus.textContent=localMode
-        ? '当前为 0 API：优先压缩回复自带的 abstract / plot，否则只抽取原文中可直接确认的事实；不调用任何总结接口。无法安全压缩的原文不会被自动隐藏。'
+        ? '当前为 0 API：优先读取 abstract / plot / 可识别的剧情摘要；否则从真实对话抽取可追溯原句。<status> 只提供时间和地点，不会把内心、待办、弹幕或头条写入正史。无法安全抽取的原文不会被自动隐藏。'
         : '当前为 AI 总结；遇到 524 / 120 秒超时时，当批会本地保底并自动切回 0 API。';
     const newBtn=document.getElementById('smm2_native_new');
     if(newBtn) newBtn.textContent=localMode?'总结新增（0 API）':'总结新增（AI）';
+    const deferredCount=localDeferredCountV01133(M());
+    const deferredBtn=document.getElementById('smm133_native_backfill');
+    if(deferredBtn){
+        deferredBtn.textContent=deferredCount?`补录已跳过 ${deferredCount} 楼（0 API）`:'没有待补录楼层';
+        deferredBtn.disabled=!deferredCount;
+    }
     for(const id of ['smm93_summary_provider','smm93_summary_profile','smm93_summary_fallback','smm93_summary_tokens','smm96_create_profile']){
         const el=document.getElementById(id);
         if(el) el.disabled=localMode;
@@ -11488,7 +11836,7 @@ function installNativeExtensionEntry() {
 
         wrap.innerHTML = `
           <div class="inline-drawer-toggle inline-drawer-header">
-            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.32</span></div>
+            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.33</span></div>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
           </div>
           <div class="inline-drawer-content">
@@ -11561,6 +11909,7 @@ function bind() {
     const $=id=>document.getElementById(id);
     $('smm2_close').onclick=()=>$(PANEL_ID).classList.add('smm2-hidden');
     $('smm2_new').onclick=()=>summarizeNew(true);
+    $('smm133_backfill').onclick=runDeferredBackfillV01133;
     $('smm2_rebuild').onclick=rebuildAll;
     $('smm2_import').onclick=importMemory;
     $('smm2_export').onclick=exportMemory;
@@ -11642,9 +11991,9 @@ function statsHTMLV0105() {
     return [
         `<div class="smm105-stat-line"><b>剧情：</b>${esc(date)}　${esc(st.time)}</div>`,
         `<div class="smm105-stat-line"><b>总结方式：</b>${localSummaryModeV01129()?'0 API 本地事实':'AI 完整总结'}</div>`,
-        `<div class="smm105-stat-line"><b>处理：</b>${st.done}/${st.total}　待总结 ${st.pending}　已隐藏 ${hidden.count}</div>`,
-        `<div class="smm105-stat-line"><b>记忆：</b>事件 ${st.events}　人物 ${people}　关系 ${relations}　锚点 ${anchors}　阶段 ${(mem.stage_summaries||[]).length}</div>`,
-        `<div class="smm105-stat-line"><b>连续性：</b>${coverageGapsV0112.length ? `⚠ 时间线断档 #${coverageGapsV0112[0].start}-#${coverageGapsV0112[0].end}` : (continuityNeedsReview ? '后台有待核查项' : '正常')}</div>`,
+        `<div class="smm105-stat-line"><b>扫描：</b>${st.done}/${st.total}　待扫描 ${st.pending}　待补录 ${st.deferred}　已隐藏 ${hidden.count}</div>`,
+        `<div class="smm105-stat-line"><b>记忆：</b>时间线 ${st.timeline}　人物 ${people}　关系 ${relations}　锚点 ${anchors}　阶段 ${(mem.stage_summaries||[]).length}</div>`,
+        `<div class="smm105-stat-line"><b>连续性：</b>${st.deferred ? `⚠ ${st.deferred} 楼已扫描但尚未形成记忆` : (coverageGapsV0112.length ? `⚠ 时间线断档 #${coverageGapsV0112[0].start}-#${coverageGapsV0112[0].end}` : (continuityNeedsReview ? '后台有待核查项' : '正常'))}</div>`,
         `<div class="smm105-stat-line"><b>历史重建：</b>${esc(rebuildStatusLabelV0105(mem))}</div>`,
         rebuildCheckpointHTMLV0105(mem, st.total)
     ].filter(Boolean).join('');
@@ -11653,7 +12002,7 @@ function statsHTMLV0105() {
 function refresh() {
     // v0.11.19: extension prompts are chat-scoped in practice; always refresh after
     // chat/message state changes so the main model receives THIS chat's latest memory.
-    try { refreshSafeMemoryInjectionV0100(); } catch(e) { console.warn('[StoryMemory] v0.11.32 injection refresh failed', e); }
+    try { refreshSafeMemoryInjectionV0100(); } catch(e) { console.warn('[StoryMemory] v0.11.33 injection refresh failed', e); }
     refreshNative();
     renderMemoryInjectionAuditV0119();
 
@@ -11669,6 +12018,12 @@ function refresh() {
     document.getElementById('smm2_batch').value=s.batchMessages;
     document.getElementById('smm2_start').value=M().story_start||'';
     document.getElementById('smm2_new').textContent=localSummaryModeV01129()?'总结新增（0 API）':'总结新增（AI）';
+    const deferredCount=localDeferredCountV01133(M());
+    const deferredBtn=document.getElementById('smm133_backfill');
+    if(deferredBtn){
+        deferredBtn.textContent=deferredCount?`补录已跳过 ${deferredCount} 楼（0 API）`:'没有待补录楼层';
+        deferredBtn.disabled=!deferredCount;
+    }
 }
 
 async function maybeAuto() {
@@ -11723,7 +12078,7 @@ function initializeExtension() {
     try {
         installUI();
         refresh();
-        console.log('[StoryMemory] v0.11.32 loaded successfully');
+        console.log('[StoryMemory] v0.11.33 loaded successfully');
     } catch (e) {
         console.error('[StoryMemory] UI initialization failed', e);
     }
