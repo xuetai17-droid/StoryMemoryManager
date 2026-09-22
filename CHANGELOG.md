@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.11.49 HYBRID
+
+- Replaced fixed 30-message historical requests with local token/byte-adaptive planning (28k token target, 30-message ceiling).
+- Applied the same adaptive ceiling to later automatic 10-message API batches.
+- Added immediate busy/disabled button feedback and visible request range/count/token estimate.
+- Preserved single-request, no-auto-retry, no-commit-on-failure, cursor-preservation semantics.
+- Previously processed raw messages are not re-sent; only compact memory is used for continuity.
+
 ## v0.11.48 HYBRID
 
 - 将历史补总结从每批50条下调为每批30条，缓解直接外部 API 请求超时。

@@ -1,4 +1,13 @@
-# v0.11.48 HYBRID Release Audit
+# v0.11.49 HYBRID Release Audit
+
+## v0.11.49 adaptive request audit
+
+- Historical candidate window: at most 30 messages.
+- Routine automatic candidate window: at most 10 messages.
+- Actual range is selected locally against the fully assembled compact-skeleton request, targeting 28,000 estimated input tokens / 112,000 bytes.
+- A single oversized message remains sendable because the user-requested fee guard is disabled.
+- Accepted clicks immediately disable the action button and expose the exact range/count/estimate.
+- Exactly one generation call per accepted click; no automatic retry, split retry, fallback, memory write, or cursor advance on failure.
 
 ## v0.11.48 30-message catch-up audit
 
