@@ -1,5 +1,5 @@
-// Story Memory Manager v0.11.35
-// canonical-input purification / character-core preservation / story-arc continuity
+// Story Memory Manager v0.11.37
+// current-model quiet summarization / dedicated NPC memory / failure-safe cursor
 // does not rewrite original chat JSONL
 
 const MODULE = 'story_memory_manager_v2';
@@ -23,9 +23,11 @@ const DEFAULTS = Object.freeze({
     currentStoryTime: '',
     ignoreMessageTimestamps: true,
 
-    // v0.11.29: local is the safe default. It performs deterministic factual
-    // extraction and never contacts a summary model. AI remains opt-in.
-    summaryMode: 'local',           // local | ai
+    // v0.11.36: a real semantic summary reuses the active chat model through
+    // SillyTavern's quiet-generation path. No separate API/Profile is required.
+    // The old local extractor remains available only as an experimental tool.
+    summaryMode: 'ai',              // local | ai
+    summaryEngineV01136: 'quiet_current_single_request',
 
     // v0.9.3：总结模型通道
     summaryProvider: 'current',      // current | profile
@@ -54,6 +56,22 @@ function S() {
             c.extensionSettings[MODULE].batchMessages = 30;
         }
     }
+    // v0.11.36 migration: v0.11.29-v0.11.35 made the rule-based local parser
+    // the daily default. It cannot perform a genuine semantic summary and could
+    // commit a partial assistant/user fragment as though it were one. Move that
+    // legacy default to the current chat model's quiet-generation channel.
+    // This does not require a second API key or Connection Profile.
+    const upgradingToV01136 = !Object.hasOwn(c.extensionSettings[MODULE], 'summaryEngineV01136');
+    if (upgradingToV01136) {
+        c.extensionSettings[MODULE].summaryEngineV01136 = 'quiet_current_single_request';
+        const usedLegacyLocalDefault=String(c.extensionSettings[MODULE].summaryMode||'local')!=='ai';
+        if(usedLegacyLocalDefault){
+            c.extensionSettings[MODULE].summaryMode = 'ai';
+            c.extensionSettings[MODULE].summaryProvider = 'current';
+            c.extensionSettings[MODULE].summaryFallback = 'stop';
+        }
+        try { c.saveSettingsDebounced?.(); } catch (_) {}
+    }
     for (const [k,v] of Object.entries(DEFAULTS)) {
         if (!Object.hasOwn(c.extensionSettings[MODULE], k)) c.extensionSettings[MODULE][k] = v;
     }
@@ -79,6 +97,9 @@ function freshMemory() {
         facts: [],
         events: [],
         characters: {},
+        // Minor/secondary characters live in a separate compact registry.
+        // They must never be merged into the primary-character state table.
+        npcs: {},
         relationships: [],
         open_loops: [],
         closed_loops: [], // legacy compatibility; v0.10.6 migrates these to compact tombstones
@@ -111,6 +132,8 @@ function M() {
     if (!Object.hasOwn(mem, 'stage_summary_updated_at')) mem.stage_summary_updated_at = null;
     if (!Array.isArray(mem.local_coverage_ranges)) mem.local_coverage_ranges = [];
     if (!Array.isArray(mem.local_deferred_ranges)) mem.local_deferred_ranges = [];
+    if (!mem.npcs || typeof mem.npcs !== 'object' || Array.isArray(mem.npcs)) mem.npcs = {};
+    if (mem.schema === 'story_memory_manager_v4' && (!mem.npcs_v4 || typeof mem.npcs_v4 !== 'object' || Array.isArray(mem.npcs_v4))) mem.npcs_v4 = cloneJSONV0112(mem.npcs);
     if (!Object.hasOwn(mem, 'current_reality_date')) mem.current_reality_date = null;
     if (!Object.hasOwn(mem, 'current_reality_time')) mem.current_reality_time = null;
     return mem;
@@ -126,6 +149,133 @@ function toast(msg, kind='info') {
 
 function esc(s='') {
     return String(s).replace(/[&<>"']/g, x => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[x]));
+}
+
+// =========================================================
+// v0.11.37: primary-character / NPC separation.
+// Adapted from Memory Palace's useful rule: a recurring name that belongs to
+// the active character card/world-book cast is a primary character; other
+// minor participants receive a compact independent NPC record.
+// =========================================================
+function personNameKeyV01137(value) {
+    return String(value||'').trim().toLowerCase().replace(/[·•.．\s_'’\-—–]/g,'');
+}
+
+function activeRoleNamesV01137() {
+    const c=C();
+    const primary=new Set();
+    const users=new Set();
+    const add=(set,value)=>{
+        const s=String(value||'').trim();
+        if(s && !/^(?:user|用户|你|主角|角色|character)$/i.test(s)) set.add(s);
+    };
+    const active=Array.isArray(c?.characters)?c.characters?.[c.characterId]:null;
+    add(primary,active?.name);
+    for(const x of (Array.isArray(active?.alternative_names)?active.alternative_names:[])) add(primary,x);
+    add(primary,c?.name2);
+    add(users,c?.name1);
+    add(users,c?.user_name);
+    add(users,c?.powerUserSettings?.persona_name);
+    for(const m of (c?.chat||[])){
+        if(m?.is_user) add(users,m?.name);
+    }
+    // Some test/custom contexts do not expose characterId. The assistant author
+    // is still the active role, not an NPC mentioned inside the prose.
+    const assistantAuthors=new Map();
+    for(const m of (c?.chat||[])) if(m && !m.is_user){
+        const n=String(m.name||'').trim();
+        if(n) assistantAuthors.set(n,(assistantAuthors.get(n)||0)+1);
+    }
+    for(const [name,count] of assistantAuthors) if(count>=2 || assistantAuthors.size===1) add(primary,name);
+    return {primary:[...primary],users:[...users]};
+}
+
+function collectMainCharacterCandidatesV01137(mem=M()) {
+    const c=C();
+    const direct=activeRoleNamesV01137();
+    const out=new Set([...direct.primary,...direct.users]);
+    const add=value=>{
+        const s=String(value||'').trim();
+        if(s && s.length<=48 && !/^(?:user|用户|你|主角|角色|character)$/i.test(s)) out.add(s);
+    };
+    for(const ch of (Array.isArray(c?.characters)?c.characters:[])){
+        add(ch?.name);
+        for(const x of (Array.isArray(ch?.alternative_names)?ch.alternative_names:[])) add(x);
+    }
+    const wi=c?.worldInfo;
+    const entries=(wi&&(wi.entries||wi.worldInfo||wi))||[];
+    if(Array.isArray(entries)) for(const entry of entries){
+        for(const field of ['keys','key','keywords']){
+            const values=Array.isArray(entry?.[field])?entry[field]:[];
+            for(const value of values) add(value);
+        }
+    }
+    for(const row of (Array.isArray(mem?.character_anchors)?mem.character_anchors:[])) add(row?.name);
+    return [...out];
+}
+
+function nameMatchesV01137(a,b) {
+    const x=personNameKeyV01137(a),y=personNameKeyV01137(b);
+    if(!x||!y) return false;
+    if(x===y) return true;
+    return Math.min(x.length,y.length)>=2 && (x.includes(y)||y.includes(x));
+}
+
+function countNameFrequencyV01137(name,chat=C().chat||[]) {
+    const needle=String(name||'').trim();
+    if(!needle) return 0;
+    let count=0;
+    for(const m of (Array.isArray(chat)?chat:[])){
+        const text=String(cleanMesForSummaryV0110(m)||m?.mes||'');
+        if(text.includes(needle)) count++;
+    }
+    return count;
+}
+
+function isMainCharacterV01137(name,chat=C().chat||[],mem=M()) {
+    const raw=String(name||'').trim();
+    if(!raw) return false;
+    const direct=activeRoleNamesV01137();
+    if([...direct.primary,...direct.users].some(x=>nameMatchesV01137(x,raw))) return true;
+    const candidates=collectMainCharacterCandidatesV01137(mem);
+    return candidates.some(x=>nameMatchesV01137(x,raw)) && countNameFrequencyV01137(raw,chat)>=2;
+}
+
+function npcClassificationContextV01137(mem=M()) {
+    const direct=activeRoleNamesV01137();
+    return {
+        user_names:direct.users,
+        active_role_names:direct.primary,
+        main_character_candidates:collectMainCharacterCandidatesV01137(mem).slice(0,60),
+        rule:'active user/role are never NPC; other card/world-book candidates are main only when repeatedly present in the real chat'
+    };
+}
+
+function relevantNpcsForPromptV01137(mem=M()) {
+    const recentChat=(C().chat||[]).slice(-8)
+        .map(m=>String(cleanMesForSummaryV0110(m)||m?.mes||''))
+        .join('\n');
+    const sceneText=JSON.stringify(currentSceneCoreV0110(mem?.current_scene)||{});
+    const haystack=`${recentChat}\n${sceneText}`.toLowerCase();
+    const rows=[];
+    for(const [key,raw] of Object.entries(mem?.npcs||{})){
+        if(!raw||typeof raw!=='object'||Array.isArray(raw)) continue;
+        const name=String(raw.name||key||'').trim();
+        if(!name) continue;
+        const triggers=[name,raw.identity,...(Array.isArray(raw.aliases)?raw.aliases:[])]
+            .map(x=>String(x||'').trim())
+            .filter(x=>x.length>=2 && !/^(?:npc|人物|角色|对方|男人|女人|他|她)$/i.test(x));
+        if(!triggers.some(x=>haystack.includes(x.toLowerCase()))) continue;
+        rows.push({
+            name,
+            identity:String(raw.identity||'').trim()||null,
+            brief:String(raw.brief||'').trim().slice(0,260)||null,
+            current_status:String(raw.current_status||'').trim().slice(0,180)||null
+        });
+    }
+    return rows
+        .sort((a,b)=>sourceLast(mem?.npcs?.[b.name]?.last_source||mem?.npcs?.[b.name]?.source)-sourceLast(mem?.npcs?.[a.name]?.last_source||mem?.npcs?.[a.name]?.source))
+        .slice(0,6);
 }
 
 
@@ -194,6 +344,7 @@ function buildSafeMemoryPromptV0100() {
     const arcs=(mem.active_arcs||[]).slice(0,3);
     const facts=(mem.semantic_anchors||[]).slice(-6);
     const stages=stageSummariesForPromptV01121(mem);
+    const npcs=relevantNpcsForPromptV01137(mem);
     const payload={
         date:mem.current_story_date||null,
         time:mem.current_story_time||null,
@@ -202,6 +353,7 @@ function buildSafeMemoryPromptV0100() {
             : null,
         scene,
         relevant_characters:chars,
+        relevant_npcs:npcs,
         relevant_relationships:rels,
         recent_events:timeline,
         active_arcs:arcs,
@@ -260,6 +412,7 @@ function memoryInjectionAuditV0119() {
     const mem=M();
     const gaps=timelineCoverageGapsV0112(mem);
     const prompt=buildSafeMemoryPromptV0100();
+    const relevantNpcs=relevantNpcsForPromptV01137(mem);
     return {
         enabled: !!s.safeMemoryInject,
         blocked_by_gap: !!gaps.length,
@@ -271,6 +424,8 @@ function memoryInjectionAuditV0119() {
         current_reality_time: mem.current_reality_time || null,
         current_scene: currentSceneCoreV0110(mem.current_scene),
         characters: Object.keys(mem.characters || {}).length,
+        npcs_total: Object.keys(mem.npcs || {}).length,
+        npcs_injected: relevantNpcs.length,
         relationships: (mem.relationships || []).length,
         recent_timeline: (mem.timeline || []).filter(x=>!x?.__coverage_only_v01110).slice(-10).length,
         open_loops: (mem.open_loops || []).length,
@@ -288,7 +443,7 @@ function renderMemoryInjectionAuditV0119() {
         : a.blocked_by_gap ? `已开启但被时间线断档保护阻止：#${a.first_gap.start}-#${a.first_gap.end}`
         : '已开启：本轮会提供 SMM 长期剧情记忆';
     const location=a.current_scene?.location || '未建立';
-    const empty=a.characters+a.relationships+a.recent_timeline+a.open_loops+a.active_arcs+a.stage_summaries===0;
+    const empty=a.characters+a.npcs_injected+a.relationships+a.recent_timeline+a.open_loops+a.active_arcs+a.stage_summaries===0;
     const note=!a.enabled
         ? '当前关闭生成时记忆注入。'
         : a.blocked_by_gap
@@ -305,7 +460,7 @@ function renderMemoryInjectionAuditV0119() {
         <div><span>当前剧情地点</span><b>${esc(location)}</b></div>
         ${(a.current_reality_date||a.current_reality_time)?`<div><span>MVU现实时间轴</span><b>${esc([a.current_reality_date,a.current_reality_time].filter(Boolean).join(' '))}</b></div>`:''}
       </div>
-      <div class="smm119-counts">人物 ${a.characters} · 关系 ${a.relationships} · 近期事件 ${a.recent_timeline} · 主线 ${a.active_arcs} · 阶段总结 ${a.stage_summaries} · 待办 ${a.open_loops}</div>
+      <div class="smm119-counts">人物 ${a.characters} · NPC ${a.npcs_total}（本轮相关 ${a.npcs_injected}） · 关系 ${a.relationships} · 近期事件 ${a.recent_timeline} · 主线 ${a.active_arcs} · 阶段总结 ${a.stage_summaries} · 待办 ${a.open_loops}</div>
       <div class="smm119-note">${esc(note)}</div>
       <details class="smm119-raw-details">
         <summary>查看原始注入文本（调试）</summary>
@@ -1165,7 +1320,7 @@ function parseJSON(text) {
 }
 
 const SUMMARY_KEYS_V01118=new Set([
-    'story_start','current_story_date','current_story_time','current_scene','timeline','facts','events','characters','relationships',
+    'story_start','current_story_date','current_story_time','current_scene','timeline','facts','events','characters','npcs','relationships',
     'character_anchors','active_arcs','open_loops','locations','items','conflicts','quarantined','semantic_anchors'
 ]);
 function sanitizeSummaryObjectV01118(obj){
@@ -1174,7 +1329,7 @@ function sanitizeSummaryObjectV01118(obj){
     if(!obj.current_scene && obj.current_scene_core && typeof obj.current_scene_core==='object') obj.current_scene=obj.current_scene_core;
     const clean={};
     for(const [k,v] of Object.entries(obj)) if(SUMMARY_KEYS_V01118.has(k)) clean[k]=v;
-    const arr=['timeline','facts','events','relationships','character_anchors','active_arcs','open_loops','locations','items','conflicts','quarantined','semantic_anchors'];
+    const arr=['timeline','facts','events','npcs','relationships','character_anchors','active_arcs','open_loops','locations','items','conflicts','quarantined','semantic_anchors'];
     for(const k of arr) if(!Array.isArray(clean[k])) clean[k]=[];
     if(!clean.characters||typeof clean.characters!=='object'||Array.isArray(clean.characters)) clean.characters={};
     if(!clean.current_scene||typeof clean.current_scene!=='object'||Array.isArray(clean.current_scene)) clean.current_scene={};
@@ -1205,6 +1360,7 @@ function filterMetaSignals(r) {
         'timeline',
         'facts',
         'events',
+        'npcs',
         'relationships',
         'open_loops',
         'locations',
@@ -3900,6 +4056,134 @@ function mergeItemsV0110(mem, incoming) {
     mem.items = [...map.values()];
 }
 
+function npcKeyForNameV01137(mem,name) {
+    for(const key of Object.keys(mem?.npcs||{})){
+        const row=mem.npcs[key];
+        if(nameMatchesV01137(key,name)||nameMatchesV01137(row?.name,name)) return key;
+        if((Array.isArray(row?.aliases)?row.aliases:[]).some(x=>nameMatchesV01137(x,name))) return key;
+    }
+    return null;
+}
+
+function removeNpcFromPrimaryCharactersV01137(mem,r,name) {
+    for(const target of [mem?.characters,r?.characters]){
+        if(!target||typeof target!=='object'||Array.isArray(target)) continue;
+        for(const key of Object.keys(target)) if(nameMatchesV01137(key,name)) delete target[key];
+    }
+}
+
+function npcHasSourceEvidenceV01137(raw,source) {
+    const triggers=[raw?.name,raw?.identity,...(Array.isArray(raw?.aliases)?raw.aliases:[])]
+        .map(x=>String(x||'').trim().toLowerCase())
+        .filter(x=>x.length>=2 && !/^(?:npc|人物|角色|路人|男人|女人|他|她|对方)$/.test(x));
+    if(!triggers.length) return false;
+    const chat=C().chat||[];
+    return sourceIndexes(source).some(index=>{
+        const message=chat[index];
+        if(!message) return false;
+        const author=String(message?.name||'');
+        const body=String(cleanMesForSummaryV0110(message)||message?.mes||'');
+        const text=`${author}\n${body}`.toLowerCase();
+        return triggers.some(trigger=>text.includes(trigger));
+    });
+}
+
+function mergeNpcsV01137(mem,incoming,startIndex,endIndex,r) {
+    if(!mem.npcs||typeof mem.npcs!=='object'||Array.isArray(mem.npcs)) mem.npcs={};
+    const accepted=[];
+    const rejected=[];
+    const promoted=[];
+    const validSource=source=>startIndex==null
+        ? validRealSourceV0112(source)
+        : sourceWithinBatchV0112(source,startIndex,endIndex);
+
+    // A person promoted into the active/card cast must not remain duplicated in
+    // the NPC registry. This check is deterministic and independent of model labels.
+    for(const key of Object.keys(mem.npcs)){
+        const row=mem.npcs[key];
+        const name=String(row?.name||key||'').trim();
+        if(name&&isMainCharacterV01137(name,C().chat||[],mem)){
+            delete mem.npcs[key];
+            promoted.push(name);
+        }
+    }
+
+    for(const raw of (Array.isArray(incoming)?incoming:[])){
+        if(!raw||typeof raw!=='object'||Array.isArray(raw)) continue;
+        const rawName=String(raw.name||'').trim();
+        const source=String(raw.source||'').trim();
+        if(!rawName||!validSource(source)){
+            rejected.push({name:rawName||'未命名',source,reason:'npc_source_invalid'});
+            continue;
+        }
+        if(!npcHasSourceEvidenceV01137(raw,source)){
+            rejected.push({name:rawName,source,reason:'npc_not_mentioned_in_source'});
+            continue;
+        }
+        const name=canonicalPersonName(rawName);
+        if(isMainCharacterV01137(name,C().chat||[],mem)){
+            const oldKey=npcKeyForNameV01137(mem,name);
+            if(oldKey) delete mem.npcs[oldKey];
+            // Preserve a reliable identity if the model accidentally placed a
+            // primary role in npcs. It is repaired into the primary table, not
+            // accepted as an NPC.
+            if(r?.characters&&typeof r.characters==='object'&&!Array.isArray(r.characters)){
+                const state=r.characters[name]&&typeof r.characters[name]==='object'?r.characters[name]:{};
+                const identity=String(raw.identity||'').trim();
+                r.characters[name]={...state,...(identity?{identity}:{})};
+            }
+            promoted.push(name);
+            continue;
+        }
+
+        const oldKey=npcKeyForNameV01137(mem,name);
+        const old=oldKey&&mem.npcs[oldKey]&&typeof mem.npcs[oldKey]==='object'?mem.npcs[oldKey]:{};
+        const aliases=[
+            ...(Array.isArray(old.aliases)?old.aliases:[]),
+            ...(Array.isArray(raw.aliases)?raw.aliases:[]),
+            ...(rawName!==name?[rawName]:[])
+        ].map(x=>String(x||'').trim()).filter(Boolean);
+        const identity=String(raw.identity||'').trim();
+        const brief=String(raw.brief||'').trim().replace(/\s+/g,' ').slice(0,260);
+        const currentStatus=String(raw.current_status||'').trim().replace(/\s+/g,' ').slice(0,180);
+        if(!identity&&!brief&&!currentStatus){
+            rejected.push({name,source,reason:'npc_empty'});
+            continue;
+        }
+        if(oldKey&&oldKey!==name) delete mem.npcs[oldKey];
+        mem.npcs[name]={
+            name,
+            identity:identity||old.identity||null,
+            brief:brief||old.brief||null,
+            current_status:currentStatus||old.current_status||null,
+            aliases:[...new Set(aliases)].slice(-12),
+            first_source:old.first_source||old.source||source,
+            last_source:source,
+            source
+        };
+        removeNpcFromPrimaryCharactersV01137(mem,r,name);
+        accepted.push(name);
+    }
+
+    const ordered=Object.entries(mem.npcs).sort((a,b)=>{
+        const ar=sourceLast(a[1]?.last_source||a[1]?.source);
+        const br=sourceLast(b[1]?.last_source||b[1]?.source);
+        return br-ar;
+    }).slice(0,80);
+    mem.npcs=Object.fromEntries(ordered);
+
+    if(accepted.length||rejected.length||promoted.length){
+        mem.audit=Array.isArray(mem.audit)?mem.audit:[];
+        mem.audit.push({
+            at:new Date().toISOString(),type:'npc_partition_v01137',
+            accepted:[...new Set(accepted)],
+            promoted_to_primary:[...new Set(promoted)],
+            rejected
+        });
+    }
+    return {accepted,rejected,promoted};
+}
+
 function mergeResult(mem, r, endIndex, options={}) {
     // A chronological state change is not a contradiction.
     // Only keep conflicts that survive the continuity filter.
@@ -3925,6 +4209,11 @@ function mergeResult(mem, r, endIndex, options={}) {
             ? true
             : sourceWithinBatchV0112(source, startIndexV0112, endIndex);
     };
+
+    // NPC classification is committed before primary character state. Accepted
+    // NPC names are removed from characters, while active/card roles are repaired
+    // back into the primary table. This mirrors Memory Palace's separated store.
+    mergeNpcsV01137(mem,r.npcs,startIndexV0112,endIndex,r);
 
     const incomingTimeline = Array.isArray(r.timeline) ? r.timeline : [];
     const acceptedTimeline = [];
@@ -4256,12 +4545,20 @@ const SYSTEM_PROMPT = `你是长线角色扮演的“剧情记忆审计器”。
 9B. 当前回复中的无害文学性细节若不影响连续性，可以不记录；不得把没有可靠依据的新装饰性细节升级成 timeline/facts/events/semantic_anchors 中的既定历史。证据不足时保持模糊。
 9C. <thinking>/<think>、HTML 草稿注释、故事考据、campus_gossip、小剧场、UpdateVariable、Analysis、JSONPatch、状态占位符、写作规划等辅助/元数据块不是 canonical 剧情正文，即使其中出现人物、地点、日期或行为，也不得进入长期记忆；只有真正正文 <content> 或无标签的剧情正文可作为事实来源。
 9D. 唯一例外：插件可能提供 [SMM_WORLD_STATE_META #N ...]，它只含白名单中的 /世界/当前日期、/世界/当前时间、/世界/当前地点、/世界/现实日期、/世界/现实时间、/世界/现实地点，且只用于校准该 #N assistant 回复结束时的 date/time/location；不得据此创造剧情事实、关系变化、人物行为或其他变量。普通世界状态元数据与正文冲突时正文优先；/世界/现实时间是独立 MVU 现实钟。若同 source 的预设剧情摘要明确给出当前场景的完整日期，则 timeline/current_story 使用场景日期，现实钟不得覆盖它。
+9E. 本批输出必须是“语义总结”，不是逐楼摘抄。把连续 USER/CHARACTER 往来合并成少量完整事件，保留参与者、关键行动、原因、结果和对后续有用的状态变化；不要逐句复制玩家原话。
+9F. USER 提议、询问、打算或尝试做某事，不自动等于该事已经完成；只有后续正文确认或明确描写结果时，才能把结果写成已发生事实。若 USER 消息本身以剧情正文明确完成了其角色动作，可以记录该动作，但仍应与后续回应合并概括。
+9G. timeline 每条必须脱离上下文也能独立理解。30 条消息通常只保留真正有连续性价值的少量事件；同一场景的补充描写必须合并，不得形成变量流水账或聊天复述。
 10. relationships 只记录文本已经支持的关系状态，不擅自把暧昧升级成恋爱/伴侣。
 10A. characters 只保存人物自身资料与当前即时状态。
 10B. characters 中只允许稳定字段 age/gender/identity/personality，以及当前状态字段 location/companion/physiology/outfit。
 10C. 禁止在 characters 中输出 relationship/relationships/todo/to_do/agreement/agreements；人物关系必须写入顶层 relationships，未来事项必须写入 open_loops。
 10D. 当前状态必须基于本批新增原始聊天；不要把旧人物卡里的 location/companion/physiology/outfit 原样复制成“当前状态”。
 10E. 若本批没有足够证据确认某个瞬时字段，不得猜测。
+10E-1. characters 只用于玩家、当前角色卡角色及反复参与主线的主要角色；次要人物必须写入顶层 npcs，不得同时出现在 characters 与 npcs。
+10E-2. npcs 每项格式为 name/identity/brief/current_status/aliases/source。brief 只用一句紧凑事实说明其剧情作用，不建立完整人物卡，不推测人格或未来行为。
+10E-3. 玩家、当前角色卡角色永远不是 NPC。角色卡/世界书候选名只有在真实聊天中反复出现，才可作为主要角色；其他已实际登场的次要参与者归入 npcs。
+10E-4. 只有本批新增原始聊天中实际登场或被明确提及的人物才能新增为 NPC；世界书、隐藏规则、NPC 模板里尚未发生的名字严禁写入。
+10E-5. 每个 NPC 必须提供本批内真实 source；没有可追溯 source 就不要输出。
 10F. character_anchors 保存“角色在长篇剧情中不能被压缩掉的行为身份”：核心人格、说话节奏/语言习惯、决策方式、情绪表达、硬边界、关系互动模式、标志性行为、明确禁止漂移的 OOC 模式。
 10G. 角色卡/世界书是基础人设的最高优先级；character_anchors 只补充剧情长期验证出的表现，不得改写角色卡。单次场景、单次情绪或单次性行为不能定义整个人格。
 10H. 如果已有 character_anchor，除非新增正文出现长期、明确、反复验证的发展证据，否则不要改写其核心人格/语言/决策/边界。
@@ -4334,6 +4631,10 @@ function schema() {
                     date:nullable(), title:{type:'string'}, result:{type:'string'}, source:nullable()
                 },required:['date','title','result','source']}},
                 characters:{type:'object',additionalProperties:true},
+                npcs:{type:'array',items:{type:'object',properties:{
+                    name:{type:'string'}, identity:nullable(), brief:{type:'string'},
+                    current_status:nullable(), aliases:{type:'array',items:{type:'string'}}, source:nullable()
+                },required:['name','identity','brief','current_status','aliases','source']}},
                 relationships:{type:'array',items:{type:'object',properties:{
                     people:{type:'array',items:{type:'string'}}, state:{type:'string'}, change:{type:'string'}, source:nullable()
                 },required:['people','state','change','source']}},
@@ -4421,6 +4722,7 @@ function schema() {
                 'facts',
                 'events',
                 'characters',
+                'npcs',
                 'relationships',
                 'character_anchors',
                 'active_arcs',
@@ -4449,6 +4751,7 @@ function compact(mem) {
         semantic_anchors: (mem.semantic_anchors || []).slice(-24),
         timeline: (mem.timeline || []).slice(-16),
         characters: stableCharactersForPromptV0110(mem),
+        npcs: Object.fromEntries(Object.entries(mem.npcs || {}).slice(-30)),
         relationships: (mem.relationships || []).slice(-16),
         open_loops: (mem.open_loops || []).slice(-12)
     };
@@ -4516,6 +4819,56 @@ async function getSmmConnectionServiceV093() {
     return SMM_CONNECTION_SERVICE;
 }
 
+// v0.11.36 follows SillyTavern Memory Palace's proven transport pattern:
+// generateQuietPrompt accepts one `quietPrompt` field, so the system and user
+// instructions must be merged before the call.  Keeping this in one request is
+// important for unreliable/slow upstreams and prevents a malformed response
+// from silently spending two more generations.
+function generationTextV01136(value) {
+    if (typeof value === 'string') return value;
+    const structured = x => {
+        if (!x || typeof x !== 'object') return '';
+        try { return JSON.stringify(x); } catch (_) { return ''; }
+    };
+    const candidates = [
+        value?.content,
+        value?.text,
+        value?.output_text,
+        value?.message?.content,
+        value?.data?.content,
+        value?.data?.text,
+        value?.choices?.[0]?.message?.content,
+        value?.choices?.[0]?.text
+    ];
+    for (const item of candidates) {
+        if (typeof item === 'string' && item.trim()) return item;
+        const encoded = structured(item);
+        if (encoded) return encoded;
+    }
+    return '';
+}
+
+async function generateCurrentQuietV01136({prompt='', systemPrompt='', jsonSchema=null}={}) {
+    const context = C();
+    if (!context || typeof context.generateQuietPrompt !== 'function') {
+        throw new Error('当前 SillyTavern 未提供 generateQuietPrompt，无法复用当前聊天模型进行静默总结。');
+    }
+    const merged = [
+        String(systemPrompt || '').trim(),
+        String(systemPrompt || '').trim() ? '---' : '',
+        jsonSchema ? '【必须遵守的输出 JSON Schema】' : '',
+        jsonSchema ? JSON.stringify(jsonSchema?.value||jsonSchema,null,2) : '',
+        jsonSchema ? '只输出符合上面结构的一个 JSON 对象；所有 required 字段都必须出现，没有内容时使用空数组、空对象或 null。' : '',
+        jsonSchema ? '---' : '',
+        String(prompt || '').trim()
+    ].filter(Boolean).join('\n\n');
+    if (!merged) throw new Error('总结提示词为空');
+    const result = await context.generateQuietPrompt({quietPrompt: merged});
+    const text = generationTextV01136(result);
+    if (!String(text).trim()) throw new Error('当前聊天模型返回为空');
+    return String(text);
+}
+
 async function smmGenerateV093({
     prompt='',
     systemPrompt='',
@@ -4525,14 +4878,10 @@ async function smmGenerateV093({
     const s = S();
     const provider = String(s.summaryProvider || 'current');
 
-    // 默认：完全保持原来的当前聊天模型行为。
+    // Default: reuse the already configured chat model.  This is a quiet
+    // background generation, not a separate API/Profile.
     if (provider !== 'profile') {
-        return await C().generateRaw({
-            prompt,
-            systemPrompt,
-            jsonSchema,
-            responseLength
-        });
+        return await generateCurrentQuietV01136({prompt, systemPrompt, jsonSchema});
     }
 
     const profileId = String(s.summaryProfileId || '').trim();
@@ -4680,12 +5029,7 @@ async function smmGenerateV093({
                 e
             );
 
-            return await C().generateRaw({
-                prompt,
-                systemPrompt,
-                jsonSchema,
-                responseLength
-            });
+            return await generateCurrentQuietV01136({prompt, systemPrompt});
         }
 
         throw new Error(
@@ -5261,6 +5605,11 @@ async function summarizeRange(start, end, options={}) {
     const prompt = `【已有可靠记忆】
 ${JSON.stringify(compact(mem), null, 2)}
 
+【本聊天人物 / NPC 分类参考】
+${JSON.stringify(npcClassificationContextV01137(mem), null, 2)}
+
+分类参考只用于区分主要角色与次要 NPC，不能当作剧情事实。候选名仍必须在“新增原始聊天”中实际出现，才能写入本批结果。
+
 【新增原始聊天】
 ${messagesText(start, end)}
 
@@ -5332,70 +5681,29 @@ ${messagesText(start, end)}
 - 若近期剧情连续多轮停留在重复日常微动作，active_arcs 应指出尚未展开的真实主线压力，但不得虚构新事件。
 - items 的 owner/holder/user/location 必须严格分离；没有明确所有权转移证据时 owner 不得改变。
 特别检查日期连续性：没有新增原始聊天中的明确跨月证据，就必须继承已有可靠月份；禁止仅凭 AI <date> 或自行推算跨月。`;
+    // v0.11.36: one batch means exactly one model generation.  Local JSON
+    // cleanup still handles fences/trailing commas, but invalid output is not
+    // sent back to the model for a second or third paid attempt.
     let raw;
-    let parsed = null;
-    let firstError = null;
-    let secondError = null;
-
-    // 第1次：优先使用结构化输出。
     try {
         raw = await withSmmTimeout(
             smmGenerateV093({ systemPrompt:SYSTEM_PROMPT, prompt, jsonSchema:schema() }),
             SMM_GENERATE_TIMEOUT_MS,
-            `结构化总结 #${start+1}-#${end}`
+            `静默总结 #${start+1}-#${end}`
         );
-        rejectGatewayPayloadV01129(raw,'结构化总结');
+        rejectGatewayPayloadV01129(raw,'静默总结');
+    } catch (e) {
+        if (isUpstreamGatewayFailureV01129(e)) throw upstreamGatewayErrorV01129(e,'静默总结');
+        throw e;
+    }
+
+    let parsed;
+    try {
         parsed = sanitizeSummaryObjectV01118(filterMetaSignals(parseJSON(raw)));
     } catch (e) {
-        if (isUpstreamGatewayFailureV01129(e)) throw upstreamGatewayErrorV01129(e,'结构化总结');
-        if (isSmmTimeout(e)) throw e;
-        firstError = e;
-    }
-
-    // 第2次：兼容不支持 structured output 的后端。
-    if (!parsed) {
-        try {
-            raw = await withSmmTimeout(smmGenerateV093({
-                systemPrompt:SYSTEM_PROMPT,
-                prompt: prompt + '\n\n只返回一个合法 JSON 对象，不要解释、不要 Markdown、不要代码围栏。字段必须包含 story_start,current_story_date,current_story_time,current_scene,timeline,facts,events,characters,relationships,character_anchors,active_arcs,open_loops,locations,items,conflicts,quarantined,semantic_anchors。'
-            }), SMM_GENERATE_TIMEOUT_MS, `兼容总结 #${start+1}-#${end}`);
-            rejectGatewayPayloadV01129(raw,'兼容总结');
-            parsed = sanitizeSummaryObjectV01118(filterMetaSignals(parseJSON(raw)));
-        } catch (e) {
-            if (isUpstreamGatewayFailureV01129(e)) throw upstreamGatewayErrorV01129(e,'兼容总结');
-            if (isSmmTimeout(e)) throw e;
-            secondError = e;
-        }
-    }
-
-    // 第3次：只修复“上一份非 JSON 响应”的格式，不重新总结原剧情。
-    if (!parsed) {
-        const bad = String(raw ?? '').slice(0, 12000);
-        const repairPrompt = `下面是一份本应为 JSON 的剧情记忆总结，但格式不合法。
-请只做格式修复，不增加新事实，不删除已有事实，不解释。
-只返回一个合法 JSON 对象，不要 Markdown、不要代码围栏。
-
-必须保留/补齐这些字段：
-story_start,current_story_date,current_story_time,current_scene,timeline,facts,events,characters,relationships,character_anchors,active_arcs,open_loops,locations,items,conflicts,quarantined,semantic_anchors
-
-原始响应：
-${bad}`;
-
-        try {
-            const repaired = await withSmmTimeout(
-                smmGenerateV093({ systemPrompt:SYSTEM_PROMPT, prompt: repairPrompt, jsonSchema:schema() }),
-                SMM_GENERATE_TIMEOUT_MS,
-                `JSON修复 #${start+1}-#${end}`
-            );
-            rejectGatewayPayloadV01129(repaired,'JSON 修复');
-            parsed = sanitizeSummaryObjectV01118(filterMetaSignals(parseJSON(repaired)));
-        } catch (e) {
-            if (isUpstreamGatewayFailureV01129(e)) throw upstreamGatewayErrorV01129(e,'JSON 修复');
-            if (isSmmTimeout(e)) throw e;
-            const e1 = firstError?.message || '无';
-            const e2 = secondError?.message || '无';
-            throw new Error(`连续3次未获得合法 JSON。第一次：${e1}；第二次：${e2}；修复：${e.message || e}`);
-        }
+        const err = new Error(`当前模型本批输出不是可用 JSON；未写入记忆，待总结楼层仍保留。本批只调用了 1 次：${e?.message||e}`);
+        err.smmSingleRequestInvalidJsonV01136 = true;
+        throw err;
     }
 
     // v0.11.2: fill only missing date/time/location from the same-source
@@ -5407,39 +5715,19 @@ ${bad}`;
         validation = validateBatchCommitV0112(parsed, start, end);
     } catch (e) {
         if (e?.smmBatchCommitFailure) {
-            // v0.11.3: one dedicated, timeline-only retry before declaring the
-            // batch unusable. This isolates source formatting from the full
-            // memory delta and prevents repeated user retries of the same batch.
-            const firstFailure=cloneJSONV0112(e.smmBatchCommitFailure);
-            try {
-                const repairedTimeline=await retryTimelineOnlyV0113(start,end,e?.message||'');
-                parsed.timeline=repairedTimeline;
-                applyWorldStateMetadataFallbackV0112(parsed,start,end);
-                validation=validateBatchCommitV0112(parsed,start,end);
-                mem.audit = Array.isArray(mem.audit) ? mem.audit : [];
-                mem.audit.push({
-                    at:new Date().toISOString(),
-                    type:'batch_source_retry_recovered_v0113',
-                    range:[start,end-1],
-                    first_failure:firstFailure,
-                    recovered_timeline:validation.timeline_accepted,
-                    source_normalized:validation.source_normalized_v0113||0
-                });
-                if (mem.audit.length > 50) mem.audit = mem.audit.slice(-50);
-            } catch (retryErr) {
-                mem.audit = Array.isArray(mem.audit) ? mem.audit : [];
-                mem.audit.push({
-                    at:new Date().toISOString(),
-                    type:'batch_commit_rejected_v0113',
-                    ...firstFailure,
-                    retry_error:String(retryErr?.message||retryErr)
-                });
-                if (mem.audit.length > 50) mem.audit = mem.audit.slice(-50);
-                if (options?.save !== false) await saveMeta();
-                const err=new Error(`批次 #${start}-#${end-1} 首次 source 校验失败，专用重试仍失败：${retryErr?.message||retryErr}`);
-                err.smmBatchCommitFailureV0113={start,end:end-1,firstFailure,retry_error:String(retryErr?.message||retryErr)};
-                throw err;
-            }
+            mem.audit = Array.isArray(mem.audit) ? mem.audit : [];
+            mem.audit.push({
+                at:new Date().toISOString(),
+                type:'batch_commit_rejected_single_request_v01136',
+                ...cloneJSONV0112(e.smmBatchCommitFailure),
+                model_calls:1,
+                cursor_preserved:Number(mem.last_processed_index??-1)
+            });
+            if (mem.audit.length > 50) mem.audit = mem.audit.slice(-50);
+            if (options?.save !== false) await saveMeta();
+            const err=new Error(`${e.message} 本批只调用了 1 次；请稍后重试。`);
+            err.smmBatchCommitFailureV01136=cloneJSONV0112(e.smmBatchCommitFailure);
+            throw err;
         } else {
             throw e;
         }
@@ -5454,7 +5742,7 @@ ${bad}`;
     }
 
     if (options?.save !== false) await saveMeta();
-    return validation;
+    return {...validation,mode:'ai',api_calls:1,transport:String(S().summaryProvider||'current')==='profile'?'profile':'current_quiet'};
 }
 
 let BUSY = false;
@@ -6923,8 +7211,10 @@ function narrativeSummaryRecordsV01130(m,userMsg=null,mem=M()) {
         });
     }
     if(direct.length) return direct;
-    const cardRecap=roleCardRecapRecordsV01135(m,userMsg,mem);
-    if(cardRecap.length) return cardRecap;
+    // v0.11.36: a rendered role-card recap is presentation output, not the
+    // incremental summary engine.  Daily semantic summaries are generated from
+    // the actual USER + CHARACTER floors by the current chat model.  Keep only
+    // explicitly structured assistant summaries as conservative metadata hints.
     const labeled=labeledSummaryRecordsLocalV01133(m,userMsg,mem);
     if(labeled.length) return labeled;
     return structuredSummaryRecordsLocalV0119(m,userMsg,mem).map(rec=>({
@@ -8805,7 +9095,7 @@ async function repairNeedsAiOnlyV01113(){
 // but commits the processed cursor so it can serve daily automatic summaries.
 // =========================================================
 function localSummaryModeV01129() {
-    return String(S().summaryMode||'local') !== 'ai';
+    return String(S().summaryMode||'ai') !== 'ai';
 }
 
 function localDeferredRangesV01133(mem=M()) {
@@ -9202,32 +9492,172 @@ async function summarizeRangeConfiguredV01129(start,end,options={}) {
     }catch(e){
         if(!isSmmTimeout(e)&&!isUpstreamGatewayFailureV01129(e)) throw e;
 
-        // One upstream timeout is enough evidence to stop spending requests in
-        // this run. Commit the same batch with the deterministic factual parser,
-        // then keep all remaining batches on 0 API until the user opts into AI.
-        S().summaryMode='local';
-        saveSettings();
-        const local=await summarizeRangeLocalV01129(start,end,{...options,save:false});
+        // v0.11.36: a transport failure is not a summary.  Preserve both the
+        // cursor and the selected current-model mode so retrying later processes
+        // the exact same floors instead of committing rule-based fragments.
         const mem=M();
         mem.audit=Array.isArray(mem.audit)?mem.audit:[];
         mem.audit.push({
-            at:new Date().toISOString(),type:'ai_gateway_local_fallback_v01129',
-            range:[start,end-1],gateway_retries:0,switched_to:'local',
+            at:new Date().toISOString(),type:'ai_gateway_batch_preserved_v01136',
+            range:[start,end-1],model_calls:1,switched_mode:false,
+            cursor_preserved:Number(mem.last_processed_index??-1),
             reason:isSmmTimeout(e)?'client_timeout_120s':'cloudflare_gateway_timeout'
         });
         if(mem.audit.length>50) mem.audit=mem.audit.slice(-50);
         if(options?.save!==false) await saveMeta();
-        toast('总结接口超时；该批已用 0 API 本地事实保底完成，后续批次也已切换为 0 API。','warning');
-        return {...local,fallback_from:'ai_gateway'};
+        const err=new Error(`总结请求${isSmmTimeout(e)?'超过 120 秒':'遇到 Cloudflare 524'}；本批未写入、游标未推进，也未切换 0 API。稍后重试即可。`);
+        err.smmBatchPreservedV01136=true;
+        throw err;
+    }
+}
+
+function requeueStartForLocalMemoryV01136(mem=M()) {
+    const candidates=[];
+    for(const row of (Array.isArray(mem?.timeline)?mem.timeline:[])){
+        if(String(row?.generation_mode||'').startsWith('local') || row?.local_extraction_version){
+            const first=sourceFirst(row?.source);
+            if(Number.isInteger(first)&&first>=0&&first<Number.MAX_SAFE_INTEGER) candidates.push(first);
+        }
+    }
+    for(const field of ['local_coverage_ranges','local_deferred_ranges']){
+        for(const range of (Array.isArray(mem?.[field])?mem[field]:[])){
+            const first=Number(range?.[0]);
+            if(Number.isInteger(first)&&first>=0) candidates.push(first);
+        }
+    }
+    return candidates.length?Math.min(...candidates):null;
+}
+
+function hasIncorrectLocalMemoryV01136(mem=M()) {
+    return Number.isInteger(requeueStartForLocalMemoryV01136(mem));
+}
+
+async function requeueIncorrectLocalMemoryV01136({confirmUser=true,save=true}={}) {
+    if(BUSY||HISTORY_RUNNING||GAP_REPAIR_RUNNING_V0112) throw new Error('当前已有总结/重建任务在运行');
+    const mem=M();
+    const start=requeueStartForLocalMemoryV01136(mem);
+    if(!Number.isInteger(start)) return {changed:false,start:null,removed_timeline:0,removed_stages:0};
+    const oldCursor=Math.max(-1,Number(mem.last_processed_index??-1));
+    if(confirmUser && !confirm(
+        `将撤销从 #${start} 起由旧版 0 API 生成的派生记忆，并把这些楼层重新放回“待总结”。\n\n`+
+        '会保留剧情起点和原始聊天；不会删除、改写 JSONL。之后请用“当前聊天模型”重新总结。\n\n继续吗？'
+    )) return {changed:false,cancelled:true,start};
+
+    const snapshot=cloneJSONV0112(mem);
+    const afterStart=row=>{
+        const last=sourceLast(row?.source);
+        return Number.isInteger(last)&&last>=start;
+    };
+    try{
+        const timeline=Array.isArray(mem.timeline)?mem.timeline:[];
+        const removedTimeline=timeline.filter(row=>afterStart(row) || String(row?.generation_mode||'').startsWith('local') || row?.local_extraction_version);
+        mem.timeline=timeline.filter(row=>!removedTimeline.includes(row));
+
+        const sourceArrays=['facts','events','relationships','character_anchors','active_arcs','open_loops','locations','items','conflicts','quarantined','semantic_anchors'];
+        const removedByField={};
+        for(const field of sourceArrays){
+            const rows=Array.isArray(mem[field])?mem[field]:[];
+            const removed=rows.filter(afterStart);
+            if(removed.length) removedByField[field]=removed;
+            mem[field]=rows.filter(row=>!removed.includes(row));
+        }
+
+        const removedNpcs={};
+        for(const [name,row] of Object.entries(mem.npcs||{})){
+            if(afterStart({...row,source:row?.last_source||row?.source})){
+                removedNpcs[name]=row;
+                delete mem.npcs[name];
+            }
+        }
+        if(Object.keys(removedNpcs).length) removedByField.npcs=removedNpcs;
+
+        const stages=Array.isArray(mem.stage_summaries)?mem.stage_summaries:[];
+        const removedStages=stages.filter(row=>
+            String(row?.generation_mode||'').startsWith('local') ||
+            (Number.isInteger(Number(row?.end_index)) && Number(row.end_index)>=start)
+        );
+        mem.stage_summaries=stages.filter(row=>!removedStages.includes(row));
+        const keptStageEnds=mem.stage_summaries.map(x=>Number(x?.end_index)).filter(Number.isFinite);
+        mem.stage_summary_last_index=keptStageEnds.length?Math.max(...keptStageEnds):-1;
+        mem.stage_summary_updated_at=mem.stage_summaries.length?new Date().toISOString():null;
+
+        // Local status extraction could have written transient character state
+        // without field-level provenance. Preserve only stable identity/personality;
+        // the current model will rebuild location/outfit/physiology from the text.
+        mem.characters=stableCharactersForPromptV0110(mem);
+        mem.last_processed_index=Math.min(oldCursor,start-1);
+        mem.local_coverage_ranges=[];
+        mem.local_deferred_ranges=[];
+        mem.current_story_date=null;
+        mem.current_story_time=null;
+        mem.current_reality_date=null;
+        mem.current_reality_time=null;
+        mem.current_scene={};
+
+        const latest=mem.timeline
+            .filter(x=>sourceLast(x?.source)<=mem.last_processed_index)
+            .sort((a,b)=>sourceLast(a?.source)-sourceLast(b?.source)).at(-1);
+        if(latest){
+            mem.current_story_date=normalizeDateInput(latest?.date||'')?.iso||null;
+            mem.current_story_time=String(latest?.time||'').trim()||null;
+            mem.current_scene={
+                ...(latest?.date?{date:latest.date}:{}),
+                ...(latest?.time?{time:latest.time}:{}),
+                ...(latest?.location?{location:latest.location}:{})
+            };
+        }
+
+        mem.requeue_backup_v01136={
+            at:new Date().toISOString(),start,old_cursor:oldCursor,
+            current_story_date:snapshot.current_story_date||null,
+            current_story_time:snapshot.current_story_time||null,
+            current_scene:snapshot.current_scene||{},
+            timeline:removedTimeline,
+            stage_summaries:removedStages,
+            removed_by_field:removedByField
+        };
+        delete mem.local_recap_repair_v01135;
+        delete mem.local_assistant_only_repair_v01134;
+        delete mem.rebuild_state;
+        mem.audit=Array.isArray(mem.audit)?mem.audit:[];
+        mem.audit.push({
+            at:new Date().toISOString(),type:'local_memory_requeued_v01136',
+            start,old_cursor:oldCursor,new_cursor:mem.last_processed_index,
+            removed_timeline:removedTimeline.length,removed_stages:removedStages.length,
+            original_chat_modified:false
+        });
+        if(mem.audit.length>50) mem.audit=mem.audit.slice(-50);
+
+        const settings=S();
+        settings.summaryMode='ai';
+        settings.summaryProvider='current';
+        settings.summaryFallback='stop';
+        saveSettings();
+        if(save) await saveMeta();
+        return {changed:true,start,old_cursor:oldCursor,new_cursor:mem.last_processed_index,removed_timeline:removedTimeline.length,removed_stages:removedStages.length};
+    }catch(e){
+        restoreObjectInPlaceV0112(mem,snapshot);
+        if(save){ try{await saveMeta();}catch(_){} }
+        throw e;
+    }
+}
+
+async function runRequeueIncorrectLocalMemoryV01136() {
+    try{
+        const result=await requeueIncorrectLocalMemoryV01136({confirmUser:true,save:true});
+        if(result?.cancelled) return;
+        if(!result?.changed) return toast('没有检测到旧版 0 API 派生记忆。','success');
+        refresh(); refreshNative();
+        toast(`已撤销错误本地记录：从 #${result.start} 起重新排队；移除时间线 ${result.removed_timeline} 条。现在可点“总结新增（当前模型）”。`,'success');
+    }catch(e){
+        console.error('[StoryMemory] v0.11.36 local-memory requeue failed',e);
+        toast(`撤销失败，原记忆已恢复：${e?.message||e}`,'error');
     }
 }
 
 async function summarizeNew(force=false) {
     if (BUSY) return;
     const c = C(), s = S(), mem = M(), chat = c.chat || [];
-    if(localSummaryModeV01129()){
-        await ensureRoleCardRecapMemoryV01135({notifyUser:true});
-    }
     const start = Math.max(0, Number(mem.last_processed_index ?? -1) + 1);
     const pending = chat.length - start;
     const deferredBefore=localSummaryModeV01129()?localDeferredCountV01133(mem):0;
@@ -9310,6 +9740,7 @@ function normalizeImported(obj) {
     m.current_story_time = obj?.scope?.story_current || obj.current_story_time || obj?.canonical_anchor?.current_story_time || null;
     m.timeline = Array.isArray(obj.timeline) ? obj.timeline : [];
     m.characters = obj.characters && typeof obj.characters === 'object' ? obj.characters : {};
+    m.npcs = obj.npcs && typeof obj.npcs === 'object' && !Array.isArray(obj.npcs) ? obj.npcs : {};
     m.relationships = Array.isArray(obj.relationship_state) ? obj.relationship_state :
                       (Array.isArray(obj.relationships) ? obj.relationships : []);
     m.open_loops = Array.isArray(obj.open_loops) ? obj.open_loops : [];
@@ -9388,10 +9819,11 @@ function stat() {
 function panelHTML() {
     return `<div id="${PANEL_ID}" class="smm2-hidden">
       <div class="smm2-card">
-        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.35</span></div><button id="smm2_close">×</button></div>
+        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.37</span></div><button id="smm2_close">×</button></div>
         <div id="smm2_stats" class="smm2-stats"></div>
         <div class="smm2-grid">
           <button id="smm2_new">总结新增</button>
+          <button id="smm136_requeue">撤销错误 0 API 记录并重新排队</button>
           <button id="smm133_backfill">补录已跳过楼层（0 API）</button>
           <button id="smm2_rebuild">重扫整条聊天</button>
           <button id="smm2_import">导入记忆 JSON</button>
@@ -9405,8 +9837,8 @@ function panelHTML() {
         <label><input id="smm2_auto" type="checkbox"> 自动增量总结</label>
         <label>总结方式
           <select id="smm2_mode">
-            <option value="local">0 API 本地事实（推荐）</option>
-            <option value="ai">AI 完整总结（调用接口）</option>
+            <option value="ai">当前聊天模型（推荐，无需独立 API）</option>
+            <option value="local">0 API 规则抽取（实验性，非完整总结）</option>
           </select>
         </label>
         <label>每 <input id="smm2_trigger" type="number" min="1" max="50"> 条新消息总结一次</label>
@@ -10334,6 +10766,7 @@ function historyBrowserHTML() {
             <option value="all">全部类型</option>
             <option value="timeline">时间线</option>
             <option value="character">人物</option>
+            <option value="npc">NPC</option>
             <option value="relationship">人物关系</option>
           </select>
         </div>
@@ -10349,6 +10782,9 @@ function historyRecords() {
     }
     for (const g of mergedCharactersView()) {
         out.push({type:'character', label:g.name, text:JSON.stringify(g.states), raw:g});
+    }
+    for (const [name,npc] of Object.entries(m.npcs||{})) {
+        out.push({type:'npc', label:name, text:JSON.stringify(npc), raw:npc});
     }
     for (const g of mergedRelationshipsView()) {
         out.push({type:'relationship', label:g.key, text:JSON.stringify(g.history), raw:g});
@@ -10423,6 +10859,7 @@ function emptyV4MemoryFromLegacy(mem) {
 
         days: {},
         characters_v4: {},
+        npcs_v4: cloneJSONV0112(mem.npcs || {}),
         relationships_v4: {},
         tasks_v4: [],
         unresolved_v4: [],
@@ -10767,6 +11204,9 @@ function historyRecordsV4() {
     for(const c of Object.values(m.characters_v4||{})){
         out.push({type:'character',label:c.name,text:JSON.stringify({profile:c.profile,current_state:c.current_state})});
     }
+    for(const [name,npc] of Object.entries(m.npcs_v4||{})){
+        out.push({type:'npc',label:name,text:`${npc?.identity||''} ${npc?.brief||''} ${npc?.current_status||''}`.trim()});
+    }
     for(const r of Object.values(m.relationships_v4||{})){
         out.push({type:'relationship',label:r.people.join(' ↔ '),text:JSON.stringify({current:r.current,history:r.history})});
     }
@@ -10846,6 +11286,9 @@ function legacyHistoryRecords() {
     for(const [name,c] of Object.entries(m.characters||{})){
         out.push({type:'character',label:name,text:JSON.stringify(c||{})});
     }
+    for(const [name,npc] of Object.entries(m.npcs||{})){
+        out.push({type:'npc',label:name,text:`${npc?.identity||''} ${npc?.brief||''} ${npc?.current_status||''}`.trim()});
+    }
     for(const r of (m.relationships||[])){
         const people=Array.isArray(r.people)?r.people.join(' ↔ '):'人物关系';
         out.push({type:'relationship',label:people,text:`${r.state||''} ${r.change||''}`.trim()});
@@ -10906,6 +11349,19 @@ function legacyCharactersHTML(mem=M()) {
       <details class="smm2-person">
         <summary>${esc(name)}</summary>
         <pre>${esc(JSON.stringify(data||{},null,2))}</pre>
+      </details>`).join('');
+}
+
+function legacyNpcsHTML(mem=M()) {
+    const rows=Object.entries(mem.npcs||{});
+    if(!rows.length) return '<div class="smm2-empty">尚未识别需要长期保留的次要 NPC。</div>';
+    return rows.sort((a,b)=>a[0].localeCompare(b[0],'zh-CN')).map(([name,npc])=>`
+      <details class="smm2-person smm2-npc">
+        <summary>${esc(name)}${npc?.identity?`｜${esc(npc.identity)}`:''}</summary>
+        ${npc?.brief?`<div><b>简述：</b>${esc(npc.brief)}</div>`:''}
+        ${npc?.current_status?`<div><b>当前状态：</b>${esc(npc.current_status)}</div>`:''}
+        ${npc?.aliases?.length?`<div><b>别名：</b>${esc(npc.aliases.join(' / '))}</div>`:''}
+        ${npc?.last_source||npc?.source?`<small>${esc(npc.last_source||npc.source)}</small>`:''}
       </details>`).join('');
 }
 
@@ -11000,6 +11456,7 @@ function legacyReadableHTML(mem=M()) {
               <option value="all">全部类型</option>
               <option value="timeline">时间线</option>
               <option value="character">人物</option>
+              <option value="npc">NPC</option>
               <option value="relationship">人物关系</option>
             </select>
           </div>
@@ -11014,6 +11471,11 @@ function legacyReadableHTML(mem=M()) {
         <details class="smm2-memory-details">
           <summary>人物（${Object.keys(mem.characters||{}).length}）</summary>
           ${legacyCharactersHTML(mem)}
+        </details>
+
+        <details class="smm2-memory-details">
+          <summary>NPC（${Object.keys(mem.npcs||{}).length}）</summary>
+          ${legacyNpcsHTML(mem)}
         </details>
 
         <details class="smm2-memory-details">
@@ -11082,6 +11544,7 @@ function memoryReadableHTML() {
               <option value="all">全部类型</option>
               <option value="timeline">时间线</option>
               <option value="character">人物</option>
+              <option value="npc">NPC</option>
               <option value="relationship">人物关系</option>
             </select>
           </div>
@@ -11101,6 +11564,11 @@ function memoryReadableHTML() {
         <details class="smm2-memory-details">
           <summary>人物（${Object.keys(mem.characters_v4||{}).length}）</summary>
           ${v4CharactersHTML(mem)}
+        </details>
+
+        <details class="smm2-memory-details">
+          <summary>NPC（${Object.keys(mem.npcs_v4||{}).length}）</summary>
+          ${legacyNpcsHTML({npcs:mem.npcs_v4||{}})}
         </details>
 
         <details class="smm2-memory-details">
@@ -11314,6 +11782,7 @@ function nativeManagerHTML() {
       <div class="smm2-native-grid smm2-main-actions">
         <button id="smm2_native_new" class="menu_button smm2-primary-tool">总结新增</button>
         <button id="smm2_native_view" class="menu_button">查看 / 收起记忆</button>
+        <button id="smm136_native_requeue" class="menu_button">撤销错误 0 API 记录并重新排队</button>
         <button id="smm133_native_backfill" class="menu_button smm2-primary-tool">补录已跳过楼层（0 API）</button>
       </div>
 
@@ -11456,8 +11925,8 @@ function nativeManagerHTML() {
           <div class="smm107-inline-setting smm129-mode-row">
             <label for="smm129_summary_mode">总结方式</label>
             <select id="smm129_summary_mode">
-              <option value="local">0 API 本地事实（推荐）</option>
-              <option value="ai">AI 完整总结（调用接口）</option>
+              <option value="ai">当前聊天模型（推荐，无需独立 API）</option>
+              <option value="local">0 API 规则抽取（实验性，非完整总结）</option>
             </select>
           </div>
           <div id="smm129_mode_status" class="smm2-note smm107-status-note"></div>
@@ -11506,7 +11975,7 @@ function nativeManagerHTML() {
             <label>
               总结通道
               <select id="smm93_summary_provider">
-                <option value="current">跟随当前聊天模型</option>
+                <option value="current">复用当前聊天模型（静默）</option>
                 <option value="profile">独立 Connection Profile</option>
               </select>
             </label>
@@ -11533,7 +12002,7 @@ function nativeManagerHTML() {
             </label>
 
             <label>
-              最大输出 Token
+              独立 Profile 最大输出 Token
               <input id="smm93_summary_tokens" type="number" min="512" max="32768" step="256">
             </label>
 
@@ -11590,6 +12059,8 @@ function bindNativeManager() {
     if (!q('smm2_native_new')) return;
 
     q('smm2_native_new').onclick = () => summarizeNew(true);
+    const requeueBtn=q('smm136_native_requeue');
+    if(requeueBtn) requeueBtn.onclick=runRequeueIncorrectLocalMemoryV01136;
     const deferredBackfillBtn=q('smm133_native_backfill');
     if(deferredBackfillBtn) deferredBackfillBtn.onclick=runDeferredBackfillV01133;
     const stageBuildBtn=q('smm121_build_stages');
@@ -11638,7 +12109,7 @@ function bindNativeManager() {
         }
 
         const usingProfile=String(settings.summaryProvider||'current')==='profile';
-        const usingLocal=String(settings.summaryMode||'local')!=='ai';
+        const usingLocal=String(settings.summaryMode||'ai')!=='ai';
         if(modeEl) modeEl.value=usingLocal?'local':'ai';
         for(const el of [providerEl,profileEl,fallbackEl,tokensEl,createProfileEl]){
             if(el) el.disabled=usingLocal;
@@ -11654,9 +12125,9 @@ function bindNativeManager() {
 
         if(status){
             if(usingLocal){
-                status.textContent='当前：0 API 本地事实总结；不读取此处的 Profile / Token 设置。';
+                status.textContent='当前：实验性 0 API 规则抽取；不能替代模型语义总结。';
             }else if(!usingProfile){
-                status.textContent='当前：总结跟随主聊天模型。';
+                status.textContent='当前：复用主聊天已连接的模型静默总结；不需要第二个 API/Profile。每批仅生成 1 次。';
             }else{
                 const p=profiles.find(x=>x.id===settings.summaryProfileId);
                 status.textContent=p
@@ -12091,15 +12562,17 @@ function refreshNative() {
     setChecked('smm100_safe_inject', s.safeMemoryInject);
     setChecked('smm100_auto_hide', s.autoHideSummarized);
     setValue('smm100_keep_recent', s.keepRecentMessages);
-    setValue('smm129_summary_mode', String(s.summaryMode||'local')==='ai'?'ai':'local');
+    setValue('smm129_summary_mode', String(s.summaryMode||'ai')==='ai'?'ai':'local');
 
-    const localMode=String(s.summaryMode||'local')!=='ai';
+    const localMode=String(s.summaryMode||'ai')!=='ai';
     const modeStatus=document.getElementById('smm129_mode_status');
     if(modeStatus) modeStatus.textContent=localMode
-        ? '当前为 0 API：优先读取角色回复中的 abstract / plot / 可识别剧情摘要；否则只从角色回复抽取可追溯事实，玩家输入不会单独写入正史。<status> 只提供时间和地点，不会把内心、待办、弹幕或头条写入正史。无法安全抽取的原文不会被自动隐藏。'
-        : '当前为 AI 总结；遇到 524 / 120 秒超时时，当批会本地保底并自动切回 0 API。';
+        ? '实验性 0 API 只做规则抽取，不具备完整语义总结能力，不建议用于日常长期记忆。'
+        : '复用当前聊天模型静默总结：同时读取用户与角色真实楼层，每批只生成 1 次。非 JSON、524 或超时均不写入、不推进游标，可稍后重试。';
     const newBtn=document.getElementById('smm2_native_new');
-    if(newBtn) newBtn.textContent=localMode?'总结新增（0 API）':'总结新增（AI）';
+    if(newBtn) newBtn.textContent=localMode?'总结新增（实验性 0 API）':'总结新增（当前模型）';
+    const requeueBtn=document.getElementById('smm136_native_requeue');
+    if(requeueBtn) requeueBtn.style.display=hasIncorrectLocalMemoryV01136(M())?'':'none';
     const deferredCount=localDeferredCountV01133(M());
     const deferredBtn=document.getElementById('smm133_native_backfill');
     if(deferredBtn){
@@ -12111,7 +12584,7 @@ function refreshNative() {
         if(el) el.disabled=localMode;
     }
     const modelStatus=document.getElementById('smm93_summary_status');
-    if(modelStatus&&localMode) modelStatus.textContent='当前：0 API 本地事实总结；不读取此处的 Profile / Token 设置。';
+    if(modelStatus&&localMode) modelStatus.textContent='当前：实验性 0 API 规则抽取；不能替代模型语义总结。';
 
     const hideStatus = document.getElementById('smm100_hide_status');
 
@@ -12173,7 +12646,7 @@ function installNativeExtensionEntry() {
 
         wrap.innerHTML = `
           <div class="inline-drawer-toggle inline-drawer-header">
-            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.35</span></div>
+            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.37</span></div>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
           </div>
           <div class="inline-drawer-content">
@@ -12246,6 +12719,7 @@ function bind() {
     const $=id=>document.getElementById(id);
     $('smm2_close').onclick=()=>$(PANEL_ID).classList.add('smm2-hidden');
     $('smm2_new').onclick=()=>summarizeNew(true);
+    $('smm136_requeue').onclick=runRequeueIncorrectLocalMemoryV01136;
     $('smm133_backfill').onclick=runDeferredBackfillV01133;
     $('smm2_rebuild').onclick=rebuildAll;
     $('smm2_import').onclick=importMemory;
@@ -12318,6 +12792,7 @@ function statsHTMLV0105() {
     const hidden = getSmmAutoHiddenInfoV0101();
     const date = mem.current_story_date || '未建立';
     const people = Object.keys(mem.characters || {}).length;
+    const npcs = Object.keys(mem.npcs || {}).length;
     const relations = Array.isArray(mem.relationships) ? mem.relationships.length : 0;
     const anchors = Array.isArray(mem.semantic_anchors) ? mem.semantic_anchors.length : 0;
     const continuityNeedsReview =
@@ -12327,9 +12802,9 @@ function statsHTMLV0105() {
 
     return [
         `<div class="smm105-stat-line"><b>剧情：</b>${esc(date)}　${esc(st.time)}</div>`,
-        `<div class="smm105-stat-line"><b>总结方式：</b>${localSummaryModeV01129()?'0 API 本地事实':'AI 完整总结'}</div>`,
+        `<div class="smm105-stat-line"><b>总结方式：</b>${localSummaryModeV01129()?'实验性 0 API 规则抽取':'当前聊天模型 · 静默单次'}</div>`,
         `<div class="smm105-stat-line"><b>扫描：</b>${st.done}/${st.total}　待扫描 ${st.pending}　待补录 ${st.deferred}　已隐藏 ${hidden.count}</div>`,
-        `<div class="smm105-stat-line"><b>记忆：</b>时间线 ${st.timeline}　人物 ${people}　关系 ${relations}　锚点 ${anchors}　阶段 ${(mem.stage_summaries||[]).length}</div>`,
+        `<div class="smm105-stat-line"><b>记忆：</b>时间线 ${st.timeline}　人物 ${people}　NPC ${npcs}　关系 ${relations}　锚点 ${anchors}　阶段 ${(mem.stage_summaries||[]).length}</div>`,
         `<div class="smm105-stat-line"><b>连续性：</b>${st.deferred ? `⚠ ${st.deferred} 楼已扫描但尚未形成记忆` : (coverageGapsV0112.length ? `⚠ 时间线断档 #${coverageGapsV0112[0].start}-#${coverageGapsV0112[0].end}` : (continuityNeedsReview ? '后台有待核查项' : '正常'))}</div>`,
         `<div class="smm105-stat-line"><b>历史重建：</b>${esc(rebuildStatusLabelV0105(mem))}</div>`,
         rebuildCheckpointHTMLV0105(mem, st.total)
@@ -12339,7 +12814,7 @@ function statsHTMLV0105() {
 function refresh() {
     // v0.11.19: extension prompts are chat-scoped in practice; always refresh after
     // chat/message state changes so the main model receives THIS chat's latest memory.
-    try { refreshSafeMemoryInjectionV0100(); } catch(e) { console.warn('[StoryMemory] v0.11.35 injection refresh failed', e); }
+    try { refreshSafeMemoryInjectionV0100(); } catch(e) { console.warn('[StoryMemory] v0.11.36 injection refresh failed', e); }
     refreshNative();
     renderMemoryInjectionAuditV0119();
 
@@ -12350,11 +12825,13 @@ function refresh() {
     document.getElementById('smm2_enabled').checked=!!s.enabled;
     document.getElementById('smm2_inject').checked=false;
     document.getElementById('smm2_auto').checked=!!s.autoSummarize;
-    document.getElementById('smm2_mode').value=String(s.summaryMode||'local')==='ai'?'ai':'local';
+    document.getElementById('smm2_mode').value=String(s.summaryMode||'ai')==='ai'?'ai':'local';
     document.getElementById('smm2_trigger').value=s.triggerMessages;
     document.getElementById('smm2_batch').value=s.batchMessages;
     document.getElementById('smm2_start').value=M().story_start||'';
-    document.getElementById('smm2_new').textContent=localSummaryModeV01129()?'总结新增（0 API）':'总结新增（AI）';
+    document.getElementById('smm2_new').textContent=localSummaryModeV01129()?'总结新增（实验性 0 API）':'总结新增（当前模型）';
+    const requeueBtn=document.getElementById('smm136_requeue');
+    if(requeueBtn) requeueBtn.style.display=hasIncorrectLocalMemoryV01136(M())?'':'none';
     const deferredCount=localDeferredCountV01133(M());
     const deferredBtn=document.getElementById('smm133_backfill');
     if(deferredBtn){
@@ -12404,24 +12881,18 @@ function initializeExtension() {
         }
     };
 
-    const scheduleRoleCardRecapRepair=()=>setTimeout(()=>{
-        ensureRoleCardRecapMemoryV01135({notifyUser:true})
-            .catch(e=>console.warn('[StoryMemory] v0.11.35 scheduled repair failed',e));
-    },350);
-
-    safeOn('CHAT_CHANGED', () => setTimeout(() => { installUI(); refresh(); scheduleRoleCardRecapRepair(); }, 150));
+    safeOn('CHAT_CHANGED', () => setTimeout(() => { installUI(); refresh(); }, 150));
     safeOn('MESSAGE_RECEIVED', () => setTimeout(async () => { refresh(); await maybeAuto(); }, 100));
     safeOn('MESSAGE_SENT', () => setTimeout(refresh, 50));
     safeOn('MESSAGE_EDITED', () => setTimeout(refresh, 50));
     safeOn('MESSAGE_DELETED', () => setTimeout(refresh, 50));
-    safeOn('APP_READY', () => setTimeout(() => { installUI(); refresh(); scheduleRoleCardRecapRepair(); }, 100));
-    safeOn('APP_INITIALIZED', () => setTimeout(() => { installUI(); refresh(); scheduleRoleCardRecapRepair(); }, 100));
+    safeOn('APP_READY', () => setTimeout(() => { installUI(); refresh(); }, 100));
+    safeOn('APP_INITIALIZED', () => setTimeout(() => { installUI(); refresh(); }, 100));
 
     try {
         installUI();
         refresh();
-        scheduleRoleCardRecapRepair();
-        console.log('[StoryMemory] v0.11.35 loaded successfully');
+        console.log('[StoryMemory] v0.11.37 loaded successfully');
     } catch (e) {
         console.error('[StoryMemory] UI initialization failed', e);
     }
