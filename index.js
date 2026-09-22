@@ -1,5 +1,5 @@
-// Story Memory Manager v0.11.42
-// Memory-Palace-style direct API transport / non-completion verification / paid-call guard
+// Story Memory Manager v0.11.43
+// Direct API model discovery / mobile layout repair / paid-call guard
 // does not rewrite original chat JSONL
 
 const MODULE = 'story_memory_manager_v2';
@@ -41,9 +41,13 @@ const DEFAULTS = Object.freeze({
     summaryProfileCircuitAt: '',
     summaryProfileCircuitProfileId: '',
     summaryTransportPolicyV01142: 'direct_external_api_verified_single_request',
+    summaryTransportPolicyV01143: 'fetch_models_then_select',
     summaryExternalApiUrl: '',
     summaryExternalApiKey: '',
     summaryExternalApiModel: '',
+    summaryExternalModels: [],
+    summaryExternalModelsBase: '',
+    summaryExternalModelsFetchedAt: '',
     summaryExternalVerifiedFingerprint: '',
     summaryExternalVerifiedAt: '',
     summaryExternalCircuitOpen: false,
@@ -90,6 +94,7 @@ function S() {
     const upgradingToV01140 = !Object.hasOwn(c.extensionSettings[MODULE], 'summaryTransportPolicyV01140');
     const upgradingToV01141 = !Object.hasOwn(c.extensionSettings[MODULE], 'summaryTransportPolicyV01141');
     const upgradingToV01142 = !Object.hasOwn(c.extensionSettings[MODULE], 'summaryTransportPolicyV01142');
+    const upgradingToV01143 = !Object.hasOwn(c.extensionSettings[MODULE], 'summaryTransportPolicyV01143');
     for (const [k,v] of Object.entries(DEFAULTS)) {
         if (!Object.hasOwn(c.extensionSettings[MODULE], k)) c.extensionSettings[MODULE][k] = v;
     }
@@ -132,6 +137,15 @@ function S() {
         c.extensionSettings[MODULE].summaryExternalCircuitOpen=false;
         c.extensionSettings[MODULE].summaryExternalCircuitReason='';
         c.extensionSettings[MODULE].summaryExternalCircuitAt='';
+        try { c.saveSettingsDebounced?.(); } catch (_) {}
+    }
+    if (upgradingToV01143) {
+        c.extensionSettings[MODULE].summaryTransportPolicyV01143='fetch_models_then_select';
+        c.extensionSettings[MODULE].summaryExternalModels=[];
+        c.extensionSettings[MODULE].summaryExternalModelsBase='';
+        c.extensionSettings[MODULE].summaryExternalModelsFetchedAt='';
+        c.extensionSettings[MODULE].summaryExternalVerifiedFingerprint='';
+        c.extensionSettings[MODULE].summaryExternalVerifiedAt='';
         try { c.saveSettingsDebounced?.(); } catch (_) {}
     }
     return c.extensionSettings[MODULE];
@@ -5031,15 +5045,15 @@ async function fetchWithTimeoutV01142(url,options={},timeoutMs=20000) {
     }
 }
 
-async function verifyExternalApiV01142() {
+async function fetchExternalModelsV01143() {
     const s=S();
     const url=externalApiModelsUrlV01142(s.summaryExternalApiUrl||'');
-    const model=String(s.summaryExternalApiModel||'').trim();
     if(!url) throw new Error('请先填写直接 API 地址，例如 https://api.example.com/v1');
-    if(!model) throw new Error('请先填写模型名称；连接检查不会自动猜测付费模型。');
-    // Every manual check starts from an unverified state. A failed re-check
-    // must never leave a stale fingerprint usable for a paid completion.
+    // Model discovery is a non-completion GET. It never submits chat content.
     invalidateExternalApiVerificationV01142({clearCircuit:false});
+    s.summaryExternalModels=[];
+    s.summaryExternalModelsBase='';
+    s.summaryExternalModelsFetchedAt='';
     const headers={};
     const key=String(s.summaryExternalApiKey||'').trim();
     if(key) headers.Authorization=`Bearer ${key}`;
@@ -5061,22 +5075,56 @@ async function verifyExternalApiV01142() {
     }
     let data;
     try{ data=JSON.parse(raw); }catch(_){ throw new Error('/models 返回的不是 JSON；未发送 Chat Completion。'); }
-    const models=(Array.isArray(data?.data)?data.data:[])
-        .map(x=>String(x?.id||x?.name||'').trim()).filter(Boolean);
+    const rows=Array.isArray(data?.data)?data.data:(Array.isArray(data?.models)?data.models:[]);
+    const models=[...new Set(rows.map(x=>String(typeof x==='string'?x:(x?.id||x?.name||'')).trim()).filter(Boolean))]
+        .sort((a,b)=>a.localeCompare(b));
     if(!models.length){
         throw new Error('/models 未返回可验证的模型列表；未发送 Chat Completion。');
     }
-    if(!models.includes(model)){
-        invalidateExternalApiVerificationV01142({clearCircuit:false});
-        throw new Error(`模型“${model}”不在 /models 返回列表中。可用示例：${models.slice(0,8).join('、')}`);
+    s.summaryExternalModels=models;
+    s.summaryExternalModelsBase=normalizeExternalApiBaseV01142(s.summaryExternalApiUrl||'');
+    s.summaryExternalModelsFetchedAt=new Date().toISOString();
+    const selected=String(s.summaryExternalApiModel||'').trim();
+    if(selected && models.includes(selected)){
+        s.summaryExternalVerifiedFingerprint=externalApiFingerprintV01142(s);
+        s.summaryExternalVerifiedAt=new Date().toISOString();
+        s.summaryExternalCircuitOpen=false;
+        s.summaryExternalCircuitReason='';
+        s.summaryExternalCircuitAt='';
     }
+    try{ saveSettings(); }catch(_){ }
+    return {models,url,selected:models.includes(selected)?selected:''};
+}
+
+function selectExternalModelV01143(modelValue) {
+    const s=S();
+    const model=String(modelValue||'').trim();
+    const models=Array.isArray(s.summaryExternalModels)?s.summaryExternalModels:[];
+    const currentBase=normalizeExternalApiBaseV01142(s.summaryExternalApiUrl||'');
+    if(!model || !models.includes(model) || currentBase!==String(s.summaryExternalModelsBase||'')){
+        s.summaryExternalApiModel=model;
+        invalidateExternalApiVerificationV01142({clearCircuit:false});
+        throw new Error('所选模型不是本次 /models 拉取结果，请重新拉取模型。');
+    }
+    s.summaryExternalApiModel=model;
     s.summaryExternalVerifiedFingerprint=externalApiFingerprintV01142(s);
     s.summaryExternalVerifiedAt=new Date().toISOString();
     s.summaryExternalCircuitOpen=false;
     s.summaryExternalCircuitReason='';
     s.summaryExternalCircuitAt='';
     try{ saveSettings(); }catch(_){}
-    return {models,model,url};
+    return {model,models};
+}
+
+async function verifyExternalApiV01142() {
+    const s=S();
+    const model=String(s.summaryExternalApiModel||'').trim();
+    if(!model) throw new Error('请先拉取模型并从下拉列表选择一个模型。');
+    const result=await fetchExternalModelsV01143();
+    if(!result.models.includes(model)){
+        throw new Error(`模型“${model}”不在 /models 返回列表中。可用示例：${result.models.slice(0,8).join('、')}`);
+    }
+    return {...result,...selectExternalModelV01143(model)};
 }
 
 function externalResponseTextV01142(data) {
@@ -10229,7 +10277,7 @@ function stat() {
 function panelHTML() {
     return `<div id="${PANEL_ID}" class="smm2-hidden">
       <div class="smm2-card">
-        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.42</span></div><button id="smm2_close">×</button></div>
+        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.43</span></div><button id="smm2_close">×</button></div>
         <div id="smm2_stats" class="smm2-stats"></div>
         <div class="smm2-grid">
           <button id="smm2_new">总结新增</button>
@@ -12416,7 +12464,7 @@ function nativeManagerHTML() {
               <input id="smm93_summary_tokens" type="number" min="512" max="3072" step="256">
             </label>
 
-            <div id="smm142_external_rows" style="display:none">
+            <div id="smm142_external_rows" class="smm143-external-api" style="display:none">
               <label>
                 直接 API 地址
                 <input id="smm142_external_url" type="text" placeholder="https://api.astroflowing.com/v1">
@@ -12426,12 +12474,14 @@ function nativeManagerHTML() {
                 <input id="smm142_external_key" type="password" autocomplete="off" placeholder="sk-...">
               </label>
               <label>
-                模型名称
-                <input id="smm142_external_model" type="text" placeholder="填写 /models 返回的模型 ID">
+                总结模型
+                <select id="smm142_external_model">
+                  <option value="">请先拉取模型</option>
+                </select>
               </label>
-              <button id="smm142_test_external" class="menu_button">检查连接与模型（不发送总结）</button>
+              <button id="smm142_test_external" class="menu_button smm143-fetch-models">拉取模型（不发送总结）</button>
               <div id="smm142_external_status" class="smm2-note"></div>
-              <div class="smm2-note">连接检查只读取 <code>/models</code>，不调用 Chat Completion。API Key 保存在当前 SillyTavern 浏览器设置中。</div>
+              <div class="smm2-note">先填写地址与 Key，再拉取模型并从下拉框选择。拉取只读取 <code>/models</code>，不调用 Chat Completion。API Key 保存在当前 SillyTavern 浏览器设置中。</div>
             </div>
 
             <div id="smm93_summary_status" class="smm2-note"></div>
@@ -12570,14 +12620,25 @@ function bindNativeManager() {
         if(externalRows) externalRows.style.display=usingExternal ? '' : 'none';
         if(externalUrlEl) externalUrlEl.value=String(settings.summaryExternalApiUrl||'');
         if(externalKeyEl) externalKeyEl.value=String(settings.summaryExternalApiKey||'');
-        if(externalModelEl) externalModelEl.value=String(settings.summaryExternalApiModel||'');
+        if(externalModelEl){
+            const models=Array.isArray(settings.summaryExternalModels)?settings.summaryExternalModels:[];
+            const selected=String(settings.summaryExternalApiModel||'');
+            externalModelEl.innerHTML=[
+                `<option value="">${models.length?'请选择总结模型':'请先拉取模型'}</option>`,
+                ...models.map(model=>`<option value="${esc(model)}">${esc(model)}</option>`),
+                ...(selected&&!models.includes(selected)?[`<option value="${esc(selected)}">${esc(selected)}（需重新拉取）</option>`]:[])
+            ].join('');
+            externalModelEl.value=selected;
+        }
         for(const el of [externalUrlEl,externalKeyEl,externalModelEl,testExternalEl]) if(el) el.disabled=usingLocal;
         if(externalStatusEl){
             externalStatusEl.textContent=!usingExternal?'':externalApiCircuitOpenV01142(settings)
                 ? `费用保护已锁定：${String(settings.summaryExternalCircuitReason||'上次请求失败')}。重新检查连接前不会发送总结。`
                 : externalApiVerifiedV01142(settings)
                     ? `已验证：${normalizeExternalApiBaseV01142(settings.summaryExternalApiUrl)} · ${String(settings.summaryExternalApiModel||'')}。检查过程未发送总结。`
-                    : '尚未验证。请先检查连接与模型；验证前不会发送总结。';
+                    : (Array.isArray(settings.summaryExternalModels)&&settings.summaryExternalModels.length
+                        ? '模型已拉取。请选择总结模型；选择完成前不会发送总结。'
+                        : '尚未拉取模型。请先填写地址与 Key，再点击“拉取模型”；不会发送总结。');
         }
 
         const status=q('smm93_summary_status');
@@ -12666,31 +12727,47 @@ function bindNativeManager() {
         };
     }
 
-    const saveExternalSetting=()=>{
+    const saveExternalConnectionSettings=()=>{
         const settings=S();
         const nextUrl=String(externalUrlEl?.value||'').trim();
         const nextKey=String(externalKeyEl?.value||'').trim();
-        const nextModel=String(externalModelEl?.value||'').trim();
-        const changed=nextUrl!==String(settings.summaryExternalApiUrl||'') || nextKey!==String(settings.summaryExternalApiKey||'') || nextModel!==String(settings.summaryExternalApiModel||'');
+        const changed=nextUrl!==String(settings.summaryExternalApiUrl||'') || nextKey!==String(settings.summaryExternalApiKey||'');
         settings.summaryExternalApiUrl=nextUrl;
         settings.summaryExternalApiKey=nextKey;
-        settings.summaryExternalApiModel=nextModel;
-        if(changed) invalidateExternalApiVerificationV01142();
+        if(changed){
+            settings.summaryExternalApiModel='';
+            settings.summaryExternalModels=[];
+            settings.summaryExternalModelsBase='';
+            settings.summaryExternalModelsFetchedAt='';
+            invalidateExternalApiVerificationV01142();
+        }
         saveSettings();
         refreshSummaryProfileUIV094();
         refreshNative();
     };
-    for(const el of [externalUrlEl,externalKeyEl,externalModelEl]) if(el) el.onchange=saveExternalSetting;
+    for(const el of [externalUrlEl,externalKeyEl]) if(el) el.onchange=saveExternalConnectionSettings;
+    if(externalModelEl){
+        externalModelEl.onchange=()=>{
+            try{
+                const result=selectExternalModelV01143(externalModelEl.value);
+                toast(`已选择总结模型：${result.model}。现在可以发送单批总结。`,'success');
+            }catch(e){
+                toast(e?.message||String(e),'warning');
+            }
+            refreshSummaryProfileUIV094();
+            refreshNative();
+        };
+    }
     if(testExternalEl){
         testExternalEl.onclick=async()=>{
-            saveExternalSetting();
+            saveExternalConnectionSettings();
             testExternalEl.disabled=true;
-            if(externalStatusEl) externalStatusEl.textContent='正在读取 /models；不会发送总结。';
+            if(externalStatusEl) externalStatusEl.textContent='正在拉取 /models；不会发送总结。';
             try{
-                const result=await verifyExternalApiV01142();
-                toast(`连接与模型验证通过（发现 ${result.models.length} 个模型）；未发送总结。`,'success');
+                const result=await fetchExternalModelsV01143();
+                toast(`已拉取 ${result.models.length} 个模型；请选择总结模型。未发送总结。`,'success');
             }catch(e){
-                toast(`连接检查失败：${e?.message||e}。未发送总结。`,'error');
+                toast(`模型拉取失败：${e?.message||e}。未发送总结。`,'error');
             }finally{
                 testExternalEl.disabled=false;
                 refreshSummaryProfileUIV094();
@@ -13195,7 +13272,7 @@ function installNativeExtensionEntry() {
 
         wrap.innerHTML = `
           <div class="inline-drawer-toggle inline-drawer-header">
-            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.42</span></div>
+            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.43</span></div>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
           </div>
           <div class="inline-drawer-content">
@@ -13443,7 +13520,7 @@ function initializeExtension() {
     try {
         installUI();
         refresh();
-        console.log('[StoryMemory] v0.11.42 loaded successfully');
+        console.log('[StoryMemory] v0.11.43 loaded successfully');
     } catch (e) {
         console.error('[StoryMemory] UI initialization failed', e);
     }

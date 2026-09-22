@@ -1,6 +1,14 @@
-# Story Memory Manager v0.11.42 HYBRID
+# Story Memory Manager v0.11.43 HYBRID
 
 本版继续使用 SillyTavern 当前聊天模型做一次静默语义总结，并参考 [SillyTavern Memory Palace](https://github.com/badcode1024-tech/sillytavern-memory-palace) 的结构化总结与 NPC 分区思路：主要人物保留完整状态，次要 NPC 单独保存极简档案，并且只在当前剧情命中时注入。
+
+## v0.11.43 自动拉取模型与手机布局修复
+
+- 直接外部 API 不再要求先手工填写模型 ID。填写 API 地址和 Key 后即可点击“拉取模型”，插件只发送 GET `/models`。
+- `/models` 返回结果会形成模型下拉列表；选择其中一个模型后完成本地验证，才允许发送总结。
+- 地址或 Key 改变后会清空旧模型列表与验证状态，避免用旧凭据对应的模型误发付费请求。
+- 修复 Android 窄屏下“拉取模型”按钮被 SillyTavern 通用按钮样式压缩成竖排的问题。
+- 拉取模型不会提交聊天正文，也不会调用 Chat Completion；既有一键一批、失败熔断、游标事务保护保持不变。
 
 ## v0.11.42 记忆宫殿兼容直接 API
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.11.43 HYBRID
+
+- 直接 API 改为先 GET `/models`，再通过下拉列表选择总结模型，不再要求用户预先知道模型 ID。
+- 模型选择仅接受本次地址拉取到的 ID；地址或 Key 改变后自动清空模型缓存与验证状态。
+- 修复手机端嵌套按钮宽度被压缩、文字竖排的问题。
+- 模型拉取不发送 Chat Completion；总结费用保护与失败事务语义不变。
+
 ## v0.11.42 HYBRID
 
 - 新增参考 Memory Palace 的直接 OpenAI 兼容 API 通道，绕开 Connection Manager 的请求转换。

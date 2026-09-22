@@ -1,4 +1,11 @@
-# v0.11.42 HYBRID Release Audit
+# v0.11.43 HYBRID Release Audit
+
+## v0.11.43 model discovery audit
+
+- `/models` can be fetched with endpoint and key only; no model ID or completion request is required.
+- A model can be selected only from the current fetched list, after which the existing verified fingerprint gate is enabled.
+- Endpoint or key changes clear cached models and prior verification.
+- Nested direct-API controls have explicit full-width mobile layout rules.
 
 ## v0.11.42 direct API audit
 
