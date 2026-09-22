@@ -1,6 +1,28 @@
-# Story Memory Manager v0.11.40 HYBRID
+# Story Memory Manager v0.11.42 HYBRID
 
 本版继续使用 SillyTavern 当前聊天模型做一次静默语义总结，并参考 [SillyTavern Memory Palace](https://github.com/badcode1024-tech/sillytavern-memory-palace) 的结构化总结与 NPC 分区思路：主要人物保留完整状态，次要 NPC 单独保存极简档案，并且只在当前剧情命中时注入。
+
+## v0.11.42 记忆宫殿兼容直接 API
+
+- 新增“直接外部 API（记忆宫殿兼容）”：直接请求 OpenAI 兼容的 `/chat/completions`，不经过 SillyTavern Connection Manager 的请求转换。
+- 发送总结前必须先点击“检查连接与模型”。检查只读取 `/models`，不会发送 Chat Completion；地址或模型改变后自动失效，必须重新检查。
+- 总结请求只包含单条 user message 和 model，不发送 JSON Schema、response_format、预设或 instruct 元数据；结构要求使用紧凑 JSON 骨架放在提示词中。
+- 直接 API 仍执行约 30,000 tokens / 120,000 bytes 的本地输入保护，一次点击最多 1 个批次、每批最多 6 条消息，不自动重试。
+- HTTP 400、Cloudflare 520–526、超时、HTML/非 JSON、空正文或 source/提交校验失败均不写记忆、不推进游标，并锁定直接 API；重新检查连接前不会再次发出总结请求。
+- 不复制其他扩展的 API Key。用户需自行填写地址、Key 和 `/models` 返回的模型 ID；长期记忆架构、原聊天和已处理记忆保持不变。
+
+> `/models` 验证成功只能证明地址、鉴权和模型列表可访问，不能保证供应商的 Chat Completion 源站不会随后出现 520，也不能撤销供应商对已接收请求的计费。
+
+## v0.11.41 独立 API 费用熔断与 Cloudflare 520 防护
+
+- 独立 Profile 每次点击“总结新增”最多发送 **1 个付费批次**，不会在一次点击中连续处理全部积压楼层。
+- 独立 Profile 每批最多读取 6 条消息；请求发送前硬限制为约 30,000 tokens / 120,000 bytes，输出硬上限降为 3,072 tokens。
+- 新增持久费用熔断：400、Cloudflare 520–526、超时、空响应、非 JSON 或 source/提交校验失败后立即锁定该 Profile；锁定期间点击总结不会调用 API、不会扣费。
+- 升级后，已有独立 Profile 默认先锁定一次。用户必须在“总结模型”中明确点击“手动解除独立 API 费用锁定”，解除动作本身不调用 API。
+- 深度读取错误对象中的 message/cause/response/body/data/status，能够识别被 Connection Manager 包装的 Cloudflare HTML 错误；识别不到具体状态码时仍按通用失败锁定。
+- 不改变长期记忆结构、人物/NPC 分区、时间线、剧情起点或原始聊天 JSONL。
+
+> 熔断只能防止后续重复扣费，无法撤销供应商对已经发出的第一次请求计费。Cloudflare 520 属于 API 源站异常，应先联系供应商处理。
 
 ## v0.11.40 独立 API 费用与超时保护
 

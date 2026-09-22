@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.11.42 HYBRID
+
+- 新增参考 Memory Palace 的直接 OpenAI 兼容 API 通道，绕开 Connection Manager 的请求转换。
+- 新增 `/models` 非总结验证门：验证前不允许发送 Chat Completion；改变地址或模型后须重新验证。
+- 直接请求保持最小请求体，仅发送一条 user message 与 model，不附加 Schema、response_format、预设或 instruct 元数据。
+- 延续输入长度保护、一键一付费批次、每批最多 6 条消息及失败熔断；520、非 JSON 与提交校验失败后不会自动重试。
+- 保留全部既有长期记忆、人物/NPC、关系、时间线、剧情起点与原聊天数据。
+
+## v0.11.41 HYBRID
+
+- 新增独立 Profile 持久费用熔断；任意请求、解析或提交失败后锁定，解除前所有总结点击均在本地阻止。
+- Cloudflare 识别从单一 524 扩展到 520–526，并递归读取 error/cause/response/body/data/status 等被包装字段。
+- 手动“总结新增”对独立 Profile 改为一键一调用：一次点击只处理一个批次，不再连续跑完全部积压消息。
+- 独立 Profile 每批最多 6 条消息，输入硬上限降为约 30,000 tokens / 120,000 bytes，输出硬上限降为 3,072 tokens。
+- 设置页新增锁定原因和“手动解除独立 API 费用锁定”；解除本身不发送请求。
+- 升级时已有独立 Profile 默认进入待确认锁定，保留 Profile、API 地址、密钥和全部长期记忆。
+
 ## v0.11.40 HYBRID
 
 - 用紧凑单行 JSON 输出骨架替代提示词中的完整 JSON Schema，避免结构说明把独立 API 请求异常放大。

@@ -1,4 +1,23 @@
-# v0.11.40 HYBRID Release Audit
+# v0.11.42 HYBRID Release Audit
+
+## v0.11.42 direct API audit
+
+- Direct transport mirrors Memory Palace's OpenAI-compatible `/chat/completions` approach and bypasses Connection Manager conversion.
+- `/models` verification sends no completion request and is invalidated whenever endpoint or model changes.
+- Completion body is restricted to `messages` plus `model`; one click can send at most one six-message paid batch.
+- Transport, gateway, parse and commit failures preserve the cursor and open the selected provider circuit breaker.
+- Existing memory schema, chat metadata and original JSONL are unchanged.
+
+- 事故依据：`api.astroflowing.com` 返回 Cloudflare 520，浏览器与 Cloudflare 正常、Host Error；请求无有效输出但供应商已计费。
+- 一键一调用：独立 Profile 的普通总结按钮即使由手动 force 路径触发，也会在第一个批次后退出；静态回归检查覆盖循环守卫。
+- 批次整形：独立 Profile 每批上限 6 条，输入 30,000 tokens / 120,000 bytes，输出 3,072 tokens。
+- 错误识别：递归提取嵌套错误对象，覆盖 Cloudflare 520–526 HTML、状态码和文案；Connection Manager 仅返回通用 `API request failed` 时仍执行通用熔断。
+- 持久熔断：400、520–526、超时、空响应、非 JSON、source/提交失败均锁定当前 Profile；锁定检查位于 `sendRequest` 之前。
+- 解锁边界：设置页手动解锁只修改本地设置，不发起 API；切换到不同 Profile 不继承另一个 Profile 的活动锁，但该 Profile 一旦失败会单独成为当前锁定目标。
+- 事务边界：失败不合并记忆、不推进游标、不隐藏楼层；原始聊天 JSONL 不读写。
+- 模拟验证：成功、发送前拦截、3,072 输出上限、400、嵌套 HTML 520、524、超时、非 JSON、锁定后二次点击零调用、手动解锁全部通过。
+
+## v0.11.40 历史审计
 
 - 根因修复：完整 JSON Schema 不再进入模型请求；改为按 required 字段生成紧凑单行 JSON 骨架。
 - 发送前保护：请求在本地按字符类型估算 token，并计算 UTF-8 bytes；超过 42,000 tokens 或 160,000 bytes 时在 `sendRequest` 前抛出专用错误，提示未调用 API、未扣费。

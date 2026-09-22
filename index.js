@@ -1,5 +1,5 @@
-// Story Memory Manager v0.11.40
-// compact JSON skeleton / preflight request guard / hard output cap / single-request failures
+// Story Memory Manager v0.11.42
+// Memory-Palace-style direct API transport / non-completion verification / paid-call guard
 // does not rewrite original chat JSONL
 
 const MODULE = 'story_memory_manager_v2';
@@ -30,11 +30,25 @@ const DEFAULTS = Object.freeze({
     summaryEngineV01136: 'quiet_current_single_request',
 
     // v0.9.3：总结模型通道
-    summaryProvider: 'current',      // current | profile
+    summaryProvider: 'current',      // current | profile | external
     summaryProfileId: '',
     summaryFallback: 'stop',         // retained for settings compatibility; v0.11.40 never auto-falls back
-    summaryMaxTokens: 4096,
+    summaryMaxTokens: 3072,
     summaryTransportPolicyV01140: 'compact_guarded_single_request',
+    summaryTransportPolicyV01141: 'profile_circuit_breaker_one_click_one_call',
+    summaryProfileCircuitOpen: false,
+    summaryProfileCircuitReason: '',
+    summaryProfileCircuitAt: '',
+    summaryProfileCircuitProfileId: '',
+    summaryTransportPolicyV01142: 'direct_external_api_verified_single_request',
+    summaryExternalApiUrl: '',
+    summaryExternalApiKey: '',
+    summaryExternalApiModel: '',
+    summaryExternalVerifiedFingerprint: '',
+    summaryExternalVerifiedAt: '',
+    summaryExternalCircuitOpen: false,
+    summaryExternalCircuitReason: '',
+    summaryExternalCircuitAt: '',
 
     // v0.10.0
     safeMemoryInject: false,
@@ -74,6 +88,8 @@ function S() {
         try { c.saveSettingsDebounced?.(); } catch (_) {}
     }
     const upgradingToV01140 = !Object.hasOwn(c.extensionSettings[MODULE], 'summaryTransportPolicyV01140');
+    const upgradingToV01141 = !Object.hasOwn(c.extensionSettings[MODULE], 'summaryTransportPolicyV01141');
+    const upgradingToV01142 = !Object.hasOwn(c.extensionSettings[MODULE], 'summaryTransportPolicyV01142');
     for (const [k,v] of Object.entries(DEFAULTS)) {
         if (!Object.hasOwn(c.extensionSettings[MODULE], k)) c.extensionSettings[MODULE][k] = v;
     }
@@ -87,6 +103,35 @@ function S() {
             512,
             Math.min(6144, Number(c.extensionSettings[MODULE].summaryMaxTokens) || 4096)
         );
+        try { c.saveSettingsDebounced?.(); } catch (_) {}
+    }
+    if (upgradingToV01141) {
+        c.extensionSettings[MODULE].summaryTransportPolicyV01141 = 'profile_circuit_breaker_one_click_one_call';
+        c.extensionSettings[MODULE].summaryFallback = 'stop';
+        c.extensionSettings[MODULE].summaryMaxTokens = Math.max(
+            512,
+            Math.min(3072, Number(c.extensionSettings[MODULE].summaryMaxTokens) || 3072)
+        );
+        // Existing independent profiles require one explicit local unlock after
+        // upgrading. This prevents an automatic/accidental paid request on load.
+        if (String(c.extensionSettings[MODULE].summaryProvider||'current') === 'profile') {
+            c.extensionSettings[MODULE].summaryProfileCircuitOpen = true;
+            c.extensionSettings[MODULE].summaryProfileCircuitReason = '升级到 v0.11.41 后等待手动确认';
+            c.extensionSettings[MODULE].summaryProfileCircuitAt = new Date().toISOString();
+            c.extensionSettings[MODULE].summaryProfileCircuitProfileId = String(c.extensionSettings[MODULE].summaryProfileId||'');
+        }
+        try { c.saveSettingsDebounced?.(); } catch (_) {}
+    }
+    if (upgradingToV01142) {
+        c.extensionSettings[MODULE].summaryTransportPolicyV01142 = 'direct_external_api_verified_single_request';
+        // Do not silently migrate or copy credentials from another extension.
+        // Direct API remains unavailable until the user explicitly configures it
+        // and passes the non-completion /models verification gate.
+        c.extensionSettings[MODULE].summaryExternalVerifiedFingerprint='';
+        c.extensionSettings[MODULE].summaryExternalVerifiedAt='';
+        c.extensionSettings[MODULE].summaryExternalCircuitOpen=false;
+        c.extensionSettings[MODULE].summaryExternalCircuitReason='';
+        c.extensionSettings[MODULE].summaryExternalCircuitAt='';
         try { c.saveSettingsDebounced?.(); } catch (_) {}
     }
     return c.extensionSettings[MODULE];
@@ -4792,26 +4837,335 @@ function isSmmTimeout(e) {
     return !!(e && (e.isStoryMemoryTimeout || e.name === 'StoryMemoryTimeoutError'));
 }
 
+function errorTextDeepV01141(value) {
+    const out=[];
+    const seen=new WeakSet();
+    const visit=(x,depth=0)=>{
+        if(x==null||depth>5||out.join('\n').length>48000) return;
+        if(typeof x==='string'||typeof x==='number'||typeof x==='boolean'){
+            out.push(String(x)); return;
+        }
+        if(typeof x!=='object') return;
+        if(seen.has(x)) return;
+        seen.add(x);
+        for(const key of ['name','message','stack','status','statusCode','code','body','data','response','cause','error','details']){
+            try{ if(Object.hasOwn(x,key)) visit(x[key],depth+1); }catch(_){}
+        }
+        try{
+            for(const key of Object.keys(x).slice(0,24)){
+                if(['name','message','stack','status','statusCode','code','body','data','response','cause','error','details'].includes(key)) continue;
+                visit(x[key],depth+1);
+            }
+        }catch(_){}
+    };
+    visit(value);
+    return out.join('\n').slice(0,48000);
+}
+
+function cloudflareCodeV01141(value) {
+    const text=errorTextDeepV01141(value);
+    const patterns=[
+        /error\s*code\s*(52[0-6])\b/i,
+        /errorcode[_\s-]*(52[0-6])\b/i,
+        /cloudflare[^\n]{0,300}\b(52[0-6])\b/i,
+        /\b(?:http(?:\s+status)?|status|error)\s*[:=_-]?\s*(52[0-6])\b/i,
+        /cloudflare-5xx-errors\/error-(52[0-6])\b/i
+    ];
+    for(const re of patterns){ const m=text.match(re); if(m) return Number(m[1]); }
+    return null;
+}
+
 function isUpstreamGatewayFailureV01129(value) {
     if(value?.isStoryMemoryGatewayFailure) return true;
-    const raw=value?.message ?? value ?? '';
-    let text='';
-    try{text=typeof raw==='string'?raw:JSON.stringify(raw);}catch(_){text=String(raw);}
-    text=String(text||'').slice(0,24000);
-    return /(?:errorcode[_\s-]*524|\b(?:http(?:\s+status)?|status|error)\s*[:=_-]?\s*524\b|cloudflare[^\n]{0,240}\b524\b|\b524\s+(?:a\s+)?timeout\b|cf-error-details|developers\.cloudflare\.com\/support\/troubleshooting\/http-status-codes\/cloudflare-5xx-errors\/error-524)/i.test(text);
+    return Number.isInteger(cloudflareCodeV01141(value));
 }
 
 function upstreamGatewayErrorV01129(value,label='总结接口') {
     if(value?.isStoryMemoryGatewayFailure) return value;
-    const e=new Error(`${label}返回 Cloudflare 524（上游超时）；本批未写入，也不会自动重复请求。`);
+    const code=cloudflareCodeV01141(value);
+    const e=new Error(`${label}返回 Cloudflare ${code||'5xx'}（上游服务异常）；本批未写入，也不会自动重复请求。`);
     e.name='StoryMemoryGatewayError';
     e.isStoryMemoryGatewayFailure=true;
+    e.smmGatewayCode=code;
     return e;
 }
 
 function rejectGatewayPayloadV01129(value,label='总结接口') {
     if(isUpstreamGatewayFailureV01129(value)) throw upstreamGatewayErrorV01129(value,label);
     return value;
+}
+
+function summaryProfileCircuitOpenV01141(s=S()) {
+    if(String(s.summaryProvider||'current')!=='profile') return false;
+    if(!s.summaryProfileCircuitOpen) return false;
+    const lockedProfile=String(s.summaryProfileCircuitProfileId||'');
+    const selected=String(s.summaryProfileId||'');
+    return !lockedProfile || !selected || lockedProfile===selected;
+}
+
+function lockSummaryProfileV01141(reason,value=null) {
+    const s=S();
+    if(String(s.summaryProvider||'current')!=='profile') return;
+    const code=cloudflareCodeV01141(value);
+    s.summaryProfileCircuitOpen=true;
+    s.summaryProfileCircuitReason=code ? `Cloudflare ${code}` : String(reason||'独立 API 请求失败').slice(0,180);
+    s.summaryProfileCircuitAt=new Date().toISOString();
+    s.summaryProfileCircuitProfileId=String(s.summaryProfileId||'');
+    try{ saveSettings(); }catch(_){}
+}
+
+function unlockSummaryProfileV01141() {
+    const s=S();
+    s.summaryProfileCircuitOpen=false;
+    s.summaryProfileCircuitReason='';
+    s.summaryProfileCircuitAt='';
+    s.summaryProfileCircuitProfileId='';
+    try{ saveSettings(); }catch(_){}
+}
+
+function assertSummaryProfileUnlockedV01141() {
+    const s=S();
+    if(!summaryProfileCircuitOpenV01141(s)) return;
+    const reason=String(s.summaryProfileCircuitReason||'上次独立 API 请求失败');
+    const e=new Error(`独立 API 已被费用保护锁定（${reason}）。本次未调用 API、未扣费。请在“总结模型”中手动解除锁定后再操作。`);
+    e.name='StoryMemoryProfileCircuitOpenError';
+    e.isStoryMemoryProfileCircuitOpen=true;
+    throw e;
+}
+
+// =========================================================
+// v0.11.42 direct external API transport
+// Mirrors Memory Palace's minimal OpenAI-compatible request shape instead of
+// routing the request through ConnectionManagerRequestService.
+// =========================================================
+function normalizeExternalApiBaseV01142(value='') {
+    return String(value||'').trim()
+        .replace(/\/+$/,'')
+        .replace(/\/chat\/completions$/i,'')
+        .replace(/\/completions$/i,'')
+        .replace(/\/models$/i,'');
+}
+
+function externalApiChatUrlV01142(value='') {
+    const base=normalizeExternalApiBaseV01142(value);
+    return base ? `${base}/chat/completions` : '';
+}
+
+function externalApiModelsUrlV01142(value='') {
+    const base=normalizeExternalApiBaseV01142(value);
+    return base ? `${base}/models` : '';
+}
+
+function externalApiFingerprintV01142(s=S()) {
+    return JSON.stringify([
+        normalizeExternalApiBaseV01142(s.summaryExternalApiUrl||''),
+        String(s.summaryExternalApiModel||'').trim()
+    ]);
+}
+
+function externalApiVerifiedV01142(s=S()) {
+    if(!normalizeExternalApiBaseV01142(s.summaryExternalApiUrl||'') || !String(s.summaryExternalApiModel||'').trim()) return false;
+    const fp=externalApiFingerprintV01142(s);
+    return fp===String(s.summaryExternalVerifiedFingerprint||'');
+}
+
+function externalApiCircuitOpenV01142(s=S()) {
+    return !!s.summaryExternalCircuitOpen;
+}
+
+function lockExternalApiV01142(reason,value=null) {
+    const s=S();
+    const code=cloudflareCodeV01141(value);
+    s.summaryExternalCircuitOpen=true;
+    s.summaryExternalCircuitReason=code?`Cloudflare ${code}`:String(reason||'直接外部 API 请求失败').slice(0,180);
+    s.summaryExternalCircuitAt=new Date().toISOString();
+    try{ saveSettings(); }catch(_){}
+}
+
+function unlockExternalApiV01142() {
+    const s=S();
+    s.summaryExternalCircuitOpen=false;
+    s.summaryExternalCircuitReason='';
+    s.summaryExternalCircuitAt='';
+    try{ saveSettings(); }catch(_){}
+}
+
+function invalidateExternalApiVerificationV01142({clearCircuit=true}={}) {
+    const s=S();
+    s.summaryExternalVerifiedFingerprint='';
+    s.summaryExternalVerifiedAt='';
+    if(clearCircuit){
+        s.summaryExternalCircuitOpen=false;
+        s.summaryExternalCircuitReason='';
+        s.summaryExternalCircuitAt='';
+    }
+    try{ saveSettings(); }catch(_){}
+}
+
+function assertExternalApiReadyV01142() {
+    const s=S();
+    if(externalApiCircuitOpenV01142(s)){
+        const e=new Error(`直接外部 API 已被费用保护锁定（${String(s.summaryExternalCircuitReason||'上次请求失败')}）。本次未调用 API、未扣费。请先重新执行“检查连接与模型”。`);
+        e.name='StoryMemoryExternalCircuitOpenError';
+        e.isStoryMemoryExternalCircuitOpen=true;
+        throw e;
+    }
+    if(!externalApiVerifiedV01142(s)){
+        const e=new Error('直接外部 API 尚未通过“检查连接与模型”。本次未调用 Chat Completion、未产生总结费用。');
+        e.name='StoryMemoryExternalNotVerifiedError';
+        e.isStoryMemoryExternalNotVerified=true;
+        throw e;
+    }
+}
+
+async function fetchWithTimeoutV01142(url,options={},timeoutMs=20000) {
+    const controller=typeof AbortController==='function'?new AbortController():null;
+    const timer=setTimeout(()=>controller?.abort(),timeoutMs);
+    try{
+        return await fetch(url,{...options,...(controller?{signal:controller.signal}:{})});
+    }catch(e){
+        if(e?.name==='AbortError') throw new Error(timeoutMs<=20000?'连接检查超过20秒':'请求超时');
+        throw e;
+    }finally{
+        clearTimeout(timer);
+    }
+}
+
+async function verifyExternalApiV01142() {
+    const s=S();
+    const url=externalApiModelsUrlV01142(s.summaryExternalApiUrl||'');
+    const model=String(s.summaryExternalApiModel||'').trim();
+    if(!url) throw new Error('请先填写直接 API 地址，例如 https://api.example.com/v1');
+    if(!model) throw new Error('请先填写模型名称；连接检查不会自动猜测付费模型。');
+    // Every manual check starts from an unverified state. A failed re-check
+    // must never leave a stale fingerprint usable for a paid completion.
+    invalidateExternalApiVerificationV01142({clearCircuit:false});
+    const headers={};
+    const key=String(s.summaryExternalApiKey||'').trim();
+    if(key) headers.Authorization=`Bearer ${key}`;
+    let response;
+    try{
+        response=await fetchWithTimeoutV01142(url,{method:'GET',headers},20000);
+    }catch(e){
+        invalidateExternalApiVerificationV01142({clearCircuit:false});
+        throw new Error(`无法连接 /models：${e?.message||e}`);
+    }
+    const raw=await response.text();
+    if(!response.ok){
+        const err=new Error(`连接检查失败：HTTP ${response.status}`);
+        err.status=response.status;
+        err.body=raw;
+        invalidateExternalApiVerificationV01142({clearCircuit:false});
+        if(isUpstreamGatewayFailureV01129(err)) throw upstreamGatewayErrorV01129(err,'直接 API /models');
+        throw err;
+    }
+    let data;
+    try{ data=JSON.parse(raw); }catch(_){ throw new Error('/models 返回的不是 JSON；未发送 Chat Completion。'); }
+    const models=(Array.isArray(data?.data)?data.data:[])
+        .map(x=>String(x?.id||x?.name||'').trim()).filter(Boolean);
+    if(!models.length){
+        throw new Error('/models 未返回可验证的模型列表；未发送 Chat Completion。');
+    }
+    if(!models.includes(model)){
+        invalidateExternalApiVerificationV01142({clearCircuit:false});
+        throw new Error(`模型“${model}”不在 /models 返回列表中。可用示例：${models.slice(0,8).join('、')}`);
+    }
+    s.summaryExternalVerifiedFingerprint=externalApiFingerprintV01142(s);
+    s.summaryExternalVerifiedAt=new Date().toISOString();
+    s.summaryExternalCircuitOpen=false;
+    s.summaryExternalCircuitReason='';
+    s.summaryExternalCircuitAt='';
+    try{ saveSettings(); }catch(_){}
+    return {models,model,url};
+}
+
+function externalResponseTextV01142(data) {
+    if(typeof data==='string') return data;
+    const content=data?.choices?.[0]?.message?.content;
+    if(typeof content==='string') return content;
+    if(Array.isArray(content)){
+        const text=content.map(x=>typeof x==='string'?x:String(x?.text||'')).filter(Boolean).join('\n');
+        if(text) return text;
+    }
+    if(Array.isArray(data?.content)){
+        const text=data.content.map(x=>typeof x==='string'?x:String(x?.text||'')).filter(Boolean).join('\n');
+        if(text) return text;
+    }
+    if(typeof data?.content==='string') return data.content;
+    if(typeof data?.output_text==='string') return data.output_text;
+    return '';
+}
+
+async function generateViaExternalApiV01142({prompt='',systemPrompt='',jsonSchema=null}={}) {
+    const s=S();
+    assertExternalApiReadyV01142();
+    const url=externalApiChatUrlV01142(s.summaryExternalApiUrl||'');
+    const key=String(s.summaryExternalApiKey||'').trim();
+    const model=String(s.summaryExternalApiModel||'').trim();
+    const requestPrompt=promptWithCompactJsonSkeletonV01140(prompt,jsonSchema);
+    const merged=[String(systemPrompt||'').trim(),String(systemPrompt||'').trim()?'---':'',requestPrompt]
+        .filter(Boolean).join('\n\n');
+    const messages=[{role:'user',content:merged}];
+    assertRequestSizeV01140(messages,'直接外部 API 请求');
+    const headers={'Content-Type':'application/json'};
+    if(key) headers.Authorization=`Bearer ${key}`;
+    // Memory Palace compatibility: minimal body only. Do not attach schema,
+    // presets, instruct metadata or provider-specific response_format fields.
+    const body={messages};
+    if(model) body.model=model;
+    let response;
+    try{
+        response=await fetchWithTimeoutV01142(url,{method:'POST',headers,body:JSON.stringify(body)},SMM_GENERATE_TIMEOUT_MS);
+        const raw=await response.text();
+        if(!response.ok){
+            const err=new Error(`直接外部 API 请求失败：HTTP ${response.status}`);
+            err.status=response.status;
+            err.body=raw;
+            throw err;
+        }
+        let data;
+        try{ data=JSON.parse(raw); }catch(_){
+            const err=new Error('直接外部 API 返回的不是 JSON');
+            err.body=raw;
+            throw err;
+        }
+        const text=externalResponseTextV01142(data);
+        if(!String(text).trim()) throw new Error('直接外部 API 返回正文为空');
+        rejectGatewayPayloadV01129(text,'直接外部 API');
+        return String(text);
+    }catch(e){
+        if(e?.isStoryMemoryRequestTooLarge||e?.isStoryMemoryExternalNotVerified||e?.isStoryMemoryExternalCircuitOpen) throw e;
+        lockExternalApiV01142('直接外部 API 请求失败',e);
+        if(isUpstreamGatewayFailureV01129(e)) throw upstreamGatewayErrorV01129(e,'直接外部 API');
+        throw new Error(`直接外部 API 请求失败，费用保护已锁定；未自动重试：${e?.message||e}`);
+    }
+}
+
+function usingPaidProviderV01142(s=S()) {
+    return String(s.summaryMode||'ai')==='ai' && ['profile','external'].includes(String(s.summaryProvider||'current'));
+}
+
+function selectedPaidProviderLockedV01142(s=S()) {
+    const provider=String(s.summaryProvider||'current');
+    if(provider==='external') return externalApiCircuitOpenV01142(s)||!externalApiVerifiedV01142(s);
+    if(provider==='profile') return summaryProfileCircuitOpenV01141(s);
+    return false;
+}
+
+function selectedPaidProviderReasonV01142(s=S()) {
+    const provider=String(s.summaryProvider||'current');
+    if(provider==='external'){
+        if(externalApiCircuitOpenV01142(s)) return String(s.summaryExternalCircuitReason||'上次直接 API 请求失败');
+        if(!externalApiVerifiedV01142(s)) return '尚未通过“检查连接与模型”';
+    }
+    if(provider==='profile'&&summaryProfileCircuitOpenV01141(s)) return String(s.summaryProfileCircuitReason||'上次 Profile 请求失败');
+    return '';
+}
+
+function lockSelectedPaidProviderV01142(reason,value=null) {
+    const provider=String(S().summaryProvider||'current');
+    if(provider==='external') lockExternalApiV01142(reason,value);
+    else if(provider==='profile') lockSummaryProfileV01141(reason,value);
 }
 
 // =========================================================
@@ -4866,9 +5220,9 @@ function generationTextV01136(value) {
 // dialect. Never attach a provider-specific response schema and never paste the
 // full descriptive JSON Schema into the prompt. A compact example skeleton is
 // enough to communicate the required shape; SMM still validates locally.
-const SMM_INPUT_TOKEN_LIMIT_V01140 = 42000;
-const SMM_INPUT_BYTE_LIMIT_V01140 = 160000;
-const SMM_PROFILE_OUTPUT_TOKEN_LIMIT_V01140 = 6144;
+const SMM_INPUT_TOKEN_LIMIT_V01140 = 30000;
+const SMM_INPUT_BYTE_LIMIT_V01140 = 120000;
+const SMM_PROFILE_OUTPUT_TOKEN_LIMIT_V01140 = 3072;
 
 function compactSchemaExampleV01140(node, depth=0) {
     if (!node || typeof node !== 'object' || depth > 8) return null;
@@ -4954,6 +5308,10 @@ async function smmGenerateV093({
     const s = S();
     const provider = String(s.summaryProvider || 'current');
 
+    if(provider==='external'){
+        return await generateViaExternalApiV01142({prompt,systemPrompt,jsonSchema});
+    }
+
     // Default: reuse the already configured chat model.  This is a quiet
     // background generation, not a separate API/Profile.
     if (provider !== 'profile') {
@@ -4966,6 +5324,9 @@ async function smmGenerateV093({
         throw new Error('已选择独立总结 Profile，但尚未设置 summaryProfileId');
     }
 
+    assertSummaryProfileUnlockedV01141();
+
+    let requestStarted=false;
     try {
         const Service = await getSmmConnectionServiceV093();
 
@@ -4979,7 +5340,7 @@ async function smmGenerateV093({
 
         const maxTokens = Math.max(512,Math.min(
             SMM_PROFILE_OUTPUT_TOKEN_LIMIT_V01140,
-            Number(responseLength || s.summaryMaxTokens || 4096)
+            Number(responseLength || s.summaryMaxTokens || 3072)
         ));
 
         // This check runs before Service.sendRequest. A rejected oversized batch
@@ -4995,7 +5356,7 @@ async function smmGenerateV093({
         try { selectedApiMap = typeof Service.validateProfile === 'function' ? Service.validateProfile(profile) : null; } catch (_) {}
         const overridePayload = {};
         if (jsonSchema) {
-            console.debug('[StoryMemory] v0.11.40 summary transport', {
+            console.debug('[StoryMemory] v0.11.41 summary transport', {
                 profileId,
                 profileMode: profile?.mode || null,
                 selected: selectedApiMap?.selected || null,
@@ -5007,6 +5368,7 @@ async function smmGenerateV093({
             });
         }
 
+        requestStarted=true;
         const response = await Service.sendRequest(
             profileId,
             messages,
@@ -5103,9 +5465,11 @@ async function smmGenerateV093({
         // empty/non-JSON responses and local preflight rejection must never turn
         // into an automatic second paid generation through another connection.
         if(e?.isStoryMemoryRequestTooLarge) throw e;
+        if(e?.isStoryMemoryProfileCircuitOpen) throw e;
+        if(requestStarted) lockSummaryProfileV01141('独立 API 请求失败',e);
         if(isUpstreamGatewayFailureV01129(e)) throw upstreamGatewayErrorV01129(e,'独立总结 Profile');
         throw new Error(
-            '独立总结 Profile 请求失败；未自动重试或回退：' + (e?.message || e)
+            '独立总结 Profile 请求失败，费用保护已锁定；未自动重试或回退：' + (e?.message || e)
         );
     }
 }
@@ -5661,10 +6025,10 @@ async function summarizeRange(start, end, options={}) {
     const c = C();
     const mem = M();
     const prompt = `【已有可靠记忆】
-${JSON.stringify(compact(mem), null, 2)}
+${JSON.stringify(compact(mem))}
 
 【本聊天人物 / NPC 分类参考】
-${JSON.stringify(npcClassificationContextV01137(mem), null, 2)}
+${JSON.stringify(npcClassificationContextV01137(mem))}
 
 分类参考只用于区分主要角色与次要 NPC，不能当作剧情事实。候选名仍必须在“新增原始聊天”中实际出现，才能写入本批结果。
 
@@ -5751,6 +6115,9 @@ ${messagesText(start, end)}
         );
         rejectGatewayPayloadV01129(raw,'静默总结');
     } catch (e) {
+        if(usingPaidProviderV01142(S()) && !e?.isStoryMemoryRequestTooLarge && !e?.isStoryMemoryProfileCircuitOpen && !e?.isStoryMemoryExternalCircuitOpen && !e?.isStoryMemoryExternalNotVerified){
+            lockSelectedPaidProviderV01142(isSmmTimeout(e)?'独立 API 请求超时':'独立 API 请求失败',e);
+        }
         if (isUpstreamGatewayFailureV01129(e)) throw upstreamGatewayErrorV01129(e,'静默总结');
         throw e;
     }
@@ -5759,6 +6126,7 @@ ${messagesText(start, end)}
     try {
         parsed = sanitizeSummaryObjectV01118(filterMetaSignals(parseJSON(raw)));
     } catch (e) {
+        if(usingPaidProviderV01142(S())) lockSelectedPaidProviderV01142('独立 API 返回非 JSON',e);
         const err = new Error(`当前模型本批输出不是可用 JSON；未写入记忆，待总结楼层仍保留。本批只调用了 1 次：${e?.message||e}`);
         err.smmSingleRequestInvalidJsonV01136 = true;
         throw err;
@@ -5773,6 +6141,7 @@ ${messagesText(start, end)}
         validation = validateBatchCommitV0112(parsed, start, end);
     } catch (e) {
         if (e?.smmBatchCommitFailure) {
+            if(usingPaidProviderV01142(S())) lockSelectedPaidProviderV01142('独立 API 输出未通过 source/提交校验',e);
             mem.audit = Array.isArray(mem.audit) ? mem.audit : [];
             mem.audit.push({
                 at:new Date().toISOString(),
@@ -5800,7 +6169,8 @@ ${messagesText(start, end)}
     }
 
     if (options?.save !== false) await saveMeta();
-    return {...validation,mode:'ai',api_calls:1,transport:String(S().summaryProvider||'current')==='profile'?'profile':'current_quiet'};
+    const provider=String(S().summaryProvider||'current');
+    return {...validation,mode:'ai',api_calls:1,transport:provider==='external'?'external_direct':(provider==='profile'?'profile':'current_quiet')};
 }
 
 let BUSY = false;
@@ -9690,6 +10060,10 @@ async function runRequeueIncorrectLocalMemoryV01136() {
 async function summarizeNew(force=false) {
     if (BUSY) return;
     const c = C(), s = S(), mem = M(), chat = c.chat || [];
+    const usingPaidProvider=String(s.summaryMode||'ai')==='ai' && usingPaidProviderV01142(s);
+    if(usingPaidProvider && selectedPaidProviderLockedV01142(s)){
+        return toast(`独立 API 尚不可用（${selectedPaidProviderReasonV01142(s)}）。本次未调用总结 API、未产生总结请求费用。`,'warning');
+    }
     const start = Math.max(0, Number(mem.last_processed_index ?? -1) + 1);
     const pending = chat.length - start;
     const deferredBefore=localSummaryModeV01129()?localDeferredCountV01133(mem):0;
@@ -9715,13 +10089,16 @@ async function summarizeNew(force=false) {
         }
 
         let pos = start;
-        const batch = Math.max(4, Number(s.batchMessages)||30);
+        // Independent profiles are paid and may sit behind fragile gateways.
+        // Cap them to six messages and process exactly one paid batch per click.
+        const configuredBatch=Math.max(4,Number(s.batchMessages)||30);
+        const batch=usingPaidProvider?Math.min(6,configuredBatch):configuredBatch;
         while (pos < chat.length) {
             const end = Math.min(chat.length, pos + batch);
             await summarizeRangeConfiguredV01129(pos, end);
             pos = end;
             refresh();
-            if (!force) break;
+            if (!force || usingPaidProvider) break;
         }
         try {
             await autoHideSummarizedV0101();
@@ -9740,6 +10117,7 @@ async function summarizeNew(force=false) {
         toast(`总结失败：${e.message || e}`,'error');
     } finally {
         BUSY = false;
+        refreshNative();
     }
 }
 
@@ -9851,7 +10229,7 @@ function stat() {
 function panelHTML() {
     return `<div id="${PANEL_ID}" class="smm2-hidden">
       <div class="smm2-card">
-        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.40</span></div><button id="smm2_close">×</button></div>
+        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.42</span></div><button id="smm2_close">×</button></div>
         <div id="smm2_stats" class="smm2-stats"></div>
         <div class="smm2-grid">
           <button id="smm2_new">总结新增</button>
@@ -12012,6 +12390,7 @@ function nativeManagerHTML() {
               <select id="smm93_summary_provider">
                 <option value="current">复用当前聊天模型（静默）</option>
                 <option value="profile">独立 Connection Profile</option>
+                <option value="external">直接外部 API（记忆宫殿兼容）</option>
               </select>
             </label>
 
@@ -12032,12 +12411,36 @@ function nativeManagerHTML() {
               独立 Profile 任意失败时立即停止；不会自动重试或回退到其他模型，也不会推进游标。
             </div>
 
-            <label>
+            <label id="smm93_tokens_row">
               独立 Profile 最大输出 Token
-              <input id="smm93_summary_tokens" type="number" min="512" max="6144" step="256">
+              <input id="smm93_summary_tokens" type="number" min="512" max="3072" step="256">
             </label>
 
+            <div id="smm142_external_rows" style="display:none">
+              <label>
+                直接 API 地址
+                <input id="smm142_external_url" type="text" placeholder="https://api.astroflowing.com/v1">
+              </label>
+              <label>
+                API Key
+                <input id="smm142_external_key" type="password" autocomplete="off" placeholder="sk-...">
+              </label>
+              <label>
+                模型名称
+                <input id="smm142_external_model" type="text" placeholder="填写 /models 返回的模型 ID">
+              </label>
+              <button id="smm142_test_external" class="menu_button">检查连接与模型（不发送总结）</button>
+              <div id="smm142_external_status" class="smm2-note"></div>
+              <div class="smm2-note">连接检查只读取 <code>/models</code>，不调用 Chat Completion。API Key 保存在当前 SillyTavern 浏览器设置中。</div>
+            </div>
+
             <div id="smm93_summary_status" class="smm2-note"></div>
+            <button id="smm141_unlock_profile" class="menu_button" style="display:none">
+              手动解除独立 API 费用锁定
+            </button>
+            <div class="smm2-note">
+              独立 API 每次点击最多发送 1 个付费批次，且每批最多 6 条消息。发生任何请求、解析或校验失败后会立即锁定；直接 API 需重新通过连接检查。
+            </div>
           </div>
         </details>
 
@@ -12104,6 +12507,13 @@ function bindNativeManager() {
     const fallbackEl=q('smm93_summary_fallback');
     const tokensEl=q('smm93_summary_tokens');
     const createProfileEl=q('smm96_create_profile');
+    const unlockProfileEl=q('smm141_unlock_profile');
+    const externalRows=q('smm142_external_rows');
+    const externalUrlEl=q('smm142_external_url');
+    const externalKeyEl=q('smm142_external_key');
+    const externalModelEl=q('smm142_external_model');
+    const testExternalEl=q('smm142_test_external');
+    const externalStatusEl=q('smm142_external_status');
     const modeEl=q('smm129_summary_mode');
 
     const refreshSummaryProfileUIV094=()=>{
@@ -12136,10 +12546,11 @@ function bindNativeManager() {
         }
 
         if(tokensEl){
-            tokensEl.value=Math.max(512,Math.min(SMM_PROFILE_OUTPUT_TOKEN_LIMIT_V01140,Number(settings.summaryMaxTokens||4096)));
+            tokensEl.value=Math.max(512,Math.min(SMM_PROFILE_OUTPUT_TOKEN_LIMIT_V01140,Number(settings.summaryMaxTokens||3072)));
         }
 
         const usingProfile=String(settings.summaryProvider||'current')==='profile';
+        const usingExternal=String(settings.summaryProvider||'current')==='external';
         const usingLocal=String(settings.summaryMode||'ai')!=='ai';
         if(modeEl) modeEl.value=usingLocal?'local':'ai';
         for(const el of [providerEl,profileEl,fallbackEl,tokensEl,createProfileEl]){
@@ -12148,23 +12559,53 @@ function bindNativeManager() {
 
         const profileRow=q('smm93_profile_row');
         const fallbackRow=q('smm93_fallback_row');
+        const tokensRow=q('smm93_tokens_row');
 
         if(profileRow) profileRow.style.display=usingProfile ? '' : 'none';
         if(fallbackRow) fallbackRow.style.display=usingProfile ? '' : 'none';
+        if(tokensRow) tokensRow.style.display=usingProfile ? '' : 'none';
+        if(createProfileEl) createProfileEl.style.display=usingProfile ? '' : 'none';
+        const createProfileNote=q('smm96_create_profile_note');
+        if(createProfileNote) createProfileNote.style.display=usingProfile ? '' : 'none';
+        if(externalRows) externalRows.style.display=usingExternal ? '' : 'none';
+        if(externalUrlEl) externalUrlEl.value=String(settings.summaryExternalApiUrl||'');
+        if(externalKeyEl) externalKeyEl.value=String(settings.summaryExternalApiKey||'');
+        if(externalModelEl) externalModelEl.value=String(settings.summaryExternalApiModel||'');
+        for(const el of [externalUrlEl,externalKeyEl,externalModelEl,testExternalEl]) if(el) el.disabled=usingLocal;
+        if(externalStatusEl){
+            externalStatusEl.textContent=!usingExternal?'':externalApiCircuitOpenV01142(settings)
+                ? `费用保护已锁定：${String(settings.summaryExternalCircuitReason||'上次请求失败')}。重新检查连接前不会发送总结。`
+                : externalApiVerifiedV01142(settings)
+                    ? `已验证：${normalizeExternalApiBaseV01142(settings.summaryExternalApiUrl)} · ${String(settings.summaryExternalApiModel||'')}。检查过程未发送总结。`
+                    : '尚未验证。请先检查连接与模型；验证前不会发送总结。';
+        }
 
         const status=q('smm93_summary_status');
 
         if(status){
             if(usingLocal){
                 status.textContent='当前：实验性 0 API 规则抽取；不能替代模型语义总结。';
+            }else if(usingExternal){
+                status.textContent=externalApiCircuitOpenV01142(settings)
+                    ? `直接 API 已锁定：${String(settings.summaryExternalCircuitReason||'上次请求失败')}。`
+                    : externalApiVerifiedV01142(settings)
+                        ? '当前：直接外部 API（最小请求体）；每次点击最多 1 个付费批次。'
+                        : '当前：直接外部 API 尚未验证；不会发送总结。';
             }else if(!usingProfile){
                 status.textContent='当前：复用主聊天已连接的模型静默总结；不需要第二个 API/Profile。每批仅生成 1 次。';
             }else{
                 const p=profiles.find(x=>x.id===settings.summaryProfileId);
-                status.textContent=p
-                    ? '当前：'+(p.name||'未命名 Profile')+(p.model?' · '+p.model:'')
+                const locked=summaryProfileCircuitOpenV01141(settings);
+                status.textContent=locked
+                    ? `费用保护已锁定：${String(settings.summaryProfileCircuitReason||'上次请求失败')}。解除前不会调用 API。`
+                    : p
+                    ? '当前：'+(p.name||'未命名 Profile')+(p.model?' · '+p.model:'')+'；每次点击最多 1 个付费批次。'
                     : '当前：尚未选择有效的总结 Profile。';
             }
+        }
+        if(unlockProfileEl){
+            unlockProfileEl.style.display=usingProfile&&summaryProfileCircuitOpenV01141(settings)?'':'none';
+            unlockProfileEl.disabled=usingLocal;
         }
     };
 
@@ -12180,7 +12621,7 @@ function bindNativeManager() {
     if(providerEl){
         providerEl.onchange=e=>{
             const settings=S();
-            settings.summaryProvider=e.target.value==='profile' ? 'profile' : 'current';
+            settings.summaryProvider=['profile','external'].includes(e.target.value) ? e.target.value : 'current';
             saveSettings();
             refreshSummaryProfileUIV094();
             refreshNative();
@@ -12207,10 +12648,54 @@ function bindNativeManager() {
         tokensEl.onchange=e=>{
             S().summaryMaxTokens=Math.max(
                 512,
-                Math.min(SMM_PROFILE_OUTPUT_TOKEN_LIMIT_V01140,Number(e.target.value)||4096)
+                Math.min(SMM_PROFILE_OUTPUT_TOKEN_LIMIT_V01140,Number(e.target.value)||3072)
             );
             saveSettings();
             tokensEl.value=S().summaryMaxTokens;
+        };
+    }
+
+    if(unlockProfileEl){
+        unlockProfileEl.onclick=()=>{
+            const reason=String(S().summaryProfileCircuitReason||'上次请求失败');
+            if(!confirm(`当前锁定原因：${reason}\n\n解除锁定本身不会调用 API、不会扣费。解除后，只有你再次点击“总结新增（独立 API）”才会发送 1 个付费批次。确定解除吗？`)) return;
+            unlockSummaryProfileV01141();
+            refreshSummaryProfileUIV094();
+            refreshNative();
+            toast('独立 API 锁定已解除；尚未调用 API，也未扣费。','success');
+        };
+    }
+
+    const saveExternalSetting=()=>{
+        const settings=S();
+        const nextUrl=String(externalUrlEl?.value||'').trim();
+        const nextKey=String(externalKeyEl?.value||'').trim();
+        const nextModel=String(externalModelEl?.value||'').trim();
+        const changed=nextUrl!==String(settings.summaryExternalApiUrl||'') || nextKey!==String(settings.summaryExternalApiKey||'') || nextModel!==String(settings.summaryExternalApiModel||'');
+        settings.summaryExternalApiUrl=nextUrl;
+        settings.summaryExternalApiKey=nextKey;
+        settings.summaryExternalApiModel=nextModel;
+        if(changed) invalidateExternalApiVerificationV01142();
+        saveSettings();
+        refreshSummaryProfileUIV094();
+        refreshNative();
+    };
+    for(const el of [externalUrlEl,externalKeyEl,externalModelEl]) if(el) el.onchange=saveExternalSetting;
+    if(testExternalEl){
+        testExternalEl.onclick=async()=>{
+            saveExternalSetting();
+            testExternalEl.disabled=true;
+            if(externalStatusEl) externalStatusEl.textContent='正在读取 /models；不会发送总结。';
+            try{
+                const result=await verifyExternalApiV01142();
+                toast(`连接与模型验证通过（发现 ${result.models.length} 个模型）；未发送总结。`,'success');
+            }catch(e){
+                toast(`连接检查失败：${e?.message||e}。未发送总结。`,'error');
+            }finally{
+                testExternalEl.disabled=false;
+                refreshSummaryProfileUIV094();
+                refreshNative();
+            }
         };
     }
 
@@ -12607,24 +13092,34 @@ function refreshNative() {
 
     const localMode=String(s.summaryMode||'ai')!=='ai';
     const usingSummaryProfile=String(s.summaryProvider||'current')==='profile';
+    const usingExternalSummary=String(s.summaryProvider||'current')==='external';
+    const usingPaidSummary=usingSummaryProfile||usingExternalSummary;
+    const summaryProfileLocked=usingSummaryProfile&&summaryProfileCircuitOpenV01141(s);
+    const externalSummaryLocked=usingExternalSummary&&selectedPaidProviderLockedV01142(s);
     const summaryProfiles=Array.isArray(C().extensionSettings?.connectionManager?.profiles)
         ? C().extensionSettings.connectionManager.profiles : [];
     const selectedSummaryProfile=summaryProfiles.find(p=>String(p?.id||'')===String(s.summaryProfileId||''));
     const modeStatus=document.getElementById('smm129_mode_status');
     if(modeStatus) modeStatus.textContent=localMode
         ? '仅做规则抽取，不具备完整语义理解；不建议用于日常长期记忆。'
+        : externalSummaryLocked
+            ? `直接 API 尚不可用：${selectedPaidProviderReasonV01142(s)}；当前不会发送总结。`
+        : summaryProfileLocked
+            ? `独立 API 已锁定：${String(s.summaryProfileCircuitReason||'上次请求失败')}；解除前不会调用 API。`
+        : usingExternalSummary
+            ? `直接外部 API · ${String(s.summaryExternalApiModel||'未填写模型')}；最小请求体，每批只生成 1 次，失败不写入。`
         : usingSummaryProfile
             ? `独立 API${selectedSummaryProfile?.name?` · ${selectedSummaryProfile.name}`:''}；兼容模式，每批只生成 1 次，失败不写入。`
             : '当前聊天模型静默生成；每批只生成 1 次，失败不写入。';
     const modeBadge=document.getElementById('smm138_mode_badge');
     if(modeBadge){
-        modeBadge.textContent=localMode?'实验模式':(usingSummaryProfile?'独立 API':'AI 语义');
-        modeBadge.dataset.mode=localMode?'local':(usingSummaryProfile?'profile':'ai');
+        modeBadge.textContent=localMode?'实验模式':(usingPaidSummary?'独立 API':'AI 语义');
+        modeBadge.dataset.mode=localMode?'local':(usingPaidSummary?'profile':'ai');
     }
     const newBtn=document.getElementById('smm2_native_new');
     if(newBtn) newBtn.textContent=localMode
         ? '总结新增（实验性 0 API）'
-        : (usingSummaryProfile?'总结新增（独立 API）':'总结新增（当前模型）');
+        : ((summaryProfileLocked||externalSummaryLocked)?'独立 API 未就绪（未调用）':(usingExternalSummary?'总结新增（直接 API · 单批）':(usingSummaryProfile?'总结新增（独立 API · 单批）':'总结新增（当前模型）')));
     const requeueBtn=document.getElementById('smm136_native_requeue');
     if(requeueBtn) requeueBtn.style.display=hasIncorrectLocalMemoryV01136(M())?'':'none';
     const deferredCount=localDeferredCountV01133(M());
@@ -12633,7 +13128,7 @@ function refreshNative() {
         deferredBtn.textContent=deferredCount?`补录已跳过 ${deferredCount} 楼（0 API）`:'没有待补录楼层';
         deferredBtn.disabled=!deferredCount;
     }
-    for(const id of ['smm93_summary_provider','smm93_summary_profile','smm93_summary_fallback','smm93_summary_tokens','smm96_create_profile']){
+    for(const id of ['smm93_summary_provider','smm93_summary_profile','smm93_summary_fallback','smm93_summary_tokens','smm96_create_profile','smm141_unlock_profile','smm142_external_url','smm142_external_key','smm142_external_model','smm142_test_external']){
         const el=document.getElementById(id);
         if(el) el.disabled=localMode;
     }
@@ -12700,7 +13195,7 @@ function installNativeExtensionEntry() {
 
         wrap.innerHTML = `
           <div class="inline-drawer-toggle inline-drawer-header">
-            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.40</span></div>
+            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.42</span></div>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
           </div>
           <div class="inline-drawer-content">
@@ -12856,7 +13351,7 @@ function statsHTMLV0105() {
 
     return [
         `<div class="smm105-stat-line"><b>剧情：</b>${esc(date)}　${esc(st.time)}</div>`,
-        `<div class="smm105-stat-line"><b>总结方式：</b>${localSummaryModeV01129()?'实验性 0 API 规则抽取':(String(S().summaryProvider||'current')==='profile'?'独立总结 API · 单次':'当前聊天模型 · 静默单次')}</div>`,
+        `<div class="smm105-stat-line"><b>总结方式：</b>${localSummaryModeV01129()?'实验性 0 API 规则抽取':(String(S().summaryProvider||'current')==='external'?'直接外部 API · 单次':(String(S().summaryProvider||'current')==='profile'?'独立总结 Profile · 单次':'当前聊天模型 · 静默单次'))}</div>`,
         `<div class="smm105-stat-line"><b>扫描：</b>${st.done}/${st.total}　待扫描 ${st.pending}　待补录 ${st.deferred}　已隐藏 ${hidden.count}</div>`,
         `<div class="smm105-stat-line"><b>记忆：</b>时间线 ${st.timeline}　人物 ${people}　NPC ${npcs}　关系 ${relations}　锚点 ${anchors}　阶段 ${(mem.stage_summaries||[]).length}</div>`,
         `<div class="smm105-stat-line"><b>连续性：</b>${st.deferred ? `⚠ ${st.deferred} 楼已扫描但尚未形成记忆` : (coverageGapsV0112.length ? `⚠ 时间线断档 #${coverageGapsV0112[0].start}-#${coverageGapsV0112[0].end}` : (continuityNeedsReview ? '后台有待核查项' : '正常'))}</div>`,
@@ -12885,7 +13380,7 @@ function refresh() {
     document.getElementById('smm2_start').value=M().story_start||'';
     document.getElementById('smm2_new').textContent=localSummaryModeV01129()
         ? '总结新增（实验性 0 API）'
-        : (String(s.summaryProvider||'current')==='profile'?'总结新增（独立 API）':'总结新增（当前模型）');
+        : (String(s.summaryProvider||'current')==='external'?'总结新增（直接 API）':(String(s.summaryProvider||'current')==='profile'?'总结新增（独立 API）':'总结新增（当前模型）'));
     const requeueBtn=document.getElementById('smm136_requeue');
     if(requeueBtn) requeueBtn.style.display=hasIncorrectLocalMemoryV01136(M())?'':'none';
     const deferredCount=localDeferredCountV01133(M());
@@ -12948,7 +13443,7 @@ function initializeExtension() {
     try {
         installUI();
         refresh();
-        console.log('[StoryMemory] v0.11.40 loaded successfully');
+        console.log('[StoryMemory] v0.11.42 loaded successfully');
     } catch (e) {
         console.error('[StoryMemory] UI initialization failed', e);
     }
