@@ -1,4 +1,12 @@
-# v0.11.46 HYBRID Release Audit
+# v0.11.47 HYBRID Release Audit
+
+## v0.11.47 disabled cost-protection audit
+
+- Request-size statistics remain visible, but no token or byte threshold blocks transmission.
+- Profile and direct-API circuit-open checks always remain false under the explicit disabled policy.
+- All previous circuit state is cleared on migration; configuration verification remains required.
+- Transport, JSON and commit failures do not lock the provider and do not trigger an automatic retry.
+- Cursor, memory and historical catch-up checkpoints still advance only after a valid transactional commit.
 
 ## v0.11.46 historical catch-up audit
 

@@ -1,5 +1,5 @@
-// Story Memory Manager v0.11.46
-// Repeated 50-message historical catch-up / 10-message automatic batches
+// Story Memory Manager v0.11.47
+// User-requested no cost lock / no input-size blocking
 // does not rewrite original chat JSONL
 
 const MODULE = 'story_memory_manager_v2';
@@ -47,6 +47,7 @@ const DEFAULTS = Object.freeze({
     oneTimeManualBatch50V01145: true,
     autoBatchMessagesV01145: 10,
     summaryBatchPolicyV01146: 'manual_history_50_until_snapshot_then_auto_10',
+    costProtectionPolicyV01147: 'disabled_user_requested',
     summaryExternalApiUrl: '',
     summaryExternalApiKey: '',
     summaryExternalApiModel: '',
@@ -103,6 +104,7 @@ function S() {
     const upgradingToV01144 = !Object.hasOwn(c.extensionSettings[MODULE], 'recapClockPolicyV01144');
     const upgradingToV01145 = !Object.hasOwn(c.extensionSettings[MODULE], 'summaryBatchPolicyV01145');
     const upgradingToV01146 = !Object.hasOwn(c.extensionSettings[MODULE], 'summaryBatchPolicyV01146');
+    const upgradingToV01147 = !Object.hasOwn(c.extensionSettings[MODULE], 'costProtectionPolicyV01147');
     for (const [k,v] of Object.entries(DEFAULTS)) {
         if (!Object.hasOwn(c.extensionSettings[MODULE], k)) c.extensionSettings[MODULE][k] = v;
     }
@@ -167,6 +169,17 @@ function S() {
         c.extensionSettings[MODULE].summaryBatchPolicyV01146='manual_history_50_until_snapshot_then_auto_10';
         c.extensionSettings[MODULE].autoBatchMessagesV01145=10;
         c.extensionSettings[MODULE].triggerMessages=10;
+        try { c.saveSettingsDebounced?.(); } catch (_) {}
+    }
+    if (upgradingToV01147) {
+        c.extensionSettings[MODULE].costProtectionPolicyV01147='disabled_user_requested';
+        c.extensionSettings[MODULE].summaryProfileCircuitOpen=false;
+        c.extensionSettings[MODULE].summaryProfileCircuitReason='';
+        c.extensionSettings[MODULE].summaryProfileCircuitAt='';
+        c.extensionSettings[MODULE].summaryProfileCircuitProfileId='';
+        c.extensionSettings[MODULE].summaryExternalCircuitOpen=false;
+        c.extensionSettings[MODULE].summaryExternalCircuitReason='';
+        c.extensionSettings[MODULE].summaryExternalCircuitAt='';
         try { c.saveSettingsDebounced?.(); } catch (_) {}
     }
     if (upgradingToV01144) {
@@ -4967,7 +4980,12 @@ function rejectGatewayPayloadV01129(value,label='总结接口') {
     return value;
 }
 
+function costProtectionDisabledV01147(s=S()) {
+    return String(s?.costProtectionPolicyV01147||'')==='disabled_user_requested';
+}
+
 function summaryProfileCircuitOpenV01141(s=S()) {
+    if(costProtectionDisabledV01147(s)) return false;
     if(String(s.summaryProvider||'current')!=='profile') return false;
     if(!s.summaryProfileCircuitOpen) return false;
     const lockedProfile=String(s.summaryProfileCircuitProfileId||'');
@@ -4978,6 +4996,14 @@ function summaryProfileCircuitOpenV01141(s=S()) {
 function lockSummaryProfileV01141(reason,value=null) {
     const s=S();
     if(String(s.summaryProvider||'current')!=='profile') return;
+    if(costProtectionDisabledV01147(s)){
+        s.summaryProfileCircuitOpen=false;
+        s.summaryProfileCircuitReason='';
+        s.summaryProfileCircuitAt='';
+        s.summaryProfileCircuitProfileId='';
+        try{ saveSettings(); }catch(_){}
+        return;
+    }
     const code=cloudflareCodeV01141(value);
     s.summaryProfileCircuitOpen=true;
     s.summaryProfileCircuitReason=code ? `Cloudflare ${code}` : String(reason||'独立 API 请求失败').slice(0,180);
@@ -5042,11 +5068,19 @@ function externalApiVerifiedV01142(s=S()) {
 }
 
 function externalApiCircuitOpenV01142(s=S()) {
+    if(costProtectionDisabledV01147(s)) return false;
     return !!s.summaryExternalCircuitOpen;
 }
 
 function lockExternalApiV01142(reason,value=null) {
     const s=S();
+    if(costProtectionDisabledV01147(s)){
+        s.summaryExternalCircuitOpen=false;
+        s.summaryExternalCircuitReason='';
+        s.summaryExternalCircuitAt='';
+        try{ saveSettings(); }catch(_){}
+        return;
+    }
     const code=cloudflareCodeV01141(value);
     s.summaryExternalCircuitOpen=true;
     s.summaryExternalCircuitReason=code?`Cloudflare ${code}`:String(reason||'直接外部 API 请求失败').slice(0,180);
@@ -5243,7 +5277,7 @@ async function generateViaExternalApiV01142({prompt='',systemPrompt='',jsonSchem
         if(e?.isStoryMemoryRequestTooLarge||e?.isStoryMemoryRequestCancelled||e?.isStoryMemoryExternalNotVerified||e?.isStoryMemoryExternalCircuitOpen) throw e;
         lockExternalApiV01142('直接外部 API 请求失败',e);
         if(isUpstreamGatewayFailureV01129(e)) throw upstreamGatewayErrorV01129(e,'直接外部 API');
-        throw new Error(`直接外部 API 请求失败，费用保护已锁定；未自动重试：${e?.message||e}`);
+        throw new Error(`直接外部 API 请求失败；费用保护已关闭，本次未自动重试、未写入记忆、未推进游标：${e?.message||e}`);
     }
 }
 
@@ -5378,10 +5412,11 @@ function requestSizeStatsV01140(messages=[]) {
 
 function assertRequestSizeV01140(messages,label='总结请求') {
     const stats=requestSizeStatsV01140(messages);
+    const protectionDisabled=costProtectionDisabledV01147();
     const large50=!!SMM_ACTIVE_HISTORY_BATCH_V01146?.history50;
     const tokenLimit=large50?SMM_HISTORY_50_TOKEN_LIMIT_V01146:SMM_INPUT_TOKEN_LIMIT_V01140;
     const byteLimit=large50?SMM_HISTORY_50_BYTE_LIMIT_V01146:SMM_INPUT_BYTE_LIMIT_V01140;
-    if (stats.estimatedTokens>tokenLimit || stats.bytes>byteLimit) {
+    if (!protectionDisabled&&(stats.estimatedTokens>tokenLimit || stats.bytes>byteLimit)) {
         const e=new Error(
             `${label}在发送前已被本地阻止：预计输入约 ${stats.estimatedTokens.toLocaleString()} tokens、${stats.bytes.toLocaleString()} bytes，超过安全上限。`+
             '本次未调用 API、未扣费；未写入记忆、未推进游标，原楼层仍保留。请缩小每批楼层数后重试。'
@@ -5397,7 +5432,7 @@ function assertRequestSizeV01140(messages,label='总结请求') {
             `准备发送历史补总结（本批实际 ${ctx.count} 条，#${ctx.start}-#${ctx.end-1}）。\n\n`+
             `预计输入：${stats.estimatedTokens.toLocaleString()} tokens / ${stats.bytes.toLocaleString()} bytes。\n\n`+
             `历史范围还剩 ${ctx.remainingBefore} 条（本批后预计剩 ${Math.max(0,ctx.remainingBefore-ctx.count)} 条）。\n\n`+
-            '该请求可高于普通 30,000 token 安全线。接口可能在已经计费后返回 520/524；插件不会自动重试，失败也不会写入记忆或推进游标。\n\n确定发送这一次付费请求吗？'
+            '费用保护已全部关闭：本次没有输入长度上限，失败后也不会锁定接口。请求可能在已经计费后返回 520/524；插件不会自动重试，失败也不会写入记忆或推进游标。\n\n确定发送这一次付费请求吗？'
         );
         if(!accepted){
             const e=new Error('你已取消本次历史补总结。本次未调用 API、未扣费，游标未推进。');
@@ -5599,7 +5634,7 @@ async function smmGenerateV093({
         if(requestStarted) lockSummaryProfileV01141('独立 API 请求失败',e);
         if(isUpstreamGatewayFailureV01129(e)) throw upstreamGatewayErrorV01129(e,'独立总结 Profile');
         throw new Error(
-            '独立总结 Profile 请求失败，费用保护已锁定；未自动重试或回退：' + (e?.message || e)
+            '独立总结 Profile 请求失败；费用保护已关闭，本次未自动重试或回退：' + (e?.message || e)
         );
     }
 }
@@ -10476,7 +10511,7 @@ function stat() {
 function panelHTML() {
     return `<div id="${PANEL_ID}" class="smm2-hidden">
       <div class="smm2-card">
-        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.46</span></div><button id="smm2_close">×</button></div>
+        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.47</span></div><button id="smm2_close">×</button></div>
         <div id="smm2_stats" class="smm2-stats"></div>
         <div class="smm2-grid">
           <button id="smm2_new">总结新增</button>
@@ -12690,6 +12725,9 @@ function nativeManagerHTML() {
             <div class="smm2-note">
               第一次手动总结会锁定安装时尚未处理的历史范围；以后每次手动点击最多处理 50 条，直到该范围全部完成。历史完成后，新增剧情固定每 10 条自动总结一次。每批发送前均显示准确估算并确认；任何失败都不会自动重试或推进游标。
             </div>
+            <div class="smm2-note">
+              费用保护已按用户要求全部关闭：不限制输入长度，失败后不锁定接口。初次使用仍须拉取并选择模型；一次点击仍只请求一次。
+            </div>
           </div>
         </details>
 
@@ -13477,7 +13515,7 @@ function installNativeExtensionEntry() {
 
         wrap.innerHTML = `
           <div class="inline-drawer-toggle inline-drawer-header">
-            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.46</span></div>
+            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.47</span></div>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
           </div>
           <div class="inline-drawer-content">
@@ -13736,7 +13774,7 @@ function initializeExtension() {
     try {
         installUI();
         refresh();
-        console.log('[StoryMemory] v0.11.46 loaded successfully');
+        console.log('[StoryMemory] v0.11.47 loaded successfully');
     } catch (e) {
         console.error('[StoryMemory] UI initialization failed', e);
     }
