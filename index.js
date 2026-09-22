@@ -1,5 +1,5 @@
-// Story Memory Manager v0.11.49
-// token-adaptive historical catch-up / 10-message automatic ceiling
+// Story Memory Manager v0.11.50
+// Memory Palace-compatible direct API transport and compact incremental prompts
 // does not rewrite original chat JSONL
 
 const MODULE = 'story_memory_manager_v2';
@@ -53,6 +53,10 @@ const DEFAULTS = Object.freeze({
     summaryBatchPolicyV01149: 'adaptive_token_target_28000_max_history_30_auto_10',
     adaptiveInputTokensV01149: 28000,
     adaptiveInputBytesV01149: 112000,
+    summaryTransportPolicyV01150: 'memory_palace_minimal_body_no_120s_abort',
+    historyBatchMessagesV01150: 15,
+    adaptiveInputTokensV01150: 36000,
+    adaptiveInputBytesV01150: 144000,
     summaryExternalApiUrl: '',
     summaryExternalApiKey: '',
     summaryExternalApiModel: '',
@@ -112,6 +116,7 @@ function S() {
     const upgradingToV01147 = !Object.hasOwn(c.extensionSettings[MODULE], 'costProtectionPolicyV01147');
     const upgradingToV01148 = !Object.hasOwn(c.extensionSettings[MODULE], 'summaryBatchPolicyV01148');
     const upgradingToV01149 = !Object.hasOwn(c.extensionSettings[MODULE], 'summaryBatchPolicyV01149');
+    const upgradingToV01150 = !Object.hasOwn(c.extensionSettings[MODULE], 'summaryTransportPolicyV01150');
     for (const [k,v] of Object.entries(DEFAULTS)) {
         if (!Object.hasOwn(c.extensionSettings[MODULE], k)) c.extensionSettings[MODULE][k] = v;
     }
@@ -199,6 +204,13 @@ function S() {
         c.extensionSettings[MODULE].summaryBatchPolicyV01149='adaptive_token_target_28000_max_history_30_auto_10';
         c.extensionSettings[MODULE].adaptiveInputTokensV01149=28000;
         c.extensionSettings[MODULE].adaptiveInputBytesV01149=112000;
+        try { c.saveSettingsDebounced?.(); } catch (_) {}
+    }
+    if (upgradingToV01150) {
+        c.extensionSettings[MODULE].summaryTransportPolicyV01150='memory_palace_minimal_body_no_120s_abort';
+        c.extensionSettings[MODULE].historyBatchMessagesV01150=15;
+        c.extensionSettings[MODULE].adaptiveInputTokensV01150=36000;
+        c.extensionSettings[MODULE].adaptiveInputBytesV01150=144000;
         try { c.saveSettingsDebounced?.(); } catch (_) {}
     }
     if (upgradingToV01144) {
@@ -5255,6 +5267,8 @@ function externalResponseTextV01142(data) {
     return '';
 }
 
+let SMM_LAST_DIRECT_DIAGNOSTIC_V01150=null;
+
 async function generateViaExternalApiV01142({prompt='',systemPrompt='',jsonSchema=null}={}) {
     const s=S();
     assertExternalApiReadyV01142();
@@ -5265,24 +5279,33 @@ async function generateViaExternalApiV01142({prompt='',systemPrompt='',jsonSchem
     const merged=[String(systemPrompt||'').trim(),String(systemPrompt||'').trim()?'---':'',requestPrompt]
         .filter(Boolean).join('\n\n');
     const messages=[{role:'user',content:merged}];
-    assertRequestSizeV01140(messages,'直接外部 API 请求');
+    const requestStats=assertRequestSizeV01140(messages,'直接外部 API 请求');
     const headers={'Content-Type':'application/json'};
     if(key) headers.Authorization=`Bearer ${key}`;
-    // Memory Palace compatibility: keep an OpenAI-compatible minimal body and
-    // never attach schema/presets/response_format. max_tokens is the only
-    // standard generation control retained, preventing runaway paid output.
-    const body={
-        messages,
-        max_tokens:Math.max(512,Math.min(
-            SMM_PROFILE_OUTPUT_TOKEN_LIMIT_V01140,
-            Number(s.summaryMaxTokens)||3072
-        ))
-    };
+    // Match Memory Palace's working direct-API request exactly: only messages
+    // and the optional model. Do not attach schema, presets, response_format,
+    // max_tokens or provider-specific fields to a merely OpenAI-compatible API.
+    const body={messages};
     if(model) body.model=model;
+    const requestId=`SMM-${Date.now().toString(36).toUpperCase()}`;
+    const startedAt=Date.now();
+    SMM_LAST_DIRECT_DIAGNOSTIC_V01150={requestId,status:'requesting',startedAt,requestStats,httpStatus:null,elapsedMs:0,error:''};
+    console.info('[StoryMemory] direct API request started',{
+        requestId,model:model||null,requestStats,timeout:'none',autoRetry:false,
+        bodyFields:Object.keys(body)
+    });
     let response;
     try{
-        response=await fetchWithTimeoutV01142(url,{method:'POST',headers,body:JSON.stringify(body)},SMM_GENERATE_TIMEOUT_MS);
+        // Memory Palace uses plain fetch here. Do not discard an already-paid
+        // completion at 120 seconds; the request stays pending until the API,
+        // browser/network, or user navigation ends it.
+        response=await fetch(url,{method:'POST',headers,body:JSON.stringify(body)});
         const raw=await response.text();
+        SMM_LAST_DIRECT_DIAGNOSTIC_V01150={
+            ...SMM_LAST_DIRECT_DIAGNOSTIC_V01150,status:response.ok?'received':'http_error',
+            httpStatus:response.status,elapsedMs:Date.now()-startedAt,responseCharacters:raw.length
+        };
+        console.info('[StoryMemory] direct API response received',SMM_LAST_DIRECT_DIAGNOSTIC_V01150);
         if(!response.ok){
             const err=new Error(`直接外部 API 请求失败：HTTP ${response.status}`);
             err.status=response.status;
@@ -5298,12 +5321,20 @@ async function generateViaExternalApiV01142({prompt='',systemPrompt='',jsonSchem
         const text=externalResponseTextV01142(data);
         if(!String(text).trim()) throw new Error('直接外部 API 返回正文为空');
         rejectGatewayPayloadV01129(text,'直接外部 API');
+        SMM_LAST_DIRECT_DIAGNOSTIC_V01150={...SMM_LAST_DIRECT_DIAGNOSTIC_V01150,status:'usable'};
         return String(text);
     }catch(e){
+        const elapsedMs=Date.now()-startedAt;
+        SMM_LAST_DIRECT_DIAGNOSTIC_V01150={
+            ...SMM_LAST_DIRECT_DIAGNOSTIC_V01150,status:'failed',elapsedMs,
+            httpStatus:Number(e?.status||SMM_LAST_DIRECT_DIAGNOSTIC_V01150?.httpStatus)||null,
+            error:String(e?.message||e)
+        };
+        console.error('[StoryMemory] direct API request failed',SMM_LAST_DIRECT_DIAGNOSTIC_V01150);
         if(e?.isStoryMemoryRequestTooLarge||e?.isStoryMemoryRequestCancelled||e?.isStoryMemoryExternalNotVerified||e?.isStoryMemoryExternalCircuitOpen) throw e;
         lockExternalApiV01142('直接外部 API 请求失败',e);
         if(isUpstreamGatewayFailureV01129(e)) throw upstreamGatewayErrorV01129(e,'直接外部 API');
-        throw new Error(`直接外部 API 请求失败；费用保护已关闭，本次未自动重试、未写入记忆、未推进游标：${e?.message||e}`);
+        throw new Error(`直接外部 API 请求失败（${requestId}，等待 ${(elapsedMs/1000).toFixed(1)} 秒）；本次未自动重试、未写入记忆、未推进游标：${e?.message||e}`);
     }
 }
 
@@ -5390,7 +5421,7 @@ const SMM_INPUT_TOKEN_LIMIT_V01140 = 30000;
 const SMM_INPUT_BYTE_LIMIT_V01140 = 120000;
 const SMM_PROFILE_OUTPUT_TOKEN_LIMIT_V01140 = 3072;
 // Legacy numeric limits are retained for compatibility, but v0.11.47 disabled
-// size blocking. v0.11.49 uses this context only to show per-batch confirmation.
+// size blocking. v0.11.50 uses this context only to show per-batch confirmation.
 const SMM_HISTORY_BATCH_TOKEN_LIMIT_V01148 = 120000;
 const SMM_HISTORY_BATCH_BYTE_LIMIT_V01148 = 480000;
 let SMM_ACTIVE_HISTORY_BATCH_V01146 = null;
@@ -6300,12 +6331,44 @@ ${messagesText(start, end)}
 特别检查日期连续性：没有新增原始聊天中的明确跨月证据，就必须继承已有可靠月份；禁止仅凭 AI <date> 或自行推算跨月。`;
 }
 
+const SYSTEM_PROMPT_COMPACT_V01150 = `你是剧情长期记忆的增量抽取器。只记录本批 user 与 assistant 正文中已经发生的事实；禁止创作、猜测或把计划当成已发生事实。严格输出一个 JSON 对象，不要 Markdown 或解释。所有 source 必须引用本批真实 #楼层。没有新增内容的数组输出 []，没有变化的对象输出 {}。`;
+
+function buildCompactDirectPromptV01150(start,end,mem=M()) {
+    return `【已有压缩记忆（只用于连续性，不是本批新事实）】
+${JSON.stringify(compact(mem))}
+
+【本批原始聊天】
+${messagesText(start,end)}
+
+【硬规则】
+1. 同时读取 user 与 assistant 的真实正文，只总结本批已经发生的内容；忽略 thinking、分析、传闻栏和普通状态碎片。
+2. 角色回复中明确标注的剧情摘要及其剧情日期/时间可作为同楼证据；SillyTavern 消息时间、手机时间和现实日期绝不是剧情时间。
+3. 时间优先级：角色卡明确剧情时间 > 正文明确时间或“第二天/跨午夜” > 未知。没有证据就用 null 或“具体时刻未明确”，绝不编日期。
+4. timeline 每项必须含 date、time、event、source；source 只能引用 #${start} 到 #${Math.max(start,end-1)} 的真实编号。同一事件跨多楼时合并。
+5. 主要人物写入 characters；次要人物写入 npcs 极简档案。同时提取明确的关系变化、关键事实、事件、地点、物品、未完成约定和重要语义锚点。
+6. story_start 保持已有值。只返回增量；本批未变化的分类用空数组或空对象，禁止复述整份旧记忆。
+7. 输出尽量简洁，目标不超过约1800 tokens。只输出符合上方 JSON 骨架的对象。`;
+}
+
+function summaryPromptForTransportV01150(start,end,mem=M()) {
+    return String(S().summaryProvider||'current')==='external'
+        ? buildCompactDirectPromptV01150(start,end,mem)
+        : buildSummaryPromptV01149(start,end,mem);
+}
+
+function summarySystemForTransportV01150() {
+    return String(S().summaryProvider||'current')==='external'
+        ? SYSTEM_PROMPT_COMPACT_V01150
+        : SYSTEM_PROMPT;
+}
+
 function summaryRequestStatsForRangeV01149(start,end,mem=M()) {
-    const prompt=buildSummaryPromptV01149(start,end,mem);
+    const prompt=summaryPromptForTransportV01150(start,end,mem);
+    const systemPrompt=summarySystemForTransportV01150();
     const requestPrompt=promptWithCompactJsonSkeletonV01140(prompt,schema());
     const merged=[
-        String(SYSTEM_PROMPT||'').trim(),
-        String(SYSTEM_PROMPT||'').trim()?'---':'',
+        String(systemPrompt||'').trim(),
+        String(systemPrompt||'').trim()?'---':'',
         requestPrompt
     ].filter(Boolean).join('\n\n');
     return requestSizeStatsV01140([{role:'user',content:merged}]);
@@ -6341,8 +6404,9 @@ function chooseAdaptiveEndV01149(start,maxEnd,measure,targetTokens=28000,targetB
 
 function planAdaptiveBatchV01149(start,maxEnd,mem=M()) {
     const s=S();
-    const targetTokens=Math.max(4000,Number(s.adaptiveInputTokensV01149)||28000);
-    const targetBytes=Math.max(16000,Number(s.adaptiveInputBytesV01149)||112000);
+    const directExternal=String(s.summaryProvider||'current')==='external';
+    const targetTokens=Math.max(4000,Number(directExternal?s.adaptiveInputTokensV01150:s.adaptiveInputTokensV01149)||(directExternal?36000:28000));
+    const targetBytes=Math.max(16000,Number(directExternal?s.adaptiveInputBytesV01150:s.adaptiveInputBytesV01149)||(directExternal?144000:112000));
     return chooseAdaptiveEndV01149(
         start,
         maxEnd,
@@ -6355,17 +6419,17 @@ function planAdaptiveBatchV01149(start,maxEnd,mem=M()) {
 async function summarizeRange(start, end, options={}) {
     const c = C();
     const mem = M();
-    const prompt = buildSummaryPromptV01149(start,end,mem);
+    const prompt = summaryPromptForTransportV01150(start,end,mem);
+    const systemPrompt = summarySystemForTransportV01150();
     // v0.11.36: one batch means exactly one model generation.  Local JSON
     // cleanup still handles fences/trailing commas, but invalid output is not
     // sent back to the model for a second or third paid attempt.
     let raw;
     try {
-        raw = await withSmmTimeout(
-            smmGenerateV093({ systemPrompt:SYSTEM_PROMPT, prompt, jsonSchema:schema() }),
-            SMM_GENERATE_TIMEOUT_MS,
-            `静默总结 #${start+1}-#${end}`
-        );
+        const generation=smmGenerateV093({systemPrompt,prompt,jsonSchema:schema()});
+        raw = String(S().summaryProvider||'current')==='external'
+            ? await generation
+            : await withSmmTimeout(generation,SMM_GENERATE_TIMEOUT_MS,`静默总结 #${start+1}-#${end}`);
         rejectGatewayPayloadV01129(raw,'静默总结');
     } catch (e) {
         if(usingPaidProviderV01142(S()) && !e?.isStoryMemoryRequestTooLarge && !e?.isStoryMemoryRequestCancelled && !e?.isStoryMemoryProfileCircuitOpen && !e?.isStoryMemoryExternalCircuitOpen && !e?.isStoryMemoryExternalNotVerified){
@@ -10392,7 +10456,7 @@ async function summarizeNew(force=false) {
     if (!force && pending < Math.max(1, Number(s.triggerMessages)||8) && deferredBefore<=0) return;
     if (pending <= 0 && deferredBefore<=0) return toast('当前没有新的消息，也没有待补录楼层。');
     if(usingPaidProvider&&!force&&activeHistoryCatchupV01146(mem)){
-        return toast('历史补总结尚未完成。请手动点击按钮继续；插件会按输入长度自动决定本批条数（最多30条）。历史完成后才恢复新增消息自动总结。','warning');
+        return toast('历史补总结尚未完成。请手动点击按钮继续；短提示词每批最多15条，遇到特别长的楼层才自动缩小。历史完成后恢复新增消息自动总结。','warning');
     }
 
     BUSY = true;
@@ -10432,7 +10496,7 @@ async function summarizeNew(force=false) {
         // during catch-up are excluded and enter the later 10-message routine.
         const configuredBatch=Math.max(4,Number(s.batchMessages)||30);
         const historyCatchup=usingPaidProvider&&force&&!!historyState&&historyState.status==='active'&&pos<=Number(historyState.target_index);
-        const historyBatchSize=Math.max(1,Number(s.historyBatchMessagesV01148)||30);
+        const historyBatchSize=Math.max(1,Math.min(15,Number(s.historyBatchMessagesV01150)||15));
         const paidRoutineBatch=Math.max(1,Number(s.autoBatchMessagesV01145)||10);
         const batch=historyCatchup?historyBatchSize:(usingPaidProvider?paidRoutineBatch:configuredBatch);
         let historyRemainingAfter=null;
@@ -10460,7 +10524,7 @@ async function summarizeNew(force=false) {
             if(usingPaidProvider){
                 const tokenText=adaptivePlan.stats?.estimatedTokens?.toLocaleString?.()||'未知';
                 toast(
-                    `已接收点击：正在总结 #${pos}-#${end-1}，实际 ${end-pos} 条，预计约 ${tokenText} tokens。请勿重复点击。`,
+                    `已接收点击：正在总结 #${pos}-#${end-1}，实际 ${end-pos} 条，预计约 ${tokenText} tokens。直接 API 不再于120秒中断，请勿重复点击或刷新。`,
                     adaptivePlan.overTarget?'warning':'info'
                 );
             }
@@ -10618,7 +10682,7 @@ function stat() {
 function panelHTML() {
     return `<div id="${PANEL_ID}" class="smm2-hidden">
       <div class="smm2-card">
-        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.49</span></div><button id="smm2_close">×</button></div>
+        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.50</span></div><button id="smm2_close">×</button></div>
         <div id="smm2_stats" class="smm2-stats"></div>
         <div class="smm2-grid">
           <button id="smm2_new">总结新增</button>
@@ -13549,7 +13613,7 @@ function refreshNative() {
                 : ((summaryProfileLocked||externalSummaryLocked)
                     ? '独立 API 未就绪（未调用）'
                     : ((catchupState||catchupEligible)
-                        ? '继续历史补总结（自适应，最多30条）'
+                        ? '继续历史补总结（短请求，最多15条）'
                         : (usingExternalSummary?'总结新增（直接 API · 自适应≤10条）':(usingSummaryProfile?'总结新增（独立 API · 自适应≤10条）':'总结新增（当前模型）')))));
     }
     const requeueBtn=document.getElementById('smm136_native_requeue');
@@ -13627,7 +13691,7 @@ function installNativeExtensionEntry() {
 
         wrap.innerHTML = `
           <div class="inline-drawer-toggle inline-drawer-header">
-            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.49</span></div>
+            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.50</span></div>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
           </div>
           <div class="inline-drawer-content">
@@ -13786,8 +13850,9 @@ function statsHTMLV0105() {
         `<div class="smm105-stat-line"><b>剧情：</b>${esc(date)}　${esc(st.time)}</div>`,
         `<div class="smm105-stat-line"><b>总结方式：</b>${localSummaryModeV01129()?'实验性 0 API 规则抽取':(String(S().summaryProvider||'current')==='external'?'直接外部 API · 单次':(String(S().summaryProvider||'current')==='profile'?'独立总结 Profile · 单次':'当前聊天模型 · 静默单次'))}</div>`,
         `<div class="smm105-stat-line"><b>扫描：</b>${st.done}/${st.total}　待扫描 ${st.pending}　待补录 ${st.deferred}　已隐藏 ${hidden.count}</div>`,
-        catchup ? `<div class="smm105-stat-line"><b>历史补总结：</b>进行中　剩余 ${Math.max(0,Number(catchup.target_index)-Number(mem.last_processed_index??-1))} 条　按输入长度自适应（最多30条）</div>` : '',
+        catchup ? `<div class="smm105-stat-line"><b>历史补总结：</b>进行中　剩余 ${Math.max(0,Number(catchup.target_index)-Number(mem.last_processed_index??-1))} 条　短提示词自适应（最多15条）</div>` : '',
         SMM_ACTIVE_PROGRESS_V01149 ? `<div class="smm105-stat-line"><b>当前请求：</b>${SMM_ACTIVE_PROGRESS_V01149.phase==='preparing'?'正在计算安全批次…':`#${SMM_ACTIVE_PROGRESS_V01149.start}-#${SMM_ACTIVE_PROGRESS_V01149.end-1}　${SMM_ACTIVE_PROGRESS_V01149.count} 条　预计 ${Number(SMM_ACTIVE_PROGRESS_V01149.stats?.estimatedTokens||0).toLocaleString()} tokens`}　请勿重复点击</div>` : '',
+        SMM_LAST_DIRECT_DIAGNOSTIC_V01150 ? `<div class="smm105-stat-line"><b>最近直连：</b>${esc(SMM_LAST_DIRECT_DIAGNOSTIC_V01150.requestId||'')}　${esc(SMM_LAST_DIRECT_DIAGNOSTIC_V01150.status||'')}　${(Number(SMM_LAST_DIRECT_DIAGNOSTIC_V01150.elapsedMs||0)/1000).toFixed(1)}秒${SMM_LAST_DIRECT_DIAGNOSTIC_V01150.httpStatus?`　HTTP ${SMM_LAST_DIRECT_DIAGNOSTIC_V01150.httpStatus}`:''}</div>` : '',
         `<div class="smm105-stat-line"><b>记忆：</b>时间线 ${st.timeline}　人物 ${people}　NPC ${npcs}　关系 ${relations}　锚点 ${anchors}　阶段 ${(mem.stage_summaries||[]).length}</div>`,
         `<div class="smm105-stat-line"><b>连续性：</b>${st.deferred ? `⚠ ${st.deferred} 楼已扫描但尚未形成记忆` : (coverageGapsV0112.length ? `⚠ 时间线断档 #${coverageGapsV0112[0].start}-#${coverageGapsV0112[0].end}` : (continuityNeedsReview ? '后台有待核查项' : '正常'))}</div>`,
         `<div class="smm105-stat-line"><b>历史重建：</b>${esc(rebuildStatusLabelV0105(mem))}</div>`,
@@ -13823,7 +13888,7 @@ function refresh() {
         : (localSummaryModeV01129()
             ? '总结新增（实验性 0 API）'
             : ((catchupLegacy||catchupEligibleLegacy)
-                ? '继续历史补总结（自适应，最多30条）'
+                ? '继续历史补总结（短请求，最多15条）'
                 : (String(s.summaryProvider||'current')==='external'?'总结新增（直接 API · 自适应≤10条）':(String(s.summaryProvider||'current')==='profile'?'总结新增（独立 API · 自适应≤10条）':'总结新增（当前模型）'))));
     const requeueBtn=document.getElementById('smm136_requeue');
     if(requeueBtn) requeueBtn.style.display=hasIncorrectLocalMemoryV01136(M())?'':'none';
@@ -13891,7 +13956,7 @@ function initializeExtension() {
     try {
         installUI();
         refresh();
-        console.log('[StoryMemory] v0.11.49 loaded successfully');
+        console.log('[StoryMemory] v0.11.50 loaded successfully');
     } catch (e) {
         console.error('[StoryMemory] UI initialization failed', e);
     }

@@ -1,4 +1,13 @@
-# v0.11.49 HYBRID Release Audit
+# v0.11.50 HYBRID Release Audit
+
+## v0.11.50 strict direct-API audit
+
+- Reference reviewed: Memory Palace commit `9d291e9be16d114f1a5a2ff27a1d19a9da4b983c`; its external summary path uses plain fetch, a merged user message, optional model, and no plugin timeout.
+- SMM direct body now has only `messages` plus optional `model`; credentials remain headers only and are never logged.
+- SMM no longer applies the 120-second outer Promise timeout or AbortController timeout to direct external summaries.
+- Direct prompt is an incremental delta prompt. Historical ceiling is 15 messages with a 36,000-token / 144,000-byte target; routine ceiling remains ten.
+- Exactly one request per accepted click. HTTP errors, gateway HTML, non-JSON, invalid summary JSON, and validation failures do not merge memory or advance the cursor.
+- Cloudflare 520/524 remains an upstream host failure and cannot be repaired client-side.
 
 ## v0.11.49 adaptive request audit
 

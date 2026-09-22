@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.11.50 HYBRID
+
+- Matched Memory Palace's direct external API transport: minimal body (`messages`, optional `model`) and plain fetch without SMM's 120-second abort.
+- Added a compact incremental direct-API prompt while retaining the existing long-term memory merge/validation architecture.
+- Historical batches now use a 15-message ceiling and 36k estimated-input target; routine automatic batches remain capped at ten.
+- Added per-request diagnostics (anonymous request id, elapsed time, HTTP status, input estimate) without logging credentials or chat text.
+- Preserved one request per click, no automatic retry/fallback, no write on failure, and cursor preservation.
+
 ## v0.11.49 HYBRID
 
 - Replaced fixed 30-message historical requests with local token/byte-adaptive planning (28k token target, 30-message ceiling).
