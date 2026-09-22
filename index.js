@@ -1,5 +1,5 @@
-// Story Memory Manager v0.11.37
-// current-model quiet summarization / dedicated NPC memory / failure-safe cursor
+// Story Memory Manager v0.11.38
+// compact mobile summary controls / dedicated NPC memory / failure-safe cursor
 // does not rewrite original chat JSONL
 
 const MODULE = 'story_memory_manager_v2';
@@ -9819,7 +9819,7 @@ function stat() {
 function panelHTML() {
     return `<div id="${PANEL_ID}" class="smm2-hidden">
       <div class="smm2-card">
-        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.37</span></div><button id="smm2_close">×</button></div>
+        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.38</span></div><button id="smm2_close">×</button></div>
         <div id="smm2_stats" class="smm2-stats"></div>
         <div class="smm2-grid">
           <button id="smm2_new">总结新增</button>
@@ -9837,8 +9837,8 @@ function panelHTML() {
         <label><input id="smm2_auto" type="checkbox"> 自动增量总结</label>
         <label>总结方式
           <select id="smm2_mode">
-            <option value="ai">当前聊天模型（推荐，无需独立 API）</option>
-            <option value="local">0 API 规则抽取（实验性，非完整总结）</option>
+            <option value="ai">AI 语义总结（推荐）</option>
+            <option value="local">0 API 规则抽取（实验）</option>
           </select>
         </label>
         <label>每 <input id="smm2_trigger" type="number" min="1" max="50"> 条新消息总结一次</label>
@@ -11922,14 +11922,17 @@ function nativeManagerHTML() {
             <span><b>自动增量总结</b><small>达到阈值后自动处理新增剧情</small></span>
           </label>
 
-          <div class="smm107-inline-setting smm129-mode-row">
-            <label for="smm129_summary_mode">总结方式</label>
+          <div class="smm138-mode-card">
+            <div class="smm138-mode-head">
+              <label class="smm138-mode-label" for="smm129_summary_mode">总结方式</label>
+              <span id="smm138_mode_badge" class="smm138-mode-badge">AI 语义</span>
+            </div>
             <select id="smm129_summary_mode">
-              <option value="ai">当前聊天模型（推荐，无需独立 API）</option>
-              <option value="local">0 API 规则抽取（实验性，非完整总结）</option>
+              <option value="ai">AI 语义总结（推荐）</option>
+              <option value="local">0 API 规则抽取（实验）</option>
             </select>
+            <div id="smm129_mode_status" class="smm138-mode-help"></div>
           </div>
-          <div id="smm129_mode_status" class="smm2-note smm107-status-note"></div>
 
           <label class="smm107-switch-row">
             <input id="smm100_safe_inject" type="checkbox">
@@ -12152,6 +12155,7 @@ function bindNativeManager() {
             settings.summaryProvider=e.target.value==='profile' ? 'profile' : 'current';
             saveSettings();
             refreshSummaryProfileUIV094();
+            refreshNative();
         };
     }
 
@@ -12160,6 +12164,7 @@ function bindNativeManager() {
             S().summaryProfileId=String(e.target.value||'');
             saveSettings();
             refreshSummaryProfileUIV094();
+            refreshNative();
         };
     }
 
@@ -12236,6 +12241,7 @@ function bindNativeManager() {
                 saveSettings();
 
                 refreshSummaryProfileUIV094();
+                refreshNative();
 
                 toast(
                     '已创建并选中总结 Profile：'+
@@ -12269,7 +12275,10 @@ function bindNativeManager() {
 
         for(const evt of profileEvents){
             source?.on?.(evt, ()=>{
-                setTimeout(refreshSummaryProfileUIV094, 50);
+                setTimeout(()=>{
+                    refreshSummaryProfileUIV094();
+                    refreshNative();
+                }, 50);
             });
         }
     } catch(e) {
@@ -12277,9 +12286,13 @@ function bindNativeManager() {
     }
 
     // 页面初始化顺序不固定，做几次轻量延迟刷新。
-    setTimeout(refreshSummaryProfileUIV094, 300);
-    setTimeout(refreshSummaryProfileUIV094, 1000);
-    setTimeout(refreshSummaryProfileUIV094, 2500);
+    const refreshSummaryControlsV01138=()=>{
+        refreshSummaryProfileUIV094();
+        refreshNative();
+    };
+    setTimeout(refreshSummaryControlsV01138, 300);
+    setTimeout(refreshSummaryControlsV01138, 1000);
+    setTimeout(refreshSummaryControlsV01138, 2500);
 
     // v0.9.1：旧版 history 入口已从 UI 移除。
     q('smm2_native_stop').onclick = stopHistoryRebuild;
@@ -12565,12 +12578,25 @@ function refreshNative() {
     setValue('smm129_summary_mode', String(s.summaryMode||'ai')==='ai'?'ai':'local');
 
     const localMode=String(s.summaryMode||'ai')!=='ai';
+    const usingSummaryProfile=String(s.summaryProvider||'current')==='profile';
+    const summaryProfiles=Array.isArray(C().extensionSettings?.connectionManager?.profiles)
+        ? C().extensionSettings.connectionManager.profiles : [];
+    const selectedSummaryProfile=summaryProfiles.find(p=>String(p?.id||'')===String(s.summaryProfileId||''));
     const modeStatus=document.getElementById('smm129_mode_status');
     if(modeStatus) modeStatus.textContent=localMode
-        ? '实验性 0 API 只做规则抽取，不具备完整语义总结能力，不建议用于日常长期记忆。'
-        : '复用当前聊天模型静默总结：同时读取用户与角色真实楼层，每批只生成 1 次。非 JSON、524 或超时均不写入、不推进游标，可稍后重试。';
+        ? '仅做规则抽取，不具备完整语义理解；不建议用于日常长期记忆。'
+        : usingSummaryProfile
+            ? `独立 API${selectedSummaryProfile?.name?` · ${selectedSummaryProfile.name}`:''}；每批只生成 1 次，失败不写入。`
+            : '当前聊天模型静默生成；每批只生成 1 次，失败不写入。';
+    const modeBadge=document.getElementById('smm138_mode_badge');
+    if(modeBadge){
+        modeBadge.textContent=localMode?'实验模式':(usingSummaryProfile?'独立 API':'AI 语义');
+        modeBadge.dataset.mode=localMode?'local':(usingSummaryProfile?'profile':'ai');
+    }
     const newBtn=document.getElementById('smm2_native_new');
-    if(newBtn) newBtn.textContent=localMode?'总结新增（实验性 0 API）':'总结新增（当前模型）';
+    if(newBtn) newBtn.textContent=localMode
+        ? '总结新增（实验性 0 API）'
+        : (usingSummaryProfile?'总结新增（独立 API）':'总结新增（当前模型）');
     const requeueBtn=document.getElementById('smm136_native_requeue');
     if(requeueBtn) requeueBtn.style.display=hasIncorrectLocalMemoryV01136(M())?'':'none';
     const deferredCount=localDeferredCountV01133(M());
@@ -12646,7 +12672,7 @@ function installNativeExtensionEntry() {
 
         wrap.innerHTML = `
           <div class="inline-drawer-toggle inline-drawer-header">
-            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.37</span></div>
+            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.38</span></div>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
           </div>
           <div class="inline-drawer-content">
@@ -12802,7 +12828,7 @@ function statsHTMLV0105() {
 
     return [
         `<div class="smm105-stat-line"><b>剧情：</b>${esc(date)}　${esc(st.time)}</div>`,
-        `<div class="smm105-stat-line"><b>总结方式：</b>${localSummaryModeV01129()?'实验性 0 API 规则抽取':'当前聊天模型 · 静默单次'}</div>`,
+        `<div class="smm105-stat-line"><b>总结方式：</b>${localSummaryModeV01129()?'实验性 0 API 规则抽取':(String(S().summaryProvider||'current')==='profile'?'独立总结 API · 单次':'当前聊天模型 · 静默单次')}</div>`,
         `<div class="smm105-stat-line"><b>扫描：</b>${st.done}/${st.total}　待扫描 ${st.pending}　待补录 ${st.deferred}　已隐藏 ${hidden.count}</div>`,
         `<div class="smm105-stat-line"><b>记忆：</b>时间线 ${st.timeline}　人物 ${people}　NPC ${npcs}　关系 ${relations}　锚点 ${anchors}　阶段 ${(mem.stage_summaries||[]).length}</div>`,
         `<div class="smm105-stat-line"><b>连续性：</b>${st.deferred ? `⚠ ${st.deferred} 楼已扫描但尚未形成记忆` : (coverageGapsV0112.length ? `⚠ 时间线断档 #${coverageGapsV0112[0].start}-#${coverageGapsV0112[0].end}` : (continuityNeedsReview ? '后台有待核查项' : '正常'))}</div>`,
@@ -12829,7 +12855,9 @@ function refresh() {
     document.getElementById('smm2_trigger').value=s.triggerMessages;
     document.getElementById('smm2_batch').value=s.batchMessages;
     document.getElementById('smm2_start').value=M().story_start||'';
-    document.getElementById('smm2_new').textContent=localSummaryModeV01129()?'总结新增（实验性 0 API）':'总结新增（当前模型）';
+    document.getElementById('smm2_new').textContent=localSummaryModeV01129()
+        ? '总结新增（实验性 0 API）'
+        : (String(s.summaryProvider||'current')==='profile'?'总结新增（独立 API）':'总结新增（当前模型）');
     const requeueBtn=document.getElementById('smm136_requeue');
     if(requeueBtn) requeueBtn.style.display=hasIncorrectLocalMemoryV01136(M())?'':'none';
     const deferredCount=localDeferredCountV01133(M());
@@ -12892,7 +12920,7 @@ function initializeExtension() {
     try {
         installUI();
         refresh();
-        console.log('[StoryMemory] v0.11.37 loaded successfully');
+        console.log('[StoryMemory] v0.11.38 loaded successfully');
     } catch (e) {
         console.error('[StoryMemory] UI initialization failed', e);
     }

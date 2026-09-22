@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.11.38 HYBRID
+
+- 修复 Android/窄屏下“总结方式”选择器因 `flex-basis` 与纵向布局冲突而被撑成大块空白的问题。
+- 原生设置页改用紧凑总结方式卡片；选择器在桌面端固定 42px、手机端固定 40px，不再随父级纵向拉伸。
+- 新增总结通道徽标，实时区分当前聊天模型、独立 API Profile 与实验性 0 API 模式。
+- 总结按钮和统计文字同步反映独立 API 状态；Connection Profile 创建、切换、更新或删除后自动刷新显示。
+- 本次不改总结、记忆合并、时间线、处理游标、隐藏楼层或 JSONL 逻辑。
+
 ## v0.11.37 HYBRID
 
 - 参考 SillyTavern Memory Palace 的结构化总结方案，把完整 JSON Schema 嵌入当前模型的单次静默请求，减少返回 Markdown、字段缺失或结构漂移导致的拒绝提交。

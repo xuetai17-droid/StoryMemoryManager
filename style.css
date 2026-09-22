@@ -851,11 +851,79 @@
   margin:0 !important;
 }
 
-#smm129_summary_mode{
-  flex:1 1 220px;
-  min-width:0;
-  max-width:72%;
-  box-sizing:border-box;
+/* v0.11.38: the old select used flex-basis:220px. Once the mobile row switched
+   to flex-direction:column that basis became vertical height, producing the
+   oversized empty panel seen on Android. Keep this control dimensionally fixed. */
+.smm138-mode-card{
+  margin:10px 0 4px;
+  padding:10px;
+  border:1px solid rgba(127,127,127,.22);
+  border-radius:12px;
+  background:rgba(127,127,127,.055);
+  box-shadow:0 1px 0 rgba(255,255,255,.035) inset;
+}
+
+.smm138-mode-head{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+  margin-bottom:8px;
+}
+
+.smm138-mode-label{
+  margin:0 !important;
+  font-weight:700;
+}
+
+.smm138-mode-badge{
+  display:inline-flex;
+  align-items:center;
+  flex:0 0 auto;
+  min-height:24px;
+  padding:2px 8px;
+  border:1px solid rgba(96,150,108,.42);
+  border-radius:999px;
+  background:rgba(96,150,108,.12);
+  font-size:.76em;
+  font-weight:650;
+  line-height:1.2;
+  white-space:nowrap;
+}
+
+.smm138-mode-badge[data-mode="profile"]{
+  border-color:rgba(94,129,180,.44);
+  background:rgba(94,129,180,.12);
+}
+
+.smm138-mode-badge[data-mode="local"]{
+  border-color:rgba(177,126,67,.48);
+  background:rgba(177,126,67,.13);
+}
+
+#smm2_native_entry #smm129_summary_mode{
+  display:block !important;
+  flex:none !important;
+  width:100% !important;
+  min-width:0 !important;
+  max-width:none !important;
+  height:42px !important;
+  min-height:42px !important;
+  max-height:42px !important;
+  margin:0 !important;
+  padding:0 38px 0 12px !important;
+  box-sizing:border-box !important;
+  border-radius:10px !important;
+  line-height:42px !important;
+  font-size:.94em !important;
+}
+
+.smm138-mode-help{
+  margin-top:8px;
+  padding:0 2px;
+  opacity:.68;
+  font-size:.82em;
+  line-height:1.45;
 }
 
 .smm107-number-unit{
@@ -952,15 +1020,17 @@
     align-items:center;
   }
 
-  .smm129-mode-row{
-    align-items:stretch;
-    flex-direction:column;
-    gap:6px;
+  .smm138-mode-card{
+    margin-top:9px;
+    padding:9px;
+    border-radius:11px;
   }
 
-  #smm129_summary_mode{
-    width:100%;
-    max-width:none;
+  #smm2_native_entry #smm129_summary_mode{
+    height:40px !important;
+    min-height:40px !important;
+    max-height:40px !important;
+    line-height:40px !important;
   }
 
   .smm107-advanced-grid{

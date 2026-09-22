@@ -1,6 +1,15 @@
-# Story Memory Manager v0.11.37 HYBRID
+# Story Memory Manager v0.11.38 HYBRID
 
 本版继续使用 SillyTavern 当前聊天模型做一次静默语义总结，并参考 [SillyTavern Memory Palace](https://github.com/badcode1024-tech/sillytavern-memory-palace) 的结构化总结与 NPC 分区思路：主要人物保留完整状态，次要 NPC 单独保存极简档案，并且只在当前剧情命中时注入。
+
+## v0.11.38 手机端总结方式界面修复
+
+- 修复 Android 窄屏下“总结方式”下拉框被拉成数百像素高的大空白面板。根因是桌面端的 `flex-basis: 220px` 在纵向布局中被浏览器解释成垂直高度。
+- 总结方式改为紧凑选择卡：标题、当前通道徽标、固定 40px 下拉框和简短说明清晰分层。
+- 徽标会实时显示“AI 语义”“独立 API”或“实验模式”；使用独立总结 Profile 时，总结按钮和统计区域也会明确显示“独立 API”。
+- 只调整界面与状态提示，不改变总结算法、处理游标、长期记忆或原始聊天 JSONL。
+
+> 下方 v0.11.37 及更早章节为历史记录；v0.11.38 不要求重建或重新总结。
 
 ## v0.11.37 结构化语义总结与 NPC 独立记忆
 
