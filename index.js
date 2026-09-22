@@ -1,5 +1,5 @@
-// Story Memory Manager v0.11.43
-// Direct API model discovery / mobile layout repair / paid-call guard
+// Story Memory Manager v0.11.44
+// Role-card recap clock authority / message timestamp isolation
 // does not rewrite original chat JSONL
 
 const MODULE = 'story_memory_manager_v2';
@@ -42,6 +42,7 @@ const DEFAULTS = Object.freeze({
     summaryProfileCircuitProfileId: '',
     summaryTransportPolicyV01142: 'direct_external_api_verified_single_request',
     summaryTransportPolicyV01143: 'fetch_models_then_select',
+    recapClockPolicyV01144: 'assistant_recap_date_time_before_message_timestamp',
     summaryExternalApiUrl: '',
     summaryExternalApiKey: '',
     summaryExternalApiModel: '',
@@ -95,6 +96,7 @@ function S() {
     const upgradingToV01141 = !Object.hasOwn(c.extensionSettings[MODULE], 'summaryTransportPolicyV01141');
     const upgradingToV01142 = !Object.hasOwn(c.extensionSettings[MODULE], 'summaryTransportPolicyV01142');
     const upgradingToV01143 = !Object.hasOwn(c.extensionSettings[MODULE], 'summaryTransportPolicyV01143');
+    const upgradingToV01144 = !Object.hasOwn(c.extensionSettings[MODULE], 'recapClockPolicyV01144');
     for (const [k,v] of Object.entries(DEFAULTS)) {
         if (!Object.hasOwn(c.extensionSettings[MODULE], k)) c.extensionSettings[MODULE][k] = v;
     }
@@ -146,6 +148,10 @@ function S() {
         c.extensionSettings[MODULE].summaryExternalModelsFetchedAt='';
         c.extensionSettings[MODULE].summaryExternalVerifiedFingerprint='';
         c.extensionSettings[MODULE].summaryExternalVerifiedAt='';
+        try { c.saveSettingsDebounced?.(); } catch (_) {}
+    }
+    if (upgradingToV01144) {
+        c.extensionSettings[MODULE].recapClockPolicyV01144='assistant_recap_date_time_before_message_timestamp';
         try { c.saveSettingsDebounced?.(); } catch (_) {}
     }
     return c.extensionSettings[MODULE];
@@ -1077,6 +1083,20 @@ function worldStateMetaPromptLineV0112(m, idx) {
         : '';
 }
 
+function roleCardRecapTimePromptLineV01144(m,idx) {
+    if(!m||m.is_user) return '';
+    const recs=roleCardRecapRecordsV01135(m,null,M());
+    const rec=recs.at(-1);
+    if(!rec||(!rec.date&&!rec.time)) return '';
+    const parts=[];
+    if(rec.date) parts.push(`剧情日期=${rec.date}`);
+    if(rec.time) parts.push(`剧情时间=${rec.time}`);
+    if(rec.recap_start_date&&rec.recap_end_date&&rec.recap_start_date!==rec.recap_end_date){
+        parts.push(`摘要日期范围=${rec.recap_start_date}→${rec.recap_end_date}`);
+    }
+    return `[SMM_ROLE_RECAP_TIME #${idx} | assistant recap, not message timestamp | ${parts.join(' | ')}]`;
+}
+
 function isMissingStoryValueV0112(value) {
     const s=String(value ?? '').trim();
     return !s || /^(?:null|undefined|unknown|未知|未明确|无法验证|未建立)(?:[（(].*[）)])?$/i.test(s);
@@ -1126,14 +1146,14 @@ function applyWorldStateMetadataFallbackV0112(parsed, start, endExclusive) {
     if (Array.isArray(parsed.timeline)) {
         for (const e of parsed.timeline) {
             const idx = [...sourceIndexes(e?.source)].sort((a,b)=>b-a)
-                .find(i => i>=start && i<endExclusive && extractWorldStateMetadataV0112(chat[i]));
+                .find(i => i>=start && i<endExclusive && (narrativeRecAt(i)||extractWorldStateMetadataV0112(chat[i])));
             if (!Number.isInteger(idx)) continue;
             const meta = extractWorldStateMetadataV0112(chat[idx]);
-            if (!meta) continue;
             const narrative=narrativeRecAt(idx);
             if(narrative?.date) e.date=narrative.date;
-            else if (meta.date && (meta.date_reality || isMissingStoryValueV0112(e?.date))) e.date=meta.date;
-            if ((isMissingStoryValueV0112(e?.time) || (isUnresolvedStoryTimeV0112(e?.time) && parseStoryClock(meta.time)!=null)) && meta.time) e.time=meta.time;
+            else if (meta?.date && (meta.date_reality || isMissingStoryValueV0112(e?.date))) e.date=meta.date;
+            if(narrative?.time) e.time=narrative.time;
+            else if ((isMissingStoryValueV0112(e?.time) || (isUnresolvedStoryTimeV0112(e?.time) && parseStoryClock(meta?.time)!=null)) && meta?.time) e.time=meta.time;
         }
     }
 
@@ -1141,23 +1161,23 @@ function applyWorldStateMetadataFallbackV0112(parsed, start, endExclusive) {
     // v0.11.30 no longer lets /world/reality-time overwrite an explicit dated
     // narrative scene (for example a 2003 simulation inside a 2026 card).
     const latest = latestWorldStateMetaInRangeV0112(start,endExclusive);
-    if (latest) {
-        let latestNarrative=null;
-        for(let i=Math.min(endExclusive,chat.length)-1;i>=Math.max(0,start);i--){
-            const rec=narrativeRecAt(i);
-            if(rec&&(rec.date||rec.time)){latestNarrative={index:i,...rec};break;}
-        }
+    let latestNarrative=null;
+    for(let i=Math.min(endExclusive,chat.length)-1;i>=Math.max(0,start);i--){
+        const rec=narrativeRecAt(i);
+        if(rec&&(rec.date||rec.time)){latestNarrative={index:i,...rec};break;}
+    }
+    if (latest||latestNarrative) {
         const parsedDate=normalizeDateInput(parsed.current_story_date||'')?.iso||null;
-        const latestDate=normalizeDateInput(latest.date||'')?.iso||null;
+        const latestDate=normalizeDateInput(latest?.date||'')?.iso||null;
         if(latestNarrative?.date) parsed.current_story_date=latestNarrative.date;
-        else if(latest.date && (isMissingStoryValueV0112(parsed.current_story_date) ||
-            (latest.date_reality&&parsedDate&&latestDate&&parsedDate.slice(0,4)===latestDate.slice(0,4)&&latestDate>=parsedDate)))
+        else if(latest?.date && (isMissingStoryValueV0112(parsed.current_story_date) ||
+            (latest?.date_reality&&parsedDate&&latestDate&&parsedDate.slice(0,4)===latestDate.slice(0,4)&&latestDate>=parsedDate)))
             parsed.current_story_date=latest.date;
         if(latestNarrative?.time) parsed.current_story_time=latestNarrative.time;
-        else if (latest.time && ((latest.time_reality&&!latestNarrative) || isMissingStoryValueV0112(parsed.current_story_time) ||
-            (isUnresolvedStoryTimeV0112(parsed.current_story_time) && parseStoryClock(latest.time)!=null)))
+        else if (latest?.time && ((latest?.time_reality&&!latestNarrative) || isMissingStoryValueV0112(parsed.current_story_time) ||
+            (isUnresolvedStoryTimeV0112(parsed.current_story_time) && parseStoryClock(latest?.time)!=null)))
             parsed.current_story_time=latest.time;
-        if (latest.location && parsed.current_scene && typeof parsed.current_scene==='object' &&
+        if (latest?.location && parsed.current_scene && typeof parsed.current_scene==='object' &&
             isMissingStoryValueV0112(parsed.current_scene.location)) {
             parsed.current_scene.location=latest.location;
         }
@@ -1172,7 +1192,8 @@ function messagesText(start, end) {
         const who = m.is_user ? 'USER' : (m.name || 'CHARACTER');
         const body = cleanMesForSummaryV0110(m);
         const meta = worldStateMetaPromptLineV0112(m, idx);
-        return `[#${idx} ${who}]\n${body}${meta ? `\n${meta}` : ''}`;
+        const recapTime = roleCardRecapTimePromptLineV01144(m,idx);
+        return `[#${idx} ${who}]\n${body}${recapTime ? `\n${recapTime}` : ''}${meta ? `\n${meta}` : ''}`;
     }).join('\n\n');
 }
 
@@ -1956,6 +1977,18 @@ function sourceRoleplayStatusTextV01133(source) {
         .join('\n');
 }
 
+function sourcePresetSummaryTimeTextV01144(source) {
+    const chat=C().chat||[];
+    return sourceIndexes(source).map(i=>{
+        const msg=chat[i];
+        if(!msg||msg.is_user) return '';
+        const prev=i>0&&chat[i-1]?.is_user?chat[i-1]:null;
+        return narrativeSummaryRecordsV01130(msg,prev,M())
+            .map(rec=>[rec?.date,rec?.time].filter(Boolean).join(' '))
+            .filter(Boolean).join('\n');
+    }).filter(Boolean).join('\n');
+}
+
 function temporalTextContainsClockV01131(text,targetMinutes) {
     const src=String(text||'');
     if(!src||targetMinutes==null) return false;
@@ -1996,7 +2029,8 @@ function classifySourceTimeEvidence(e) {
     const src = sourceTextForTime(e?.source);
     const worldMeta = sourceWorldMetaTextV0112(e?.source);
     const statusMeta = sourceRoleplayStatusTextV01133(e?.source);
-    const meta=[worldMeta,statusMeta].filter(Boolean).join('\n');
+    const presetMeta = sourcePresetSummaryTimeTextV01144(e?.source);
+    const meta=[worldMeta,statusMeta,presetMeta].filter(Boolean).join('\n');
     if (!src && !meta) {
         return {level:'unverified', label:'无法验证', reason:'找不到 source 对应的原始聊天或世界状态元数据'};
     }
@@ -2012,7 +2046,8 @@ function classifySourceTimeEvidence(e) {
                 clock:hh2+':'+mm,
                 inCanonical:temporalTextContainsClockV01131(src,minutes),
                 inMeta:temporalTextContainsClockV01131(meta,minutes),
-                inStatus:temporalTextContainsClockV01131(statusMeta,minutes)
+                inStatus:temporalTextContainsClockV01131(statusMeta,minutes),
+                inPreset:temporalTextContainsClockV01131(presetMeta,minutes)
             };
         });
         const missing=checks.filter(x=>!x.inCanonical&&!x.inMeta);
@@ -2026,7 +2061,7 @@ function classifySourceTimeEvidence(e) {
             };
             return {
                 level:anyCanonical?'partial':'structured',
-                label:anyCanonical?'原文/状态时间已验证':(checks.some(x=>x.inStatus)?'角色卡状态栏时间':'变量状态时间'),
+                label:anyCanonical?'原文/状态时间已验证':(checks.some(x=>x.inPreset)?'角色卡摘要时间':(checks.some(x=>x.inStatus)?'角色卡状态栏时间':'变量状态时间')),
                 reason:'时间由 canonical 正文、角色卡状态栏与/或 UpdateVariable 白名单字段验证：'+checks.map(x=>x.clock).join('、')
             };
         }
@@ -2043,8 +2078,9 @@ function classifySourceTimeEvidence(e) {
 
     const chineseHour = time.match(/(?:凌晨|半夜|早晨|早上|上午|中午|下午|傍晚|晚上|晚间|夜间|深夜)?\s*(\d{1,2})(?:点|时)/);
     if (chineseHour) {
-        const token=chineseHour[0].replace(/\s+/g,''), c=(src||'').replace(/\s+/g,''), m=(meta||'').replace(/\s+/g,''), st=(statusMeta||'').replace(/\s+/g,'');
+        const token=chineseHour[0].replace(/\s+/g,''), c=(src||'').replace(/\s+/g,''), m=(meta||'').replace(/\s+/g,''), st=(statusMeta||'').replace(/\s+/g,''), ps=(presetMeta||'').replace(/\s+/g,'');
         if (c.includes(token)) return {level:'explicit',label:'原文明确时间',reason:`source canonical 正文中找到“${token}”`};
+        if (ps.includes(token)) return {level:'structured',label:'角色卡摘要时间',reason:`同 source 的角色卡摘要时间字段中找到“${token}”`};
         if (st.includes(token)) return {level:'structured',label:'角色卡状态栏时间',reason:`同 source 的 <status> 白名单时间字段中找到“${token}”`};
         if (m.includes(token)) return {level:'structured',label:'变量状态时间',reason:`UpdateVariable 世界状态元数据中找到“${token}”`};
         return {level:'inferred',label:'总结推测时间',reason:'具体钟点只存在于记忆 time 字段'};
@@ -2054,6 +2090,7 @@ function classifySourceTimeEvidence(e) {
     const hit=dayparts.find(x=>time.includes(x));
     if (hit) {
         if ((src||'').includes(hit)) return {level:'fuzzy',label:'原文模糊时段',reason:`source canonical 正文中存在“${hit}”`};
+        if ((presetMeta||'').includes(hit)) return {level:'structured',label:'角色卡摘要时间',reason:`同 source 的角色卡摘要时间字段中存在“${hit}”`};
         if ((statusMeta||'').includes(hit)) return {level:'structured',label:'角色卡状态栏时段',reason:`同 source 的 <status> 白名单时间字段中存在“${hit}”`};
         if ((meta||'').includes(hit)) return {level:'structured',label:'变量状态时段',reason:`UpdateVariable 世界状态元数据中存在“${hit}”`};
         return {level:'inferred',label:'总结推测时段',reason:`“${hit}”只存在于记忆 time 字段`};
@@ -2198,7 +2235,9 @@ function chineseNumberToInt(v) {
 function sourceContainsClock(source, targetMinutes) {
     const canonical = sourceTextForTime(source);
     const meta = sourceWorldMetaTextV0112(source);
-    const src = [canonical, meta].filter(Boolean).join('\n');
+    const status = sourceRoleplayStatusTextV01133(source);
+    const preset = sourcePresetSummaryTimeTextV01144(source);
+    const src = [canonical, meta, status, preset].filter(Boolean).join('\n');
     return temporalTextContainsClockV01131(src,targetMinutes);
 }
 
@@ -4594,7 +4633,7 @@ const SYSTEM_PROMPT = `你是长线角色扮演的“剧情记忆审计器”。
 1. 酒馆消息发送时间/楼层时间戳不是剧情时间，禁止据此推断剧情日期。
 2. 时间证据优先级：用户正文明确时间 > 正文明确相对推进（第二天/几小时后/跨午夜） > 可验证事件连续性 > AI正文中的<date>标签。
 2A. 双时间轴：timeline.date、current_story_date 和 current_story_time 表示“当前正在演出的剧情/场景时间”；/世界/现实时间表示 MVU 底层现实钟，插件会另行保存。若剧情明确进入带完整绝对日期的历史副本、模拟场景或闪回（例如从 2026 进入 2003），必须保留该场景日期，不能因为年份较小而改回 2026；“副本第N天/倒计时”仍不能自行推算绝对日期。
-2B. 时间精度必须服从证据：只有同 source 的 canonical 正文或允许的当前状态元数据明确出现具体钟点，timeline.time 才能写 HH:MM。只知道时段时写“早晨/上午/中午/下午/晚间/深夜”；连时段也无法确认时写“时间未明确”。预设摘要自行推测出的 15:00、15:20 等分钟不得伪装成“原文明示”，也不得作为后续跨日或倒退判断的钟点锚点。
+2B. 时间精度必须服从证据：只有同 source 的 canonical 正文、角色回复中明确标注“时间/日期”的结构化剧情摘要，或允许的当前状态元数据明确出现具体钟点，timeline.time 才能写 HH:MM。只知道时段时写“早晨/上午/中午/下午/晚间/深夜”；连时段也无法确认时写“时间未明确”。没有时间字段支持而由摘要模型自行补出的 15:00、15:20 等分钟不得伪装成“原文明示”。SillyTavern 消息头/发送时间始终不是剧情时间。
 3. 如果上一场景是夜晚，后文明确“半夜2点/凌晨2点”等，必须考虑跨日。
 3A. 月份锁：若已有可靠记忆处于某月，而“新增原始聊天”没有明确出现新的年月日、明确“下个月/数周后/一个月后”等跨月推进证据，禁止自行改变月份。
 3B. 单独出现“17日/周五/早晨”等信息时，默认继承当前可靠月份；不得仅凭 AI 的 <date> 标签把 9 月推成 10 月。
@@ -6092,6 +6131,11 @@ ${messagesText(start, end)}
 - timeline 事件的 source 若包含该 assistant 回复且 time/date 为空，可使用同 source 的结构化元数据补齐；不得把后续楼层的元数据倒灌到更早事件。
 - 除上述白名单路径外，任何 JSONPatch 变量（好感度、状态、数值、分析等）都没有被提供给总结器，也不得进入长期记忆。
 
+【SMM_ROLE_RECAP_TIME 使用边界】
+- 该行只从同一条 assistant 回复中明确标注“摘要/时间/日期”的角色卡剧情摘要提取剧情日期与时分，例如 2026-09-20 07:51—23:47。
+- 它属于该 source 的剧情时间证据，优先于 SillyTavern 消息头日期和现实发送时间；消息头时间禁止用于剧情时间。
+- 它只可校准 date/time，不得据此额外创造摘要正文没有发生的动作、关系或人物状态。
+
 请只从“新增原始聊天”更新记忆。旧记忆只用于对照，不允许把旧记忆中尚未发生的未来内容变成事实。
 
 【剧情起点规则】
@@ -6117,7 +6161,7 @@ ${messagesText(start, end)}
 - current_story_time 保存当前正在演出的场景钟点，可以保留“秋季学期 周X HH:MM”作为显示时间，但不能代替 current_story_date。
 - 时间线必须尽量给出具体 YYYY-MM-DD；“秋季学期/周五/上午”只能作为附加描述，不能替代日期。
 - 双时间轴中，timeline.date 属于当前剧情场景；若场景只有“副本第N天”而没有完整日历，可在 time 中保留该标签但不得推算日期。/世界/现实时间由插件作为 parallel reality clock 单独保存。
-- timeline.time 只有在同 source 正文或允许的同楼状态元数据明确出现钟点时才写 HH:MM；摘要为了补字段自行推测的精确分钟必须降级为“下午（具体时刻未明确）”等时段，完全无依据则写“时间未明确”。不得用这种推测分钟计算跨日、倒退或事件排序。
+- timeline.time 只有在同 source 正文、同楼明确标注时间的角色卡剧情摘要，或允许的同楼状态元数据明确出现钟点时才写 HH:MM；没有这些字段支持、仅由总结模型自行推测的精确分钟必须降级为“下午（具体时刻未明确）”等时段。不得使用酒馆消息头时间。
 - 人物资料分稳定资料与当前状态。地点、衣着、陪伴者、身体状态属于当前状态，后文更新时覆盖，不要不断堆成数组。
 - 人物别名必须归一；同一人物不得因中英文名/昵称拆成多个实体。
 - 人物关系只有在明确两个人之间存在关系时才记录；多人同场、群体互动不得自动生成多边关系链。
@@ -7562,7 +7606,8 @@ function safeTimelineTimeInfoV01131(entry) {
     const separateReality=entry?.calendar_axis==='scene'||!!(sceneDate&&realityDate&&sceneDate!==realityDate);
     const canonical=sourceTextForTime(entry?.source);
     const allCanonical=clocks.length>0&&clocks.every(x=>temporalTextContainsClockV01131(canonical,x));
-    const exactTrusted=clocks.length>0&&(allCanonical||(!separateReality&&evidence.level==='structured'));
+    const recapTrusted=evidence.level==='structured'&&/角色卡摘要|预设摘要/.test(String(evidence.label||''));
+    const exactTrusted=clocks.length>0&&(allCanonical||recapTrusted||(!separateReality&&evidence.level==='structured'));
     if(exactTrusted) return {
         time:ensureWeekdayTimelineTimeLocalV0119(raw,entry?.date),
         evidence,downgraded:false
@@ -7661,10 +7706,10 @@ function narrativeSummaryRecordsV01130(m,userMsg=null,mem=M()) {
         });
     }
     if(direct.length) return direct;
-    // v0.11.36: a rendered role-card recap is presentation output, not the
-    // incremental summary engine.  Daily semantic summaries are generated from
-    // the actual USER + CHARACTER floors by the current chat model.  Keep only
-    // explicitly structured assistant summaries as conservative metadata hints.
+    // v0.11.44: a bounded assistant-authored recap panel is reliable metadata
+    // for its labelled story date/time. It is not a SillyTavern message header.
+    const roleCard=roleCardRecapRecordsV01135(m,userMsg,mem);
+    if(roleCard.length) return roleCard;
     const labeled=labeledSummaryRecordsLocalV01133(m,userMsg,mem);
     if(labeled.length) return labeled;
     return structuredSummaryRecordsLocalV0119(m,userMsg,mem).map(rec=>({
@@ -7775,7 +7820,7 @@ function repairNarrativeCalendarV01130(mem=M(),endInclusive=null) {
             e?.date_precision||null,e?.time||null
         ])
     ]);
-    if(mem?.narrative_calendar_v01130?.version==='0.11.33'&&mem?.narrative_calendar_v01130?.input_fingerprint===fingerprint){
+    if(mem?.narrative_calendar_v01130?.version==='0.11.44'&&mem?.narrative_calendar_v01130?.input_fingerprint===fingerprint){
         return {found:true,changed:false,rows_fixed:0,cached:true};
     }
 
@@ -7783,7 +7828,7 @@ function repairNarrativeCalendarV01130(mem=M(),endInclusive=null) {
         .filter(x=>x.first>=0&&x.first<=cap)
         .sort((a,b)=>(a.first-b.first)||(a.last-b.last)||(a.pos-b.pos));
     const priorRun=mem?.narrative_calendar_v01130;
-    const fullUpgrade=priorRun?.version!=='0.11.33'||!Number.isInteger(priorRun?.processed_to)||Number(priorRun.processed_to)>cap;
+    const fullUpgrade=priorRun?.version!=='0.11.44'||!Number.isInteger(priorRun?.processed_to)||Number(priorRun.processed_to)>cap;
     const scanFrom=fullUpgrade?0:Math.max(0,Number(priorRun.processed_to)-6);
     const rows=allRows.filter(x=>x.last>=scanFrom);
     const earlier=allRows.filter(x=>x.last<scanFrom);
@@ -7947,7 +7992,7 @@ function repairNarrativeCalendarV01130(mem=M(),endInclusive=null) {
         ])
     ]);
     mem.narrative_calendar_v01130={
-        version:'0.11.33',at:new Date().toISOString(),input_fingerprint:finalFingerprint,
+        version:'0.11.44',at:new Date().toISOString(),input_fingerprint:finalFingerprint,
         processed_to:cap,scan_from:scanFrom,
         direct_anchors:directCount,rows_fixed:rowsFixed,time_fixed:timeFixed,
         time_precision_changed:precision.changed,time_precision_downgraded:precisionDowngraded,
@@ -8297,6 +8342,32 @@ function recapDateRangeV01135(text) {
     return dates.length?{start:dates[0],end:dates.at(-1)}:{start:null,end:null};
 }
 
+function recapClockRangeV01144(text) {
+    const src=String(text||'').replace(/：/g,':');
+    // Restrict extraction to the recap's labelled time/date row. This avoids
+    // treating SillyTavern's message timestamp or numbers in the prose as plot time.
+    const labelled=src.match(/(?:时间|日期)\s*[:：]?\s*(?:20\d{2}[年\-\/.]\d{1,2}[月\-\/.]\d{1,2}日?)?([\s\S]{0,150}?)(?=(?:人物|角色|地点|摘要正文|剧情)\s*[:：]?|\n\s*\n|$)/i)?.[1]||'';
+    const clocks=[...labelled.matchAll(/(?:^|[^\d])((?:[01]?\d|2[0-3]):[0-5]\d)(?!\d)/g)].map(x=>x[1]);
+    if(clocks.length>=2) return `${clocks[0]}-${clocks[1]}`;
+    if(clocks.length===1) return clocks[0];
+    return null;
+}
+
+function cardFooterStoryClockV01144(text) {
+    const src=String(text||'').replace(/：/g,':');
+    // Opening cards commonly render: 2026-09-20 · 周日 · 07:51↔23:14.
+    // Requiring a weekday plus a clock range excludes the ordinary ST header
+    // such as “2026年9月22日 14:36”.
+    const hit=src.match(/(20\d{2})[年\-\/.](\d{1,2})[月\-\/.](\d{1,2})日?[\s·丨|]*((?:星期|周)\s*[一二三四五六日天])[\s·丨|]*([01]?\d|2[0-3]):([0-5]\d)\s*(?:↔|→|~|～|—|–|至|到)\s*([01]?\d|2[0-3]):([0-5]\d)/i);
+    if(!hit) return null;
+    const date=normalizeDateInput(`${hit[1]}-${String(Number(hit[2])).padStart(2,'0')}-${String(Number(hit[3])).padStart(2,'0')}`)?.iso||null;
+    return {
+        date,
+        time:`${String(Number(hit[5])).padStart(2,'0')}:${hit[6]}-${String(Number(hit[7])).padStart(2,'0')}:${hit[8]}`,
+        weekday:String(hit[4]||'').replace(/\s+/g,'')
+    };
+}
+
 function cleanRoleCardRecapBlockV01135(raw) {
     let text=String(raw||'')
         .replace(/<!--([\s\S]*?)-->/g,'')
@@ -8336,6 +8407,7 @@ function roleCardRecapRecordsV01135(m,userMsg=null,mem=M()) {
     if(!candidates.length) add(raw,'visible');
 
     const status=extractRoleplayStatusMetadataV01133(m);
+    const openingClock=cardFooterStoryClockV01144(cleanRoleCardRecapBlockV01135(raw));
     const out=[];
     const seen=new Set();
     for(const candidate of candidates){
@@ -8375,13 +8447,14 @@ function roleCardRecapRecordsV01135(m,userMsg=null,mem=M()) {
         const event=cleanupPresetPlotLocalV0119(`${title?title+'：':''}${body}`,800);
         if(!event||event.length<40) continue;
         const range=recapDateRangeV01135(fromHeader);
+        const recapTime=recapClockRangeV01144(metaWindow);
         const key=timelineTextKeyV01114(event);
         if(!key||seen.has(key)) continue;
         seen.add(key);
         out.push({
             tag:'role_card_recap',record_no:null,
-            date:range.end||status?.date||null,
-            time:status?.time||null,
+            date:range.end||openingClock?.date||status?.date||null,
+            time:recapTime||openingClock?.time||status?.time||null,
             location:status?.location||null,
             event,
             recap_start_date:range.start||null,
@@ -10277,7 +10350,7 @@ function stat() {
 function panelHTML() {
     return `<div id="${PANEL_ID}" class="smm2-hidden">
       <div class="smm2-card">
-        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.43</span></div><button id="smm2_close">×</button></div>
+        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.44</span></div><button id="smm2_close">×</button></div>
         <div id="smm2_stats" class="smm2-stats"></div>
         <div class="smm2-grid">
           <button id="smm2_new">总结新增</button>
@@ -13272,7 +13345,7 @@ function installNativeExtensionEntry() {
 
         wrap.innerHTML = `
           <div class="inline-drawer-toggle inline-drawer-header">
-            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.43</span></div>
+            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.44</span></div>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
           </div>
           <div class="inline-drawer-content">
@@ -13520,7 +13593,7 @@ function initializeExtension() {
     try {
         installUI();
         refresh();
-        console.log('[StoryMemory] v0.11.43 loaded successfully');
+        console.log('[StoryMemory] v0.11.44 loaded successfully');
     } catch (e) {
         console.error('[StoryMemory] UI initialization failed', e);
     }

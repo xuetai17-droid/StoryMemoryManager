@@ -1,4 +1,11 @@
-# v0.11.43 HYBRID Release Audit
+# v0.11.44 HYBRID Release Audit
+
+## v0.11.44 recap clock audit
+
+- Parses labelled assistant recap ranges such as `2026-09-20 07:51—23:47`.
+- Uses opening-card date/weekday/range only as fallback and rejects ordinary message timestamps.
+- End-of-reply structured recap wins when opening and recap ranges conflict.
+- Existing timeline rows are recalibrated locally through a cache-version bump; no API request or cursor movement is involved.
 
 ## v0.11.43 model discovery audit
 
