@@ -1,6 +1,16 @@
-# Story Memory Manager v0.11.39 HYBRID
+# Story Memory Manager v0.11.40 HYBRID
 
 本版继续使用 SillyTavern 当前聊天模型做一次静默语义总结，并参考 [SillyTavern Memory Palace](https://github.com/badcode1024-tech/sillytavern-memory-palace) 的结构化总结与 NPC 分区思路：主要人物保留完整状态，次要 NPC 单独保存极简档案，并且只在当前剧情命中时注入。
+
+## v0.11.40 独立 API 费用与超时保护
+
+- 不再把完整 JSON Schema 塞进提示词；改为压缩后的单行 JSON 输出骨架，字段语义继续由原有总结规则约束，响应仍须通过本地 JSON、source 与提交校验。
+- 发送前执行本地长度检查：预计输入超过 42,000 tokens 或 160,000 bytes 时直接阻止，并明确提示“本次未调用 API、未扣费”；记忆、游标和原楼层保持不变。
+- 独立 Profile 输出硬上限为 6,144 tokens；旧设置若高于上限会在升级时本地收紧，不修改 Profile、API 地址或密钥。
+- 每个批次最多发起一次模型请求。400、524、超时、空响应、非 JSON、source 校验失败均立即停止，不自动回退、不自动拆分、不自动重试。
+- `manifest.json` 已加入正确仓库地址 `https://github.com/xuetai17-droid/StoryMemoryManager`，并启用扩展自动更新标记。
+
+> v0.11.40 可直接覆盖安装。不会重建长期记忆、不会全量重扫聊天，也不会修改原始 JSONL。
 
 ## v0.11.39 独立副 API 结构化输出兼容
 

@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.11.40 HYBRID
+
+- 用紧凑单行 JSON 输出骨架替代提示词中的完整 JSON Schema，避免结构说明把独立 API 请求异常放大。
+- 新增发送前本地长度保护：预计超过 42,000 tokens 或 160,000 bytes 时不调用 API，并明确告知未扣费、未写入、未推进游标。
+- 独立 Profile 最大输出硬限制为 6,144 tokens；升级时收紧旧的超大输出设置，但保留 API 地址、密钥与 Profile 选择。
+- 移除失败后自动回退当前模型和 source 校验失败后的自动拆分；每个批次最多一次模型调用。
+- 400、524、超时、空响应、非 JSON 与提交校验失败均保留原楼层，允许用户调整批量后手动重试。
+- `manifest.json` 增加正确 `homePage` 仓库地址并启用 `auto_update`。
+
 ## v0.11.39 HYBRID
 
 - 修复独立 Connection Profile 向 Gemini/部分中转接口传递通用 `json_schema` 后，被转换为不兼容的 `generationConfig.responseSchema` 并返回 HTTP 400 的问题。

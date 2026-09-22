@@ -1,4 +1,15 @@
-# v0.11.39 HYBRID Release Audit
+# v0.11.40 HYBRID Release Audit
+
+- 根因修复：完整 JSON Schema 不再进入模型请求；改为按 required 字段生成紧凑单行 JSON 骨架。
+- 发送前保护：请求在本地按字符类型估算 token，并计算 UTF-8 bytes；超过 42,000 tokens 或 160,000 bytes 时在 `sendRequest` 前抛出专用错误，提示未调用 API、未扣费。
+- 输出保护：独立 Profile 输出上限硬锁 6,144 tokens，设置页与旧设置迁移同步收紧。
+- 单次调用：删除独立 Profile 的自动 fallback；删除 source 失败后的自动拆分和 timeline 二次生成。一个批次一次请求，任何失败都等待用户手动重试。
+- 事务保护：解析和校验仍位于 merge/游标推进之前；400、524、超时、空响应、非 JSON、source 越界均不会写入 canonical memory 或推进游标。
+- 配置保留：不修改 API 地址、密钥、Connection Profile、选中 Profile、既有长期记忆或原始聊天 JSONL。
+- 更新配置：manifest 版本为 0.11.40，`homePage` 指向 `https://github.com/xuetai17-droid/StoryMemoryManager`，`auto_update` 为 true。
+- 本地验证：覆盖紧凑骨架体积、发送前阻止、输出上限、成功单次调用、400/524/超时/非 JSON 单次失败与游标/记忆不变。
+
+## v0.11.39 历史审计
 
 - 触发问题：独立 API 已连通，但上游把 Connection Manager 的通用 `json_schema` 转成 Gemini `generation_config.response_schema`；其中 `type:["string","null"]` 等标准 JSON Schema 写法不被其 Proto Schema 接受，返回 HTTP 400。
 - 请求修复：独立 Profile 的 override payload 固定为空，不再发送 provider-specific `json_schema` / `response_schema`；完整 Schema 仅作为提示词内容发送。

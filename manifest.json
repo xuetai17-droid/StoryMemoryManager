@@ -5,8 +5,9 @@
     "js": "index.js",
     "css": "style.css",
     "author": "Story Memory Manager contributors",
-    "version": "0.11.39",
-    "auto_update": false,
+    "version": "0.11.40",
+    "homePage": "https://github.com/xuetai17-droid/StoryMemoryManager",
+    "auto_update": true,
     "minimum_client_version": "1.18.0",
     "generate_interceptor": "storyMemoryManagerInterceptor"
 }

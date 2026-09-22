@@ -1,5 +1,5 @@
-// Story Memory Manager v0.11.39
-// profile API schema compatibility / compact mobile controls / failure-safe cursor
+// Story Memory Manager v0.11.40
+// compact JSON skeleton / preflight request guard / hard output cap / single-request failures
 // does not rewrite original chat JSONL
 
 const MODULE = 'story_memory_manager_v2';
@@ -32,8 +32,9 @@ const DEFAULTS = Object.freeze({
     // v0.9.3：总结模型通道
     summaryProvider: 'current',      // current | profile
     summaryProfileId: '',
-    summaryFallback: 'stop',         // stop | fallback
+    summaryFallback: 'stop',         // retained for settings compatibility; v0.11.40 never auto-falls back
     summaryMaxTokens: 4096,
+    summaryTransportPolicyV01140: 'compact_guarded_single_request',
 
     // v0.10.0
     safeMemoryInject: false,
@@ -72,8 +73,21 @@ function S() {
         }
         try { c.saveSettingsDebounced?.(); } catch (_) {}
     }
+    const upgradingToV01140 = !Object.hasOwn(c.extensionSettings[MODULE], 'summaryTransportPolicyV01140');
     for (const [k,v] of Object.entries(DEFAULTS)) {
         if (!Object.hasOwn(c.extensionSettings[MODULE], k)) c.extensionSettings[MODULE][k] = v;
+    }
+    // v0.11.40 migration: an independent summary failure must never trigger a
+    // second paid generation. Clamp legacy oversized output settings locally;
+    // Connection Profile/API credentials and the selected profile are untouched.
+    if (upgradingToV01140) {
+        c.extensionSettings[MODULE].summaryTransportPolicyV01140 = 'compact_guarded_single_request';
+        c.extensionSettings[MODULE].summaryFallback = 'stop';
+        c.extensionSettings[MODULE].summaryMaxTokens = Math.max(
+            512,
+            Math.min(6144, Number(c.extensionSettings[MODULE].summaryMaxTokens) || 4096)
+        );
+        try { c.saveSettingsDebounced?.(); } catch (_) {}
     }
     return c.extensionSettings[MODULE];
 }
@@ -4848,19 +4862,68 @@ function generationTextV01136(value) {
     return '';
 }
 
-// v0.11.39: Connection Profile backends do not share one structured-output
-// dialect. Gemini-compatible gateways reject ordinary JSON Schema unions such
-// as type:["string","null"] when a generic json_schema override is translated
-// into generationConfig.responseSchema. Deliver the complete schema as model
-// instructions instead; SMM still validates locally before committing data.
-function promptWithJsonSchemaV01139(prompt='', jsonSchema=null) {
+// v0.11.40: Connection Profile backends do not share one structured-output
+// dialect. Never attach a provider-specific response schema and never paste the
+// full descriptive JSON Schema into the prompt. A compact example skeleton is
+// enough to communicate the required shape; SMM still validates locally.
+const SMM_INPUT_TOKEN_LIMIT_V01140 = 42000;
+const SMM_INPUT_BYTE_LIMIT_V01140 = 160000;
+const SMM_PROFILE_OUTPUT_TOKEN_LIMIT_V01140 = 6144;
+
+function compactSchemaExampleV01140(node, depth=0) {
+    if (!node || typeof node !== 'object' || depth > 8) return null;
+    const rawType=Array.isArray(node.type) ? node.type.find(x=>x!=='null') : node.type;
+    if (rawType === 'object' || node.properties) {
+        const out={};
+        const props=node.properties && typeof node.properties==='object' ? node.properties : {};
+        const keys=Array.isArray(node.required) && node.required.length ? node.required : Object.keys(props);
+        for (const key of keys) if (Object.hasOwn(props,key)) out[key]=compactSchemaExampleV01140(props[key],depth+1);
+        return out;
+    }
+    if (rawType === 'array') return [compactSchemaExampleV01140(node.items||{},depth+1)];
+    if (Array.isArray(node.enum) && node.enum.length) return node.enum[0];
+    if (rawType === 'boolean') return false;
+    if (rawType === 'integer' || rawType === 'number') return 0;
+    if (Array.isArray(node.type) && node.type.includes('null')) return null;
+    return '';
+}
+
+function promptWithCompactJsonSkeletonV01140(prompt='', jsonSchema=null) {
+    const shape=jsonSchema ? compactSchemaExampleV01140(jsonSchema?.value||jsonSchema) : null;
     return [
-        jsonSchema ? '【必须遵守的输出 JSON Schema】' : '',
-        jsonSchema ? JSON.stringify(jsonSchema?.value||jsonSchema,null,2) : '',
-        jsonSchema ? '只输出符合上面结构的一个 JSON 对象；所有 required 字段都必须出现，没有内容时使用空数组、空对象或 null。不要输出 Markdown、代码围栏、前言或解释。' : '',
+        jsonSchema ? '【输出 JSON 骨架（仅示例结构，不是待填写正文）】' : '',
+        jsonSchema ? JSON.stringify(shape) : '',
+        jsonSchema ? '只输出同结构的一个 JSON 对象；骨架中的数组示例项用于展示元素字段，无内容时改为空数组。没有内容的对象用 {}，可空标量用 null。不要输出 Markdown、代码围栏、前言或解释。字段语义、枚举和事实规则以上文任务要求为准。' : '',
         jsonSchema ? '---' : '',
         String(prompt || '').trim()
     ].filter(Boolean).join('\n\n');
+}
+
+function requestSizeStatsV01140(messages=[]) {
+    const text=(Array.isArray(messages)?messages:[]).map(x=>String(x?.content||'')).join('\n');
+    let ascii=0, nonAscii=0;
+    for (const ch of text) {
+        if (ch.codePointAt(0)<=0x7f) ascii++;
+        else nonAscii++;
+    }
+    const estimatedTokens=Math.ceil(ascii/4 + nonAscii*1.1 + 64);
+    const bytes=typeof TextEncoder==='function' ? new TextEncoder().encode(text).length : text.length*3;
+    return {characters:text.length,bytes,estimatedTokens};
+}
+
+function assertRequestSizeV01140(messages,label='总结请求') {
+    const stats=requestSizeStatsV01140(messages);
+    if (stats.estimatedTokens>SMM_INPUT_TOKEN_LIMIT_V01140 || stats.bytes>SMM_INPUT_BYTE_LIMIT_V01140) {
+        const e=new Error(
+            `${label}在发送前已被本地阻止：预计输入约 ${stats.estimatedTokens.toLocaleString()} tokens、${stats.bytes.toLocaleString()} bytes，超过安全上限。`+
+            '本次未调用 API、未扣费；未写入记忆、未推进游标，原楼层仍保留。请缩小每批楼层数后重试。'
+        );
+        e.name='StoryMemoryRequestTooLargeError';
+        e.isStoryMemoryRequestTooLarge=true;
+        e.smmRequestStatsV01140=stats;
+        throw e;
+    }
+    return stats;
 }
 
 async function generateCurrentQuietV01136({prompt='', systemPrompt='', jsonSchema=null}={}) {
@@ -4868,13 +4931,14 @@ async function generateCurrentQuietV01136({prompt='', systemPrompt='', jsonSchem
     if (!context || typeof context.generateQuietPrompt !== 'function') {
         throw new Error('当前 SillyTavern 未提供 generateQuietPrompt，无法复用当前聊天模型进行静默总结。');
     }
-    const requestPrompt=promptWithJsonSchemaV01139(prompt,jsonSchema);
+    const requestPrompt=promptWithCompactJsonSkeletonV01140(prompt,jsonSchema);
     const merged = [
         String(systemPrompt || '').trim(),
         String(systemPrompt || '').trim() ? '---' : '',
         requestPrompt
     ].filter(Boolean).join('\n\n');
     if (!merged) throw new Error('总结提示词为空');
+    assertRequestSizeV01140([{role:'user',content:merged}],'当前模型总结请求');
     const result = await context.generateQuietPrompt({quietPrompt: merged});
     const text = generationTextV01136(result);
     if (!String(text).trim()) throw new Error('当前聊天模型返回为空');
@@ -4905,7 +4969,7 @@ async function smmGenerateV093({
     try {
         const Service = await getSmmConnectionServiceV093();
 
-        const profilePrompt=promptWithJsonSchemaV01139(prompt,jsonSchema);
+        const profilePrompt=promptWithCompactJsonSkeletonV01140(prompt,jsonSchema);
         const messages = [
             ...(systemPrompt
                 ? [{role:'system', content:String(systemPrompt)}]
@@ -4913,10 +4977,14 @@ async function smmGenerateV093({
             {role:'user', content:profilePrompt}
         ];
 
-        const maxTokens = Math.max(
-            512,
+        const maxTokens = Math.max(512,Math.min(
+            SMM_PROFILE_OUTPUT_TOKEN_LIMIT_V01140,
             Number(responseLength || s.summaryMaxTokens || 4096)
-        );
+        ));
+
+        // This check runs before Service.sendRequest. A rejected oversized batch
+        // therefore cannot consume provider credits and remains retryable.
+        const requestStats=assertRequestSizeV01140(messages,'独立总结 API 请求');
 
         const profile = typeof Service.getProfile === 'function' ? Service.getProfile(profileId) : null;
         // Keep transport metadata for diagnostics, but never attach a generic
@@ -4927,13 +4995,15 @@ async function smmGenerateV093({
         try { selectedApiMap = typeof Service.validateProfile === 'function' ? Service.validateProfile(profile) : null; } catch (_) {}
         const overridePayload = {};
         if (jsonSchema) {
-            console.debug('[StoryMemory] v0.11.39 summary transport', {
+            console.debug('[StoryMemory] v0.11.40 summary transport', {
                 profileId,
                 profileMode: profile?.mode || null,
                 selected: selectedApiMap?.selected || null,
                 source: selectedApiMap?.source || null,
                 structuredJson: false,
-                schemaDelivery: 'prompt_only'
+                schemaDelivery: 'compact_skeleton',
+                requestStats,
+                maxTokens
             });
         }
 
@@ -4955,8 +5025,8 @@ async function smmGenerateV093({
             overridePayload
         );
 
-        // v0.11.39: independent profiles receive the schema in the prompt and are
-        // validated locally, avoiding provider-specific response_schema failures.
+        // v0.11.40: independent profiles receive only a compact JSON skeleton and
+        // are validated locally, avoiding provider-specific response_schema failures.
         // v0.11.23: ConnectionManager's extracted response may legally separate
         // final content and reasoning. Some reasoning-capable profiles occasionally
         // return an empty `content` while putting the requested JSON in `reasoning`.
@@ -5029,22 +5099,13 @@ async function smmGenerateV093({
         return String(text);
 
     } catch (e) {
-        // A Cloudflare 524 is an upstream timeout, not a profile configuration
-        // problem. Never turn it into a second paid request through fallback.
+        // v0.11.40: every failure is terminal for this batch. 400, 524, timeout,
+        // empty/non-JSON responses and local preflight rejection must never turn
+        // into an automatic second paid generation through another connection.
+        if(e?.isStoryMemoryRequestTooLarge) throw e;
         if(isUpstreamGatewayFailureV01129(e)) throw upstreamGatewayErrorV01129(e,'独立总结 Profile');
-        const fallback = String(s.summaryFallback || 'stop');
-
-        if (fallback === 'fallback') {
-            console.warn(
-                '[StoryMemory] profile summary failed; fallback to current model',
-                e
-            );
-
-            return await generateCurrentQuietV01136({prompt, systemPrompt, jsonSchema});
-        }
-
         throw new Error(
-            '独立总结 Profile 请求失败：' + (e?.message || e)
+            '独立总结 Profile 请求失败；未自动重试或回退：' + (e?.message || e)
         );
     }
 }
@@ -5579,7 +5640,7 @@ ${messagesText(start,endExclusive)}
 
 上一次校验失败原因（仅用于避免重复格式错误）：${String(reason||'').slice(0,800)}`;
 
-    let raw=null, parsed=null, firstErr=null;
+    let raw=null, parsed=null;
     try{
         raw=await withSmmTimeout(
             smmGenerateV093({systemPrompt:'你是剧情事实抽取器。严格服从 source 楼层约束，不进行文学创作。',prompt,jsonSchema:timelineOnlySchemaV0113(),responseLength:2200}),
@@ -5588,21 +5649,7 @@ ${messagesText(start,endExclusive)}
         );
         parsed=parseJSON(raw);
     }catch(e){
-        if(isSmmTimeout(e)) throw e;
-        firstErr=e;
-    }
-    if(!parsed){
-        try{
-            raw=await withSmmTimeout(
-                smmGenerateV093({systemPrompt:'你是剧情事实抽取器。只返回合法 JSON。',prompt:prompt+'\n再次强调：只返回合法 JSON，timeline 至少一条。',responseLength:2200}),
-                SMM_GENERATE_TIMEOUT_MS,
-                `timeline source 兼容修复 #${start}-#${endExclusive-1}`
-            );
-            parsed=parseJSON(raw);
-        }catch(e){
-            if(isSmmTimeout(e)) throw e;
-            throw new Error(`timeline 专用重试未获得合法 JSON：第一次 ${firstErr?.message||'无'}；第二次 ${e?.message||e}`);
-        }
+        throw new Error(`timeline 专用请求未获得合法 JSON；未自动重试：${e?.message||e}`);
     }
     if(!parsed || !Array.isArray(parsed.timeline)) throw new Error('timeline 专用重试未返回 timeline 数组');
     normalizeTimelineSourcesV0113(parsed,start,endExclusive);
@@ -5762,36 +5809,10 @@ let HISTORY_STOP_REQUESTED = false;
 let GAP_REPAIR_RUNNING_V0112 = false;
 
 async function summarizeGapRangeAdaptiveV0113(start,endExclusive,depth=0) {
-    try {
-        return await summarizeRange(start,endExclusive,{save:false});
-    } catch (e) {
-        const span=endExclusive-start;
-        const sourceFailure=!!(e?.smmBatchCommitFailureV0113 || e?.smmBatchCommitFailure ||
-            /timeline|source|可追溯|校验失败/i.test(String(e?.message||'')));
-        if (!sourceFailure || span<=2 || depth>=5) throw e;
-
-        // Split on message boundaries. Prefer an even boundary so a user/assistant
-        // pair is less likely to be torn apart, but never leave an empty half.
-        let mid=start+Math.floor(span/2);
-        if ((mid-start)%2!==0 && mid+1<endExclusive) mid++;
-        if (mid<=start || mid>=endExclusive) mid=start+Math.floor(span/2);
-        if (mid<=start || mid>=endExclusive) throw e;
-
-        const mem=M();
-        mem.audit=Array.isArray(mem.audit)?mem.audit:[];
-        mem.audit.push({
-            at:new Date().toISOString(),
-            type:'gap_batch_split_v0113',
-            range:[start,endExclusive-1],
-            split:[[start,mid-1],[mid,endExclusive-1]],
-            reason:String(e?.message||e).slice(0,1000)
-        });
-        if(mem.audit.length>50) mem.audit=mem.audit.slice(-50);
-
-        await summarizeGapRangeAdaptiveV0113(start,mid,depth+1);
-        await summarizeGapRangeAdaptiveV0113(mid,endExclusive,depth+1);
-        return {split:true,start,endExclusive};
-    }
+    // v0.11.40: the caller chooses the batch. A malformed/source-invalid result
+    // no longer triggers automatic splitting, because that silently turns one
+    // failed paid request into two or more paid requests.
+    return await summarizeRange(start,endExclusive,{save:false});
 }
 
 
@@ -9017,7 +9038,7 @@ async function repairNeedsAiOnlyV01113(){
     const chunks=ranges.flatMap(([a,b])=>pairSafeChunksV01113(a,b,Math.max(8,Number(S().batchMessages)||30)));
     if(!confirm(
         `只把 0 API 判定为“需要 AI”的 ${q0.indexes.length} 楼送给总结模型。\n\n`+
-        `可靠楼层不会再次发送；当前共 ${ranges.length} 个连续 needsAI 段，预计最多 ${chunks.length} 个基础批次（source 失败时可能自动拆分/重试）。\n`+
+        `可靠楼层不会再次发送；当前共 ${ranges.length} 个连续 needsAI 段，预计最多 ${chunks.length} 个基础批次。任何批次失败都会立即停止，不自动拆分或重试。\n`+
         '每个成功段会立即安全提交；若后续 API 失败，已完成段不会回滚，因此再次运行会自动跳过已付费完成的楼层。继续吗？'
     )) return;
 
@@ -9830,7 +9851,7 @@ function stat() {
 function panelHTML() {
     return `<div id="${PANEL_ID}" class="smm2-hidden">
       <div class="smm2-card">
-        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.39</span></div><button id="smm2_close">×</button></div>
+        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.40</span></div><button id="smm2_close">×</button></div>
         <div id="smm2_stats" class="smm2-stats"></div>
         <div class="smm2-grid">
           <button id="smm2_new">总结新增</button>
@@ -12007,17 +12028,13 @@ function nativeManagerHTML() {
               先把 SillyTavern 切到想用于总结的 API / 模型，再点此按钮；创建后可把主聊天连接切回原模型。
             </div>
 
-            <label id="smm93_fallback_row">
-              独立 Profile 失败时
-              <select id="smm93_summary_fallback">
-                <option value="stop">暂停总结，不回退</option>
-                <option value="fallback">回退当前聊天模型</option>
-              </select>
-            </label>
+            <div id="smm93_fallback_row" class="smm2-note">
+              独立 Profile 任意失败时立即停止；不会自动重试或回退到其他模型，也不会推进游标。
+            </div>
 
             <label>
               独立 Profile 最大输出 Token
-              <input id="smm93_summary_tokens" type="number" min="512" max="32768" step="256">
+              <input id="smm93_summary_tokens" type="number" min="512" max="6144" step="256">
             </label>
 
             <div id="smm93_summary_status" class="smm2-note"></div>
@@ -12119,7 +12136,7 @@ function bindNativeManager() {
         }
 
         if(tokensEl){
-            tokensEl.value=Math.max(512,Number(settings.summaryMaxTokens||4096));
+            tokensEl.value=Math.max(512,Math.min(SMM_PROFILE_OUTPUT_TOKEN_LIMIT_V01140,Number(settings.summaryMaxTokens||4096)));
         }
 
         const usingProfile=String(settings.summaryProvider||'current')==='profile';
@@ -12190,7 +12207,7 @@ function bindNativeManager() {
         tokensEl.onchange=e=>{
             S().summaryMaxTokens=Math.max(
                 512,
-                Math.min(32768,Number(e.target.value)||4096)
+                Math.min(SMM_PROFILE_OUTPUT_TOKEN_LIMIT_V01140,Number(e.target.value)||4096)
             );
             saveSettings();
             tokensEl.value=S().summaryMaxTokens;
@@ -12683,7 +12700,7 @@ function installNativeExtensionEntry() {
 
         wrap.innerHTML = `
           <div class="inline-drawer-toggle inline-drawer-header">
-            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.39</span></div>
+            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.40</span></div>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
           </div>
           <div class="inline-drawer-content">
@@ -12931,7 +12948,7 @@ function initializeExtension() {
     try {
         installUI();
         refresh();
-        console.log('[StoryMemory] v0.11.39 loaded successfully');
+        console.log('[StoryMemory] v0.11.40 loaded successfully');
     } catch (e) {
         console.error('[StoryMemory] UI initialization failed', e);
     }
