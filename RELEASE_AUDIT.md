@@ -1,4 +1,11 @@
-# v0.11.47 HYBRID Release Audit
+# v0.11.48 HYBRID Release Audit
+
+## v0.11.48 30-message catch-up audit
+
+- Historical catch-up batch size is fixed at 30 while routine automatic batches remain 10.
+- A 147-message snapshot resolves as 30 + 30 + 30 + 30 + 27.
+- Existing per-chat snapshot and checkpoint metadata from v0.11.46/v0.11.47 are reused without reset.
+- Disabled cost-protection behavior, one-request-per-click, transaction boundaries and automatic pause remain unchanged.
 
 ## v0.11.47 disabled cost-protection audit
 
