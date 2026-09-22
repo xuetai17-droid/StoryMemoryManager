@@ -1,5 +1,5 @@
-// Story Memory Manager v0.11.44
-// Role-card recap clock authority / message timestamp isolation
+// Story Memory Manager v0.11.46
+// Repeated 50-message historical catch-up / 10-message automatic batches
 // does not rewrite original chat JSONL
 
 const MODULE = 'story_memory_manager_v2';
@@ -43,6 +43,10 @@ const DEFAULTS = Object.freeze({
     summaryTransportPolicyV01142: 'direct_external_api_verified_single_request',
     summaryTransportPolicyV01143: 'fetch_models_then_select',
     recapClockPolicyV01144: 'assistant_recap_date_time_before_message_timestamp',
+    summaryBatchPolicyV01145: 'one_time_manual_50_then_auto_10',
+    oneTimeManualBatch50V01145: true,
+    autoBatchMessagesV01145: 10,
+    summaryBatchPolicyV01146: 'manual_history_50_until_snapshot_then_auto_10',
     summaryExternalApiUrl: '',
     summaryExternalApiKey: '',
     summaryExternalApiModel: '',
@@ -97,6 +101,8 @@ function S() {
     const upgradingToV01142 = !Object.hasOwn(c.extensionSettings[MODULE], 'summaryTransportPolicyV01142');
     const upgradingToV01143 = !Object.hasOwn(c.extensionSettings[MODULE], 'summaryTransportPolicyV01143');
     const upgradingToV01144 = !Object.hasOwn(c.extensionSettings[MODULE], 'recapClockPolicyV01144');
+    const upgradingToV01145 = !Object.hasOwn(c.extensionSettings[MODULE], 'summaryBatchPolicyV01145');
+    const upgradingToV01146 = !Object.hasOwn(c.extensionSettings[MODULE], 'summaryBatchPolicyV01146');
     for (const [k,v] of Object.entries(DEFAULTS)) {
         if (!Object.hasOwn(c.extensionSettings[MODULE], k)) c.extensionSettings[MODULE][k] = v;
     }
@@ -148,6 +154,19 @@ function S() {
         c.extensionSettings[MODULE].summaryExternalModelsFetchedAt='';
         c.extensionSettings[MODULE].summaryExternalVerifiedFingerprint='';
         c.extensionSettings[MODULE].summaryExternalVerifiedAt='';
+        try { c.saveSettingsDebounced?.(); } catch (_) {}
+    }
+    if (upgradingToV01145) {
+        c.extensionSettings[MODULE].summaryBatchPolicyV01145='one_time_manual_50_then_auto_10';
+        c.extensionSettings[MODULE].oneTimeManualBatch50V01145=true;
+        c.extensionSettings[MODULE].autoBatchMessagesV01145=10;
+        c.extensionSettings[MODULE].triggerMessages=10;
+        try { c.saveSettingsDebounced?.(); } catch (_) {}
+    }
+    if (upgradingToV01146) {
+        c.extensionSettings[MODULE].summaryBatchPolicyV01146='manual_history_50_until_snapshot_then_auto_10';
+        c.extensionSettings[MODULE].autoBatchMessagesV01145=10;
+        c.extensionSettings[MODULE].triggerMessages=10;
         try { c.saveSettingsDebounced?.(); } catch (_) {}
     }
     if (upgradingToV01144) {
@@ -5221,7 +5240,7 @@ async function generateViaExternalApiV01142({prompt='',systemPrompt='',jsonSchem
         rejectGatewayPayloadV01129(text,'直接外部 API');
         return String(text);
     }catch(e){
-        if(e?.isStoryMemoryRequestTooLarge||e?.isStoryMemoryExternalNotVerified||e?.isStoryMemoryExternalCircuitOpen) throw e;
+        if(e?.isStoryMemoryRequestTooLarge||e?.isStoryMemoryRequestCancelled||e?.isStoryMemoryExternalNotVerified||e?.isStoryMemoryExternalCircuitOpen) throw e;
         lockExternalApiV01142('直接外部 API 请求失败',e);
         if(isUpstreamGatewayFailureV01129(e)) throw upstreamGatewayErrorV01129(e,'直接外部 API');
         throw new Error(`直接外部 API 请求失败，费用保护已锁定；未自动重试：${e?.message||e}`);
@@ -5310,6 +5329,11 @@ function generationTextV01136(value) {
 const SMM_INPUT_TOKEN_LIMIT_V01140 = 30000;
 const SMM_INPUT_BYTE_LIMIT_V01140 = 120000;
 const SMM_PROFILE_OUTPUT_TOKEN_LIMIT_V01140 = 3072;
+// v0.11.46: active only for explicitly confirmed 50-message historical
+// catch-up batches. Routine batches retain the original 30k safety guard.
+const SMM_HISTORY_50_TOKEN_LIMIT_V01146 = 120000;
+const SMM_HISTORY_50_BYTE_LIMIT_V01146 = 480000;
+let SMM_ACTIVE_HISTORY_BATCH_V01146 = null;
 
 function compactSchemaExampleV01140(node, depth=0) {
     if (!node || typeof node !== 'object' || depth > 8) return null;
@@ -5354,7 +5378,10 @@ function requestSizeStatsV01140(messages=[]) {
 
 function assertRequestSizeV01140(messages,label='总结请求') {
     const stats=requestSizeStatsV01140(messages);
-    if (stats.estimatedTokens>SMM_INPUT_TOKEN_LIMIT_V01140 || stats.bytes>SMM_INPUT_BYTE_LIMIT_V01140) {
+    const large50=!!SMM_ACTIVE_HISTORY_BATCH_V01146?.history50;
+    const tokenLimit=large50?SMM_HISTORY_50_TOKEN_LIMIT_V01146:SMM_INPUT_TOKEN_LIMIT_V01140;
+    const byteLimit=large50?SMM_HISTORY_50_BYTE_LIMIT_V01146:SMM_INPUT_BYTE_LIMIT_V01140;
+    if (stats.estimatedTokens>tokenLimit || stats.bytes>byteLimit) {
         const e=new Error(
             `${label}在发送前已被本地阻止：预计输入约 ${stats.estimatedTokens.toLocaleString()} tokens、${stats.bytes.toLocaleString()} bytes，超过安全上限。`+
             '本次未调用 API、未扣费；未写入记忆、未推进游标，原楼层仍保留。请缩小每批楼层数后重试。'
@@ -5363,6 +5390,22 @@ function assertRequestSizeV01140(messages,label='总结请求') {
         e.isStoryMemoryRequestTooLarge=true;
         e.smmRequestStatsV01140=stats;
         throw e;
+    }
+    if(large50&&!SMM_ACTIVE_HISTORY_BATCH_V01146.confirmed){
+        const ctx=SMM_ACTIVE_HISTORY_BATCH_V01146;
+        const accepted=confirm(
+            `准备发送历史补总结（本批实际 ${ctx.count} 条，#${ctx.start}-#${ctx.end-1}）。\n\n`+
+            `预计输入：${stats.estimatedTokens.toLocaleString()} tokens / ${stats.bytes.toLocaleString()} bytes。\n\n`+
+            `历史范围还剩 ${ctx.remainingBefore} 条（本批后预计剩 ${Math.max(0,ctx.remainingBefore-ctx.count)} 条）。\n\n`+
+            '该请求可高于普通 30,000 token 安全线。接口可能在已经计费后返回 520/524；插件不会自动重试，失败也不会写入记忆或推进游标。\n\n确定发送这一次付费请求吗？'
+        );
+        if(!accepted){
+            const e=new Error('你已取消本次历史补总结。本次未调用 API、未扣费，游标未推进。');
+            e.name='StoryMemoryRequestCancelledError';
+            e.isStoryMemoryRequestCancelled=true;
+            throw e;
+        }
+        ctx.confirmed=true;
     }
     return stats;
 }
@@ -5551,7 +5594,7 @@ async function smmGenerateV093({
         // v0.11.40: every failure is terminal for this batch. 400, 524, timeout,
         // empty/non-JSON responses and local preflight rejection must never turn
         // into an automatic second paid generation through another connection.
-        if(e?.isStoryMemoryRequestTooLarge) throw e;
+        if(e?.isStoryMemoryRequestTooLarge||e?.isStoryMemoryRequestCancelled) throw e;
         if(e?.isStoryMemoryProfileCircuitOpen) throw e;
         if(requestStarted) lockSummaryProfileV01141('独立 API 请求失败',e);
         if(isUpstreamGatewayFailureV01129(e)) throw upstreamGatewayErrorV01129(e,'独立总结 Profile');
@@ -6207,7 +6250,7 @@ ${messagesText(start, end)}
         );
         rejectGatewayPayloadV01129(raw,'静默总结');
     } catch (e) {
-        if(usingPaidProviderV01142(S()) && !e?.isStoryMemoryRequestTooLarge && !e?.isStoryMemoryProfileCircuitOpen && !e?.isStoryMemoryExternalCircuitOpen && !e?.isStoryMemoryExternalNotVerified){
+        if(usingPaidProviderV01142(S()) && !e?.isStoryMemoryRequestTooLarge && !e?.isStoryMemoryRequestCancelled && !e?.isStoryMemoryProfileCircuitOpen && !e?.isStoryMemoryExternalCircuitOpen && !e?.isStoryMemoryExternalNotVerified){
             lockSelectedPaidProviderV01142(isSmmTimeout(e)?'独立 API 请求超时':'独立 API 请求失败',e);
         }
         if (isUpstreamGatewayFailureV01129(e)) throw upstreamGatewayErrorV01129(e,'静默总结');
@@ -10178,6 +10221,46 @@ async function runRequeueIncorrectLocalMemoryV01136() {
     }
 }
 
+function historyCatchupStateV01146(mem=M()) {
+    const state=mem?.history_catchup_v01146;
+    if(!state||typeof state!=='object') return null;
+    const target=Number(state.target_index);
+    if(!Number.isInteger(target)||target<0) return null;
+    return state;
+}
+
+function activeHistoryCatchupV01146(mem=M()) {
+    const state=historyCatchupStateV01146(mem);
+    if(!state||state.status!=='active') return null;
+    const next=Math.max(0,Number(mem?.last_processed_index??-1)+1);
+    return next<=Number(state.target_index)?state:null;
+}
+
+function beginHistoryCatchupV01146(mem,start,chatLength) {
+    const prior=historyCatchupStateV01146(mem);
+    if(prior) return prior.status==='active'?prior:null;
+    const target=Math.max(-1,Number(chatLength||0)-1);
+    if(target<start) return null;
+    mem.history_catchup_v01146={
+        status:'active',
+        start_index:start,
+        target_index:target,
+        next_index:start,
+        created_at:new Date().toISOString(),
+        completed_at:null
+    };
+    return mem.history_catchup_v01146;
+}
+
+function completeHistoryCatchupV01146(mem=M()) {
+    const state=historyCatchupStateV01146(mem);
+    if(!state||state.status!=='active') return false;
+    state.status='completed';
+    state.next_index=Number(state.target_index)+1;
+    state.completed_at=new Date().toISOString();
+    return true;
+}
+
 async function summarizeNew(force=false) {
     if (BUSY) return;
     const c = C(), s = S(), mem = M(), chat = c.chat || [];
@@ -10190,6 +10273,9 @@ async function summarizeNew(force=false) {
     const deferredBefore=localSummaryModeV01129()?localDeferredCountV01133(mem):0;
     if (!force && pending < Math.max(1, Number(s.triggerMessages)||8) && deferredBefore<=0) return;
     if (pending <= 0 && deferredBefore<=0) return toast('当前没有新的消息，也没有待补录楼层。');
+    if(usingPaidProvider&&!force&&activeHistoryCatchupV01146(mem)){
+        return toast('历史补总结尚未完成。请手动点击按钮继续每批最多50条；历史完成后才恢复每10条自动总结。','warning');
+    }
 
     BUSY = true;
     try {
@@ -10210,14 +10296,48 @@ async function summarizeNew(force=false) {
         }
 
         let pos = start;
-        // Independent profiles are paid and may sit behind fragile gateways.
-        // Cap them to six messages and process exactly one paid batch per click.
+        const storedHistoryState=historyCatchupStateV01146(mem);
+        if(storedHistoryState?.status==='active'&&pos>Number(storedHistoryState.target_index)){
+            completeHistoryCatchupV01146(mem);
+            await saveMeta();
+        }
+        let historyState=activeHistoryCatchupV01146(mem);
+        if(usingPaidProvider&&force&&!historyCatchupStateV01146(mem)){
+            historyState=beginHistoryCatchupV01146(mem,start,chat.length);
+            if(historyState) await saveMeta();
+        }
+
+        // The historical target is a per-chat snapshot. New messages arriving
+        // during catch-up are excluded and enter the later 10-message routine.
         const configuredBatch=Math.max(4,Number(s.batchMessages)||30);
-        const batch=usingPaidProvider?Math.min(6,configuredBatch):configuredBatch;
+        const history50=usingPaidProvider&&force&&!!historyState&&historyState.status==='active'&&pos<=Number(historyState.target_index);
+        const paidRoutineBatch=Math.max(1,Number(s.autoBatchMessagesV01145)||10);
+        const batch=history50?50:(usingPaidProvider?paidRoutineBatch:configuredBatch);
+        let historyRemainingAfter=null;
+        let historyCompletedNow=false;
         while (pos < chat.length) {
-            const end = Math.min(chat.length, pos + batch);
-            await summarizeRangeConfiguredV01129(pos, end);
+            const historyTarget=history50?Number(historyState.target_index):null;
+            const end = history50
+                ? Math.min(chat.length,historyTarget+1,pos+batch)
+                : Math.min(chat.length,pos+batch);
+            const remainingBefore=history50?Math.max(0,historyTarget-pos+1):null;
+            SMM_ACTIVE_HISTORY_BATCH_V01146=history50?{
+                history50:true,start:pos,end,count:end-pos,remainingBefore,confirmed:false
+            }:null;
+            try{
+                await summarizeRangeConfiguredV01129(pos, end);
+            }finally{
+                SMM_ACTIVE_HISTORY_BATCH_V01146=null;
+            }
             pos = end;
+            if(history50){
+                historyState.next_index=end;
+                historyRemainingAfter=Math.max(0,historyTarget-end+1);
+                if(historyRemainingAfter===0){
+                    historyCompletedNow=completeHistoryCatchupV01146(mem);
+                }
+                await saveMeta();
+            }
             refresh();
             if (!force || usingPaidProvider) break;
         }
@@ -10231,7 +10351,13 @@ async function summarizeNew(force=false) {
         if(backfill){
             toast(`剧情记忆已更新（0 API）：旧楼层新增 ${backfill.added} 条时间线，仍待人工/AI ${backfill.remaining} 楼。`,'success');
         }else{
-            toast(localSummaryModeV01129()?'剧情记忆已更新（0 API）。':'剧情记忆已更新（AI）。','success');
+            toast(localSummaryModeV01129()?'剧情记忆已更新（0 API）。':(
+                history50
+                    ? (historyCompletedNow
+                        ? '历史待处理范围已全部总结完成；后续新增剧情每10条自动总结。'
+                        : `本批历史总结成功；历史范围还剩 ${historyRemainingAfter} 条，请再次手动点击继续。`)
+                    : '剧情记忆已更新（AI）。'
+            ),'success');
         }
     } catch(e) {
         console.error('[StoryMemory] summarize failed', e);
@@ -10350,7 +10476,7 @@ function stat() {
 function panelHTML() {
     return `<div id="${PANEL_ID}" class="smm2-hidden">
       <div class="smm2-card">
-        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.44</span></div><button id="smm2_close">×</button></div>
+        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.46</span></div><button id="smm2_close">×</button></div>
         <div id="smm2_stats" class="smm2-stats"></div>
         <div class="smm2-grid">
           <button id="smm2_new">总结新增</button>
@@ -12562,7 +12688,7 @@ function nativeManagerHTML() {
               手动解除独立 API 费用锁定
             </button>
             <div class="smm2-note">
-              独立 API 每次点击最多发送 1 个付费批次，且每批最多 6 条消息。发生任何请求、解析或校验失败后会立即锁定；直接 API 需重新通过连接检查。
+              第一次手动总结会锁定安装时尚未处理的历史范围；以后每次手动点击最多处理 50 条，直到该范围全部完成。历史完成后，新增剧情固定每 10 条自动总结一次。每批发送前均显示准确估算并确认；任何失败都不会自动重试或推进游标。
             </div>
           </div>
         </details>
@@ -12593,7 +12719,7 @@ function nativeManagerHTML() {
             </label>
 
             <label>
-              每批最多消息数
+              非独立 API 每批最多消息数
               <input id="smm2_native_batch" type="number" min="4" max="60">
             </label>
 
@@ -13267,9 +13393,15 @@ function refreshNative() {
         modeBadge.dataset.mode=localMode?'local':(usingPaidSummary?'profile':'ai');
     }
     const newBtn=document.getElementById('smm2_native_new');
+    const catchupState=activeHistoryCatchupV01146(M());
+    const catchupEligible=usingPaidSummary&&!historyCatchupStateV01146(M())&&stat().pending>0;
     if(newBtn) newBtn.textContent=localMode
         ? '总结新增（实验性 0 API）'
-        : ((summaryProfileLocked||externalSummaryLocked)?'独立 API 未就绪（未调用）':(usingExternalSummary?'总结新增（直接 API · 单批）':(usingSummaryProfile?'总结新增（独立 API · 单批）':'总结新增（当前模型）')));
+        : ((summaryProfileLocked||externalSummaryLocked)
+            ? '独立 API 未就绪（未调用）'
+            : ((catchupState||catchupEligible)
+                ? '继续历史补总结（最多50条）'
+                : (usingExternalSummary?'总结新增（直接 API · 10条）':(usingSummaryProfile?'总结新增（独立 API · 10条）':'总结新增（当前模型）'))));
     const requeueBtn=document.getElementById('smm136_native_requeue');
     if(requeueBtn) requeueBtn.style.display=hasIncorrectLocalMemoryV01136(M())?'':'none';
     const deferredCount=localDeferredCountV01133(M());
@@ -13345,7 +13477,7 @@ function installNativeExtensionEntry() {
 
         wrap.innerHTML = `
           <div class="inline-drawer-toggle inline-drawer-header">
-            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.44</span></div>
+            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.46</span></div>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
           </div>
           <div class="inline-drawer-content">
@@ -13488,6 +13620,7 @@ function rebuildCheckpointHTMLV0105(mem=M(), total=(C().chat||[]).length) {
 function statsHTMLV0105() {
     const st = stat();
     const mem = M();
+    const catchup=activeHistoryCatchupV01146(mem);
     const hidden = getSmmAutoHiddenInfoV0101();
     const date = mem.current_story_date || '未建立';
     const people = Object.keys(mem.characters || {}).length;
@@ -13503,6 +13636,7 @@ function statsHTMLV0105() {
         `<div class="smm105-stat-line"><b>剧情：</b>${esc(date)}　${esc(st.time)}</div>`,
         `<div class="smm105-stat-line"><b>总结方式：</b>${localSummaryModeV01129()?'实验性 0 API 规则抽取':(String(S().summaryProvider||'current')==='external'?'直接外部 API · 单次':(String(S().summaryProvider||'current')==='profile'?'独立总结 Profile · 单次':'当前聊天模型 · 静默单次'))}</div>`,
         `<div class="smm105-stat-line"><b>扫描：</b>${st.done}/${st.total}　待扫描 ${st.pending}　待补录 ${st.deferred}　已隐藏 ${hidden.count}</div>`,
+        catchup ? `<div class="smm105-stat-line"><b>历史补总结：</b>进行中　剩余 ${Math.max(0,Number(catchup.target_index)-Number(mem.last_processed_index??-1))} 条　每次手动最多50条</div>` : '',
         `<div class="smm105-stat-line"><b>记忆：</b>时间线 ${st.timeline}　人物 ${people}　NPC ${npcs}　关系 ${relations}　锚点 ${anchors}　阶段 ${(mem.stage_summaries||[]).length}</div>`,
         `<div class="smm105-stat-line"><b>连续性：</b>${st.deferred ? `⚠ ${st.deferred} 楼已扫描但尚未形成记忆` : (coverageGapsV0112.length ? `⚠ 时间线断档 #${coverageGapsV0112[0].start}-#${coverageGapsV0112[0].end}` : (continuityNeedsReview ? '后台有待核查项' : '正常'))}</div>`,
         `<div class="smm105-stat-line"><b>历史重建：</b>${esc(rebuildStatusLabelV0105(mem))}</div>`,
@@ -13528,9 +13662,14 @@ function refresh() {
     document.getElementById('smm2_trigger').value=s.triggerMessages;
     document.getElementById('smm2_batch').value=s.batchMessages;
     document.getElementById('smm2_start').value=M().story_start||'';
+    const paidLegacy=usingPaidProviderV01142(s);
+    const catchupLegacy=activeHistoryCatchupV01146(M());
+    const catchupEligibleLegacy=paidLegacy&&!historyCatchupStateV01146(M())&&stat().pending>0;
     document.getElementById('smm2_new').textContent=localSummaryModeV01129()
         ? '总结新增（实验性 0 API）'
-        : (String(s.summaryProvider||'current')==='external'?'总结新增（直接 API）':(String(s.summaryProvider||'current')==='profile'?'总结新增（独立 API）':'总结新增（当前模型）'));
+        : ((catchupLegacy||catchupEligibleLegacy)
+            ? '继续历史补总结（最多50条）'
+            : (String(s.summaryProvider||'current')==='external'?'总结新增（直接 API · 10条）':(String(s.summaryProvider||'current')==='profile'?'总结新增（独立 API · 10条）':'总结新增（当前模型）')));
     const requeueBtn=document.getElementById('smm136_requeue');
     if(requeueBtn) requeueBtn.style.display=hasIncorrectLocalMemoryV01136(M())?'':'none';
     const deferredCount=localDeferredCountV01133(M());
@@ -13543,8 +13682,12 @@ function refresh() {
 
 async function maybeAuto() {
     const s=S(); if (!s.enabled || !s.autoSummarize || BUSY) return;
+    if(usingPaidProviderV01142(s)&&activeHistoryCatchupV01146(M())) return;
     const st=stat();
-    if (st.pending >= Math.max(1,Number(s.triggerMessages)||8)) await summarizeNew(false);
+    const threshold=usingPaidProviderV01142(s)
+        ? Math.max(1,Number(s.autoBatchMessagesV01145)||10)
+        : Math.max(1,Number(s.triggerMessages)||8);
+    if (st.pending >= threshold) await summarizeNew(false);
 }
 
 
@@ -13593,7 +13736,7 @@ function initializeExtension() {
     try {
         installUI();
         refresh();
-        console.log('[StoryMemory] v0.11.44 loaded successfully');
+        console.log('[StoryMemory] v0.11.46 loaded successfully');
     } catch (e) {
         console.error('[StoryMemory] UI initialization failed', e);
     }

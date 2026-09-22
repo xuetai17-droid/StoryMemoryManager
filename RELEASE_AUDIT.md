@@ -1,4 +1,22 @@
-# v0.11.44 HYBRID Release Audit
+# v0.11.46 HYBRID Release Audit
+
+## v0.11.46 historical catch-up audit
+
+- The first manual paid action snapshots the current chat's pending end index into chat metadata.
+- While the snapshot remains active, each manual click selects at most 50 messages and performs one completion request.
+- A 147-message snapshot resolves as 50 + 50 + 47; only successful transactional commits advance the stored checkpoint.
+- Messages appended after the snapshot are excluded from historical batches.
+- Automatic paid generation is paused during catch-up and resumes at 10 pending messages only after the snapshot is complete.
+- Cancellation, local size rejection, transport failure, invalid JSON and commit rejection preserve both cursor and catch-up state.
+
+## v0.11.45 batch policy audit
+
+- First successful manual paid catch-up selects exactly the next 50 messages and still performs one completion request.
+- The exact request size and source range are shown before transmission; cancellation performs zero completion calls.
+- The one-time path has an absolute 120,000-token / 480,000-byte local ceiling; routine requests keep the 30,000-token / 120,000-byte guard.
+- The one-time flag is cleared only after a successful transactional commit. Failure, cancellation and local rejection preserve it.
+- After success, paid manual and automatic summaries use 10-message batches; automatic triggering waits for 10 pending messages.
+- Local simulations cover ordinary-limit rejection, one-time confirmation, cancellation, absolute-limit rejection and policy constants.
 
 ## v0.11.44 recap clock audit
 
