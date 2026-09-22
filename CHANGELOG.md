@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.11.39 HYBRID
+
+- 修复独立 Connection Profile 向 Gemini/部分中转接口传递通用 `json_schema` 后，被转换为不兼容的 `generationConfig.responseSchema` 并返回 HTTP 400 的问题。
+- 独立 Profile 改为 prompt-only Schema：完整输出结构随提示词发送，请求 override payload 保持为空。
+- 返回内容继续执行本地 JSON 修复、Schema 字段清理、source 边界校验和事务式提交；兼容处理不会放宽 canonical memory 安全门槛。
+- 独立 Profile 回退当前聊天模型时继续携带完整 Schema，避免回退结果结构漂移。
+- UI 将独立 API 标记为兼容模式；每批仍严格一次生成，失败不写入、不推进游标。
+
 ## v0.11.38 HYBRID
 
 - 修复 Android/窄屏下“总结方式”选择器因 `flex-basis` 与纵向布局冲突而被撑成大块空白的问题。

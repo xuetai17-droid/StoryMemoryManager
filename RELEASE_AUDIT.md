@@ -1,4 +1,10 @@
-# v0.11.38 HYBRID Release Audit
+# v0.11.39 HYBRID Release Audit
+
+- 触发问题：独立 API 已连通，但上游把 Connection Manager 的通用 `json_schema` 转成 Gemini `generation_config.response_schema`；其中 `type:["string","null"]` 等标准 JSON Schema 写法不被其 Proto Schema 接受，返回 HTTP 400。
+- 请求修复：独立 Profile 的 override payload 固定为空，不再发送 provider-specific `json_schema` / `response_schema`；完整 Schema 仅作为提示词内容发送。
+- 安全边界：响应仍经过本地 JSON 解析、清理、source 楼层约束与 batch commit 校验，只有 timeline 非空且可追溯时才推进游标。
+- 请求次数：每批一次；未增加修复请求、自动重试或付费 fallback。若用户明确开启回退，当前聊天模型会收到同一完整 Schema。
+- 配置保留：不修改 Connection Profile、API 地址/密钥、SMM Profile 选择、已有记忆、隐藏状态或原始 JSONL。
 
 - 变更范围：仅优化总结方式控件及其状态展示；不触碰 canonical memory、时间线、楼层处理游标、隐藏逻辑或原始聊天 JSONL。
 - 问题根因：旧选择器使用 `flex: 1 1 220px`；移动端父容器切为纵向后，220px basis 变成垂直尺寸，叠加主题样式后形成巨型空白框。
@@ -16,6 +22,6 @@
 - 提交事务：JSON、本批 source 与 timeline 校验通过后才合并并推进 `last_processed_index`；NPC 越界 source 单独拒绝。
 - 失败事务：空响应、非 JSON、524、120 秒超时和 timeline source 校验失败均不写入、不推进游标、不切换本地模式。
 - UI/兼容：记忆浏览、搜索、统计、注入诊断、导入和 v4 兼容视图均包含 NPC 分区。
-- 版本：源码头、两处界面徽标与 manifest 均为 0.11.38。
-- 验证：JS 语法、manifest JSON、v0.11.27、v0.11.29/v0.11.32、v0.11.33、v0.11.34、v0.11.36、v0.11.37、v0.11.38 回归通过；v0.11.35 的“摘要面板自动成为 canonical timeline”测试已由 v0.11.36 的安全策略明确取代。
+- 版本：源码头、两处界面徽标与 manifest 均为 0.11.39。
+- 验证：JS 语法、manifest JSON、v0.11.27、v0.11.29/v0.11.32、v0.11.33、v0.11.34、v0.11.36、v0.11.37、v0.11.38、v0.11.39 回归通过；v0.11.35 的“摘要面板自动成为 canonical timeline”测试已由 v0.11.36 的安全策略明确取代。
 - 原始数据：测试与迁移均不写入、删除或改动原始聊天 JSONL。

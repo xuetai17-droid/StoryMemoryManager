@@ -1,6 +1,16 @@
-# Story Memory Manager v0.11.38 HYBRID
+# Story Memory Manager v0.11.39 HYBRID
 
 本版继续使用 SillyTavern 当前聊天模型做一次静默语义总结，并参考 [SillyTavern Memory Palace](https://github.com/badcode1024-tech/sillytavern-memory-palace) 的结构化总结与 NPC 分区思路：主要人物保留完整状态，次要 NPC 单独保存极简档案，并且只在当前剧情命中时注入。
+
+## v0.11.39 独立副 API 结构化输出兼容
+
+- 修复部分 Gemini/中转型独立 API 返回 HTTP 400：`generation_config.response_schema` 无法接受通用 JSON Schema 中的联合类型数组。
+- 独立 Connection Profile 不再接收通用 `json_schema` 请求参数；完整 Schema 改为随总结提示词发送，避免不同供应商的结构化输出协议互相冲突。
+- 模型结果仍必须通过 SMM 本地 JSON 解析、字段清理、真实楼层 source 校验及 timeline 提交校验，安全标准没有降低。
+- 每批仍只调用一次；400、524、超时、非 JSON 或校验失败均不写入、不推进游标、不隐藏失败批次。
+- 当前聊天模型通道保持原有静默总结方式；独立 API 的地址、密钥、Connection Profile 和当前选择均会保留。
+
+> 下方 v0.11.38 及更早章节为历史记录；v0.11.39 可直接覆盖安装，无需重建记忆。
 
 ## v0.11.38 手机端总结方式界面修复
 

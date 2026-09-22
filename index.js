@@ -1,5 +1,5 @@
-// Story Memory Manager v0.11.38
-// compact mobile summary controls / dedicated NPC memory / failure-safe cursor
+// Story Memory Manager v0.11.39
+// profile API schema compatibility / compact mobile controls / failure-safe cursor
 // does not rewrite original chat JSONL
 
 const MODULE = 'story_memory_manager_v2';
@@ -4848,19 +4848,31 @@ function generationTextV01136(value) {
     return '';
 }
 
+// v0.11.39: Connection Profile backends do not share one structured-output
+// dialect. Gemini-compatible gateways reject ordinary JSON Schema unions such
+// as type:["string","null"] when a generic json_schema override is translated
+// into generationConfig.responseSchema. Deliver the complete schema as model
+// instructions instead; SMM still validates locally before committing data.
+function promptWithJsonSchemaV01139(prompt='', jsonSchema=null) {
+    return [
+        jsonSchema ? '【必须遵守的输出 JSON Schema】' : '',
+        jsonSchema ? JSON.stringify(jsonSchema?.value||jsonSchema,null,2) : '',
+        jsonSchema ? '只输出符合上面结构的一个 JSON 对象；所有 required 字段都必须出现，没有内容时使用空数组、空对象或 null。不要输出 Markdown、代码围栏、前言或解释。' : '',
+        jsonSchema ? '---' : '',
+        String(prompt || '').trim()
+    ].filter(Boolean).join('\n\n');
+}
+
 async function generateCurrentQuietV01136({prompt='', systemPrompt='', jsonSchema=null}={}) {
     const context = C();
     if (!context || typeof context.generateQuietPrompt !== 'function') {
         throw new Error('当前 SillyTavern 未提供 generateQuietPrompt，无法复用当前聊天模型进行静默总结。');
     }
+    const requestPrompt=promptWithJsonSchemaV01139(prompt,jsonSchema);
     const merged = [
         String(systemPrompt || '').trim(),
         String(systemPrompt || '').trim() ? '---' : '',
-        jsonSchema ? '【必须遵守的输出 JSON Schema】' : '',
-        jsonSchema ? JSON.stringify(jsonSchema?.value||jsonSchema,null,2) : '',
-        jsonSchema ? '只输出符合上面结构的一个 JSON 对象；所有 required 字段都必须出现，没有内容时使用空数组、空对象或 null。' : '',
-        jsonSchema ? '---' : '',
-        String(prompt || '').trim()
+        requestPrompt
     ].filter(Boolean).join('\n\n');
     if (!merged) throw new Error('总结提示词为空');
     const result = await context.generateQuietPrompt({quietPrompt: merged});
@@ -4893,11 +4905,12 @@ async function smmGenerateV093({
     try {
         const Service = await getSmmConnectionServiceV093();
 
+        const profilePrompt=promptWithJsonSchemaV01139(prompt,jsonSchema);
         const messages = [
             ...(systemPrompt
                 ? [{role:'system', content:String(systemPrompt)}]
                 : []),
-            {role:'user', content:String(prompt)}
+            {role:'user', content:profilePrompt}
         ];
 
         const maxTokens = Math.max(
@@ -4906,24 +4919,21 @@ async function smmGenerateV093({
         );
 
         const profile = typeof Service.getProfile === 'function' ? Service.getProfile(profileId) : null;
-        // v0.11.25: do not trust profile.mode alone. Older/migrated Connection
-        // Manager profiles may have a missing/stale mode even though their API maps
-        // to Chat Completion. validateProfile() is the same authoritative mapping
-        // sendRequest() itself uses, so structured JSON must be gated by that.
+        // Keep transport metadata for diagnostics, but never attach a generic
+        // json_schema override. Connection Manager can route the same Profile
+        // through OpenAI, Claude, Gemini or a compatible gateway, whose native
+        // response-schema dialects are not interchangeable.
         let selectedApiMap = null;
         try { selectedApiMap = typeof Service.validateProfile === 'function' ? Service.validateProfile(profile) : null; } catch (_) {}
-        const isChatCompletionProfile = selectedApiMap?.selected === 'openai'
-            || String(profile?.mode || '').toLowerCase() === 'cc';
-        const overridePayload = (jsonSchema && isChatCompletionProfile)
-            ? { json_schema: jsonSchema }
-            : {};
+        const overridePayload = {};
         if (jsonSchema) {
-            console.debug('[StoryMemory] v0.11.29 summary transport', {
+            console.debug('[StoryMemory] v0.11.39 summary transport', {
                 profileId,
                 profileMode: profile?.mode || null,
                 selected: selectedApiMap?.selected || null,
                 source: selectedApiMap?.source || null,
-                structuredJson: !!overridePayload.json_schema
+                structuredJson: false,
+                schemaDelivery: 'prompt_only'
             });
         }
 
@@ -4945,7 +4955,8 @@ async function smmGenerateV093({
             overridePayload
         );
 
-        // v0.11.25: independent summary profiles use authoritative transport detection and structured JSON when available.
+        // v0.11.39: independent profiles receive the schema in the prompt and are
+        // validated locally, avoiding provider-specific response_schema failures.
         // v0.11.23: ConnectionManager's extracted response may legally separate
         // final content and reasoning. Some reasoning-capable profiles occasionally
         // return an empty `content` while putting the requested JSON in `reasoning`.
@@ -5029,7 +5040,7 @@ async function smmGenerateV093({
                 e
             );
 
-            return await generateCurrentQuietV01136({prompt, systemPrompt});
+            return await generateCurrentQuietV01136({prompt, systemPrompt, jsonSchema});
         }
 
         throw new Error(
@@ -9819,7 +9830,7 @@ function stat() {
 function panelHTML() {
     return `<div id="${PANEL_ID}" class="smm2-hidden">
       <div class="smm2-card">
-        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.38</span></div><button id="smm2_close">×</button></div>
+        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.39</span></div><button id="smm2_close">×</button></div>
         <div id="smm2_stats" class="smm2-stats"></div>
         <div class="smm2-grid">
           <button id="smm2_new">总结新增</button>
@@ -12586,7 +12597,7 @@ function refreshNative() {
     if(modeStatus) modeStatus.textContent=localMode
         ? '仅做规则抽取，不具备完整语义理解；不建议用于日常长期记忆。'
         : usingSummaryProfile
-            ? `独立 API${selectedSummaryProfile?.name?` · ${selectedSummaryProfile.name}`:''}；每批只生成 1 次，失败不写入。`
+            ? `独立 API${selectedSummaryProfile?.name?` · ${selectedSummaryProfile.name}`:''}；兼容模式，每批只生成 1 次，失败不写入。`
             : '当前聊天模型静默生成；每批只生成 1 次，失败不写入。';
     const modeBadge=document.getElementById('smm138_mode_badge');
     if(modeBadge){
@@ -12672,7 +12683,7 @@ function installNativeExtensionEntry() {
 
         wrap.innerHTML = `
           <div class="inline-drawer-toggle inline-drawer-header">
-            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.38</span></div>
+            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.39</span></div>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
           </div>
           <div class="inline-drawer-content">
@@ -12920,7 +12931,7 @@ function initializeExtension() {
     try {
         installUI();
         refresh();
-        console.log('[StoryMemory] v0.11.38 loaded successfully');
+        console.log('[StoryMemory] v0.11.39 loaded successfully');
     } catch (e) {
         console.error('[StoryMemory] UI initialization failed', e);
     }
