@@ -1,5 +1,5 @@
-// Story Memory Manager v0.11.50
-// Memory Palace-compatible direct API transport and compact incremental prompts
+// Story Memory Manager v0.11.51
+// local malformed-JSON delimiter recovery without another API request
 // does not rewrite original chat JSONL
 
 const MODULE = 'story_memory_manager_v2';
@@ -57,6 +57,7 @@ const DEFAULTS = Object.freeze({
     historyBatchMessagesV01150: 15,
     adaptiveInputTokensV01150: 36000,
     adaptiveInputBytesV01150: 144000,
+    jsonRepairPolicyV01151: 'local_iterative_missing_delimiters_no_api_retry',
     summaryExternalApiUrl: '',
     summaryExternalApiKey: '',
     summaryExternalApiModel: '',
@@ -117,6 +118,7 @@ function S() {
     const upgradingToV01148 = !Object.hasOwn(c.extensionSettings[MODULE], 'summaryBatchPolicyV01148');
     const upgradingToV01149 = !Object.hasOwn(c.extensionSettings[MODULE], 'summaryBatchPolicyV01149');
     const upgradingToV01150 = !Object.hasOwn(c.extensionSettings[MODULE], 'summaryTransportPolicyV01150');
+    const upgradingToV01151 = !Object.hasOwn(c.extensionSettings[MODULE], 'jsonRepairPolicyV01151');
     for (const [k,v] of Object.entries(DEFAULTS)) {
         if (!Object.hasOwn(c.extensionSettings[MODULE], k)) c.extensionSettings[MODULE][k] = v;
     }
@@ -211,6 +213,10 @@ function S() {
         c.extensionSettings[MODULE].historyBatchMessagesV01150=15;
         c.extensionSettings[MODULE].adaptiveInputTokensV01150=36000;
         c.extensionSettings[MODULE].adaptiveInputBytesV01150=144000;
+        try { c.saveSettingsDebounced?.(); } catch (_) {}
+    }
+    if (upgradingToV01151) {
+        c.extensionSettings[MODULE].jsonRepairPolicyV01151='local_iterative_missing_delimiters_no_api_retry';
         try { c.saveSettingsDebounced?.(); } catch (_) {}
     }
     if (upgradingToV01144) {
@@ -1446,6 +1452,76 @@ function repairJSONStringLocalV01118(input) {
     return s;
 }
 
+function jsonStructureStackAtV01151(text,endExclusive=text.length) {
+    const stack=[];
+    let inString=false,escaped=false;
+    for(let i=0;i<Math.min(text.length,endExclusive);i++){
+        const ch=text[i];
+        if(inString){
+            if(escaped) escaped=false;
+            else if(ch==='\\') escaped=true;
+            else if(ch==='"') inString=false;
+            continue;
+        }
+        if(ch==='"'){inString=true;continue;}
+        if(ch==='{'||ch==='[') stack.push(ch);
+        else if(ch==='}'&&stack.at(-1)==='{') stack.pop();
+        else if(ch===']'&&stack.at(-1)==='[') stack.pop();
+    }
+    return {stack,inString,escaped};
+}
+
+function closeUnfinishedJSONV01151(text) {
+    let s=String(text||'');
+    const state=jsonStructureStackAtV01151(s);
+    if(state.inString) s+='"';
+    const refreshed=jsonStructureStackAtV01151(s);
+    for(let i=refreshed.stack.length-1;i>=0;i--) s+=refreshed.stack[i]==='{'?'}':']';
+    return s;
+}
+
+function repairMissingJSONDelimitersV01151(input,maxPasses=24) {
+    let candidate=String(input??'');
+    for(let pass=0;pass<maxPasses;pass++){
+        try { JSON.parse(candidate); return candidate; }
+        catch(error){
+            const message=String(error?.message||'');
+            const match=message.match(/(?:position|at position)\s+(\d+)/i);
+            let position=match?Math.max(0,Math.min(candidate.length,Number(match[1]))):candidate.length;
+            const expectsDelimiter=/Expected\s+['"]?,['"]?\s+or\s+['"]?[}\]]['"]?\s+after|after array element|after property value/i.test(message);
+            const unexpectedEnd=/Unexpected end of JSON|unterminated string/i.test(message);
+
+            if(unexpectedEnd||(!match&&position>=candidate.length)){
+                const closed=closeUnfinishedJSONV01151(candidate);
+                if(closed===candidate) return candidate;
+                candidate=closed;
+                continue;
+            }
+
+            if(expectsDelimiter||/Unexpected token/i.test(message)){
+                while(position<candidate.length&&/\s/.test(candidate[position])) position++;
+                const current=candidate[position]||'';
+                if(!current){
+                    const closed=closeUnfinishedJSONV01151(candidate);
+                    if(closed===candidate) return candidate;
+                    candidate=closed;
+                    continue;
+                }
+                const {stack}=jsonStructureStackAtV01151(candidate,position);
+                const top=stack.at(-1)||'';
+                let insertion=',';
+                if(top==='['&&current==='}') insertion=']';
+                else if(top==='{'&&current===']') insertion='}';
+                else if(!top) return candidate;
+                candidate=candidate.slice(0,position)+insertion+candidate.slice(position);
+                continue;
+            }
+            return candidate;
+        }
+    }
+    return candidate;
+}
+
 function parseJSON(text) {
     let t = String(text ?? '').trim();
     if (!t) throw new Error('模型返回为空，无法解析 JSON');
@@ -1462,13 +1538,29 @@ function parseJSON(text) {
     try { obj = JSON.parse(t); }
     catch (e) { firstErr=e; }
 
-    // v0.11.18: locally repair common model JSON mistakes before spending another API call.
+    // v0.11.51: first repair missing structural delimiters on the untouched
+    // response. This must precede the quote heuristic: otherwise a legitimate
+    // closing quote followed by a missing comma can be mistaken for an inner
+    // unescaped quote.
     if(!obj){
-        const repaired=repairJSONStringLocalV01118(t);
-        try { obj=JSON.parse(repaired); }
-        catch(e){
-            const preview=t.replace(/\s+/g,' ').slice(0,240);
-            throw new Error(`JSON 解析失败：${firstErr?.message||'未知'}；本地修复后仍失败：${e.message}；响应开头：${preview}`);
+        const rawDelimiterRepair=repairMissingJSONDelimitersV01151(t);
+        try { obj=JSON.parse(rawDelimiterRepair); }
+        catch(_rawDelimiterError) {}
+    }
+
+    // v0.11.18: repair unescaped quotes/comments/bare keys locally. If that
+    // pass still leaves a missing comma or bracket, run the structural pass
+    // once more. None of these stages calls the model.
+    if(!obj){
+        const stringRepaired=repairJSONStringLocalV01118(t);
+        try { obj=JSON.parse(stringRepaired); }
+        catch(_stringRepairError){
+            const combinedRepair=repairMissingJSONDelimitersV01151(stringRepaired);
+            try { obj=JSON.parse(combinedRepair); }
+            catch(finalError){
+                const preview=t.replace(/\s+/g,' ').slice(0,240);
+                throw new Error(`JSON 解析失败：${firstErr?.message||'未知'}；三阶段本地修复后仍失败：${finalError.message}；响应开头：${preview}`);
+            }
         }
     }
 
@@ -10682,7 +10774,7 @@ function stat() {
 function panelHTML() {
     return `<div id="${PANEL_ID}" class="smm2-hidden">
       <div class="smm2-card">
-        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.50</span></div><button id="smm2_close">×</button></div>
+        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.51</span></div><button id="smm2_close">×</button></div>
         <div id="smm2_stats" class="smm2-stats"></div>
         <div class="smm2-grid">
           <button id="smm2_new">总结新增</button>
@@ -13691,7 +13783,7 @@ function installNativeExtensionEntry() {
 
         wrap.innerHTML = `
           <div class="inline-drawer-toggle inline-drawer-header">
-            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.50</span></div>
+            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.51</span></div>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
           </div>
           <div class="inline-drawer-content">
@@ -13956,7 +14048,7 @@ function initializeExtension() {
     try {
         installUI();
         refresh();
-        console.log('[StoryMemory] v0.11.50 loaded successfully');
+        console.log('[StoryMemory] v0.11.51 loaded successfully');
     } catch (e) {
         console.error('[StoryMemory] UI initialization failed', e);
     }

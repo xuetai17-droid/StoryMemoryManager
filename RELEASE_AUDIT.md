@@ -1,4 +1,11 @@
-# v0.11.50 HYBRID Release Audit
+# v0.11.51 HYBRID Release Audit
+
+## v0.11.51 malformed JSON audit
+
+- Trigger observed: `Expected ',' or ']' after array element ... position 865` after a successful paid response.
+- Repair order: strict `JSON.parse` → existing safe string repair → iterative delimiter/bracket repair.
+- The iterative stage uses the engine-reported error position and JSON structural stack; it does not call any model or API.
+- Valid JSON is never rewritten. A repaired object still passes the unchanged summary sanitizer, source validation, commit validation, merge rollback, and cursor rules.
 
 ## v0.11.50 strict direct-API audit
 

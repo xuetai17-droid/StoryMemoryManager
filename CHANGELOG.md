@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.11.51 HYBRID
+
+- Added iterative local recovery for missing commas between array elements and object properties.
+- Added local completion of missing closing array/object delimiters.
+- Kept repair strictly local: no model retry and no additional API charge.
+- Preserved all existing validation, failure rollback, and cursor-safety behavior.
+
 ## v0.11.50 HYBRID
 
 - Matched Memory Palace's direct external API transport: minimal body (`messages`, optional `model`) and plain fetch without SMM's 120-second abort.
