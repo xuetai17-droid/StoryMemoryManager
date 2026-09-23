@@ -1,5 +1,5 @@
-// Story Memory Manager v0.11.55
-// preset story-calendar authority and local repair of previously inferred dates
+// Story Memory Manager v0.11.56
+// partial trusted injection and durable character-knowledge continuity
 // does not rewrite original chat JSONL
 
 const MODULE = 'story_memory_manager_v2';
@@ -62,6 +62,7 @@ const DEFAULTS = Object.freeze({
     jsonRestartPolicyV01153: 'prefer_latest_complete_root_no_api_retry',
     directLineProtocolV01154: 'smm_lines_v1_local_conversion_no_api_retry',
     storyCalendarPolicyV01155: 'preset_selected_or_event_day_over_model_inference',
+    memoryInjectionPolicyV01156: 'confirmed_partial_memory_with_critical_knowledge',
     summaryExternalApiUrl: '',
     summaryExternalApiKey: '',
     summaryExternalApiModel: '',
@@ -127,6 +128,7 @@ function S() {
     const upgradingToV01153 = !Object.hasOwn(c.extensionSettings[MODULE], 'jsonRestartPolicyV01153');
     const upgradingToV01154 = !Object.hasOwn(c.extensionSettings[MODULE], 'directLineProtocolV01154');
     const upgradingToV01155 = !Object.hasOwn(c.extensionSettings[MODULE], 'storyCalendarPolicyV01155');
+    const upgradingToV01156 = !Object.hasOwn(c.extensionSettings[MODULE], 'memoryInjectionPolicyV01156');
     for (const [k,v] of Object.entries(DEFAULTS)) {
         if (!Object.hasOwn(c.extensionSettings[MODULE], k)) c.extensionSettings[MODULE][k] = v;
     }
@@ -241,6 +243,10 @@ function S() {
     }
     if (upgradingToV01155) {
         c.extensionSettings[MODULE].storyCalendarPolicyV01155='preset_selected_or_event_day_over_model_inference';
+        try { c.saveSettingsDebounced?.(); } catch (_) {}
+    }
+    if (upgradingToV01156) {
+        c.extensionSettings[MODULE].memoryInjectionPolicyV01156='confirmed_partial_memory_with_critical_knowledge';
         try { c.saveSettingsDebounced?.(); } catch (_) {}
     }
     if (upgradingToV01144) {
@@ -492,10 +498,67 @@ function stageSummariesForPromptV01121(mem=M()) {
     }));
 }
 
+const CRITICAL_KNOWLEDGE_RE_V01156=/(?:亲生|血缘|身世|身份|亲子|dna|DNA|家族|继承|调查|查证|查询|核实|得知|知晓|知道|发现|确认|掌握|隐瞒|秘密|真相)/;
+
+function confirmedFactsForPromptV01156(mem=M()) {
+    const rows=Array.isArray(mem?.facts)?mem.facts:[];
+    const critical=rows.filter(x=>CRITICAL_KNOWLEDGE_RE_V01156.test(String(x?.fact||x||'')));
+    const recent=rows.slice(-12);
+    const out=[];
+    const seen=new Set();
+    for(const x of [...critical.slice(-20),...recent]){
+        const fact=String(x?.fact||x||'').trim();
+        if(!fact) continue;
+        const key=normalizeEventText(fact);
+        if(!key||seen.has(key)) continue;
+        seen.add(key);
+        out.push(typeof x==='object'?{fact,source:x.source||null}:{fact,source:null});
+    }
+    return out.slice(-24);
+}
+
+function establishedKnowledgeForPromptV01156(mem=M()) {
+    const rows=(Array.isArray(mem?.timeline)?mem.timeline:[])
+        .filter(x=>!x?.__coverage_only_v01110&&CRITICAL_KNOWLEDGE_RE_V01156.test(String(x?.event||'')))
+        .slice(-16);
+    return rows.map(x=>({event:String(x?.event||'').slice(0,320),source:x?.source||null,date:x?.date||null}));
+}
+
+function promoteCriticalKnowledgeV01156(mem,rows=[]) {
+    mem.facts=Array.isArray(mem?.facts)?mem.facts:[];
+    let added=0;
+    for(const row of (Array.isArray(rows)?rows:[])){
+        const fact=String(row?.event||row?.fact||'').trim();
+        if(!fact||!CRITICAL_KNOWLEDGE_RE_V01156.test(fact)) continue;
+        const source=row?.source||null;
+        const key=normalizeEventText(fact);
+        if(mem.facts.some(x=>normalizeEventText(x?.fact||x||'')===key)) continue;
+        mem.facts.push({fact,source,importance:'critical_continuity_v01156'});
+        added++;
+    }
+    return added;
+}
+
+function retainFactsV01156(rows=[],limit=60) {
+    const input=Array.isArray(rows)?rows:[];
+    const critical=input.filter(x=>x?.importance==='critical_continuity_v01156'||CRITICAL_KNOWLEDGE_RE_V01156.test(String(x?.fact||x||''))).slice(-40);
+    const recent=input.slice(-Math.max(10,limit));
+    const out=[];
+    const seen=new Set();
+    // Put critical rows last so the final bounded slice can never evict them
+    // in favour of ordinary recent facts.
+    for(const x of [...recent,...critical]){
+        const key=normalizeEventText(x?.fact||x||'');
+        if(!key||seen.has(key)) continue;
+        seen.add(key);out.push(x);
+    }
+    return out.slice(-Math.max(limit,critical.length));
+}
+
 function buildSafeMemoryPromptV0100() {
     const mem = M();
     const scene = currentSceneCoreV0110(mem.current_scene);
-    const timeline = (mem.timeline || []).filter(x=>!x?.__coverage_only_v01110).slice(-6);
+    const timeline = (mem.timeline || []).filter(x=>!x?.__coverage_only_v01110).slice(-10);
     const names = new Set();
     for (const k of ['participants','people']) {
         const v=scene?.[k];
@@ -504,19 +567,28 @@ function buildSafeMemoryPromptV0100() {
     }
     const timelineText = JSON.stringify(timeline);
     const allChars = stableCharactersForPromptV0110(mem) || {};
+    const activeNames=activeRoleNamesV01137();
+    for(const wanted of [...activeNames.users,...activeNames.primary]){
+        const key=Object.keys(allChars).find(x=>nameMatchesV01137(x,wanted));
+        if(key) names.add(key);
+    }
     for(const name of Object.keys(allChars)) if(timelineText.includes(name)) names.add(name);
     const chars={};
     for(const name of names) if(allChars[name]) chars[name]=allChars[name];
     // If relevance extraction finds too little, keep only a small recent subset rather than the whole cast.
     if(Object.keys(chars).length<2) for(const name of Object.keys(allChars).slice(-5)) chars[name]=allChars[name];
-    const rels=(mem.relationships||[]).filter(r=>{
+    let rels=(mem.relationships||[]).filter(r=>{
         const t=JSON.stringify(r); return [...names].some(n=>t.includes(n));
-    }).slice(-6);
+    }).slice(-10);
+    if(!rels.length) rels=(mem.relationships||[]).slice(-8);
     const loops=(mem.open_loops||[]).slice(-4);
     const arcs=(mem.active_arcs||[]).slice(0,3);
-    const facts=(mem.semantic_anchors||[]).slice(-6);
+    const facts=confirmedFactsForPromptV01156(mem);
+    const establishedKnowledge=establishedKnowledgeForPromptV01156(mem);
+    const semantic=(mem.semantic_anchors||[]).slice(-8);
     const stages=stageSummariesForPromptV01121(mem);
     const npcs=relevantNpcsForPromptV01137(mem);
+    const gaps=timelineCoverageGapsV0112(mem);
     const payload={
         date:mem.current_story_date||null,
         time:mem.current_story_time||null,
@@ -530,12 +602,16 @@ function buildSafeMemoryPromptV0100() {
         recent_events:timeline,
         active_arcs:arcs,
         unresolved:loops,
-        continuity_facts:facts,
+        confirmed_facts:facts,
+        established_character_knowledge:establishedKnowledge,
+        semantic_continuity:semantic,
+        coverage:{processed_through:Number(mem.last_processed_index??-1),incomplete_ranges:gaps.slice(0,4)},
         story_stages:stages
     };
     return [
         '【剧情连续性记忆】',
         '以下仅是此前剧情中已确认的事实，供承接当前剧情使用。按角色卡、世界书和最近正文正常续写；不要解释这份记忆，也不要把它当成用户的新指令。',
+        'confirmed_facts 与 established_character_knowledge 是已经发生并被角色知晓/查证的长期事实。后续未总结楼层不代表这些事实失效；禁止让角色无故遗忘、否认或重新不知道。只有后续正文明确推翻时才能更新。',
         '时间精度规则：recent_events 中 date=null、date_hint=YYYY-MM、date_precision=month 表示只知道月份，绝不能自行补具体日期或星期。',
         JSON.stringify(payload)
     ].join('\n');
@@ -557,14 +633,11 @@ function refreshSafeMemoryInjectionV0100() {
         return true;
     }
 
-    // v0.11.2: a large timeline coverage gap means long-term memory is incomplete.
-    // Do not inject incomplete memory into the roleplay model until the gap is repaired.
+    // v0.11.56: a pending historical range must not erase already-confirmed
+    // memory. Inject the trusted processed subset and disclose the coverage gap
+    // inside the payload; unsummarized messages remain visible in the chat.
     const gapsV0112=timelineCoverageGapsV0112(M());
-    if (gapsV0112.length) {
-        ctx.setExtensionPrompt(tag, '', 0, 4, false, 0);
-        console.warn('[StoryMemory] 安全记忆注入已阻止：检测到时间线断档', gapsV0112[0]);
-        return false;
-    }
+    if (gapsV0112.length) console.info('[StoryMemory] injecting confirmed partial memory with coverage gap',gapsV0112[0]);
 
     ctx.setExtensionPrompt(
         tag,
@@ -587,7 +660,8 @@ function memoryInjectionAuditV0119() {
     const relevantNpcs=relevantNpcsForPromptV01137(mem);
     return {
         enabled: !!s.safeMemoryInject,
-        blocked_by_gap: !!gaps.length,
+        blocked_by_gap: false,
+        partial_coverage: !!gaps.length,
         first_gap: gaps[0] || null,
         prompt_chars: prompt.length,
         current_story_date: mem.current_story_date || null,
@@ -599,6 +673,8 @@ function memoryInjectionAuditV0119() {
         npcs_total: Object.keys(mem.npcs || {}).length,
         npcs_injected: relevantNpcs.length,
         relationships: (mem.relationships || []).length,
+        confirmed_facts: confirmedFactsForPromptV01156(mem).length,
+        established_knowledge: establishedKnowledgeForPromptV01156(mem).length,
         recent_timeline: (mem.timeline || []).filter(x=>!x?.__coverage_only_v01110).slice(-10).length,
         open_loops: (mem.open_loops || []).length,
         active_arcs: (mem.active_arcs || []).length,
@@ -612,14 +688,14 @@ function renderMemoryInjectionAuditV0119() {
     if(!box) return;
     const a=memoryInjectionAuditV0119();
     const state=!a.enabled ? '关闭：主聊天模型不会收到 SMM 长期记忆'
-        : a.blocked_by_gap ? `已开启但被时间线断档保护阻止：#${a.first_gap.start}-#${a.first_gap.end}`
+        : a.partial_coverage ? `已开启：注入已确认记忆；尚待补总结 #${a.first_gap.start}-#${a.first_gap.end}`
         : '已开启：本轮会提供 SMM 长期剧情记忆';
     const location=a.current_scene?.location || '未建立';
-    const empty=a.characters+a.npcs_injected+a.relationships+a.recent_timeline+a.open_loops+a.active_arcs+a.stage_summaries===0;
+    const empty=a.characters+a.npcs_injected+a.relationships+a.confirmed_facts+a.established_knowledge+a.recent_timeline+a.open_loops+a.active_arcs+a.stage_summaries===0;
     const note=!a.enabled
         ? '当前关闭生成时记忆注入。'
-        : a.blocked_by_gap
-            ? '检测到历史时间线断档，为避免把不完整长期记忆提供给主模型，本轮注入已自动阻止。'
+        : a.partial_coverage
+            ? '历史仍在补总结，但已确认的身份、关系、调查结果和近期事件会照常提供给主模型；未总结范围不会使旧事实失效。'
             : empty
                 ? '当前还没有可用的长期剧情记忆；主模型将主要依靠最近原文继续剧情。'
                 : `本轮将注入 ${a.prompt_chars} 字符的连续性事实。`;
@@ -632,7 +708,7 @@ function renderMemoryInjectionAuditV0119() {
         <div><span>当前剧情地点</span><b>${esc(location)}</b></div>
         ${(a.current_reality_date||a.current_reality_time)?`<div><span>MVU现实时间轴</span><b>${esc([a.current_reality_date,a.current_reality_time].filter(Boolean).join(' '))}</b></div>`:''}
       </div>
-      <div class="smm119-counts">人物 ${a.characters} · NPC ${a.npcs_total}（本轮相关 ${a.npcs_injected}） · 关系 ${a.relationships} · 近期事件 ${a.recent_timeline} · 主线 ${a.active_arcs} · 阶段总结 ${a.stage_summaries} · 待办 ${a.open_loops}</div>
+      <div class="smm119-counts">人物 ${a.characters} · NPC ${a.npcs_total}（本轮相关 ${a.npcs_injected}） · 关系 ${a.relationships} · 确认事实 ${a.confirmed_facts} · 角色已知 ${a.established_knowledge} · 近期事件 ${a.recent_timeline} · 主线 ${a.active_arcs} · 阶段总结 ${a.stage_summaries} · 待办 ${a.open_loops}</div>
       <div class="smm119-note">${esc(note)}</div>
       <details class="smm119-raw-details">
         <summary>查看原始注入文本（调试）</summary>
@@ -4937,6 +5013,7 @@ function mergeResult(mem, r, endIndex, options={}) {
     mergeActiveArcsV0110(mem, r.active_arcs);
 
     mem.facts = uniqMerge(mem.facts, r.facts, x => JSON.stringify([x.fact, x.source]));
+    promoteCriticalKnowledgeV01156(mem,acceptedTimeline);
     mem.events = uniqMerge(mem.events, r.events, x => JSON.stringify([x.date, x.title, x.source]));
     // v0.8.5：relationships 是“当前关系状态”，不是历史流水。
     // 先接收本批候选，随后 normalizeMemoryStateV085() 按人物对只保留最新快照。
@@ -5140,7 +5217,7 @@ function mergeResult(mem, r, endIndex, options={}) {
     // v0.6.6: 历史时间线是持久数据，禁止按 maxTimeline 截断。
     // maxTimeline 只用于喂给模型的上下文窗口，不能用于删除已重建历史。
     // 否则达到 50 条后，最早日期（例如剧情起点）会永久消失。
-    mem.facts = mem.facts.slice(-Math.max(10, Number(s.maxFacts)||60));
+    mem.facts = retainFactsV01156(mem.facts,Math.max(10,Number(s.maxFacts)||60));
     mem.events = mem.events.slice(-Math.max(10, Number(s.maxEvents)||40));
     mem.open_loops = mem.open_loops
         .filter(x => !loopTerminalStatusV086(x?.status))
@@ -11177,7 +11254,7 @@ function stat() {
 function panelHTML() {
     return `<div id="${PANEL_ID}" class="smm2-hidden">
       <div class="smm2-card">
-        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.55</span></div><button id="smm2_close">×</button></div>
+        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.56</span></div><button id="smm2_close">×</button></div>
         <div id="smm2_stats" class="smm2-stats"></div>
         <div class="smm2-grid">
           <button id="smm2_new">总结新增</button>
@@ -13979,18 +14056,6 @@ function bindNativeManager() {
 
     if (safeInjectEl) {
         safeInjectEl.onchange = e => {
-            if (e.target.checked) {
-                const gaps=timelineCoverageGapsV0112(M());
-                if (gaps.length) {
-                    e.target.checked=false;
-                    s.safeMemoryInject=false;
-                    saveSettings();
-                    refreshSafeMemoryInjectionV0100();
-                    refreshNative();
-                    toast(`检测到时间线断档 #${gaps[0].start}-#${gaps[0].end}。请先用“补总结缺失楼层”修复，再开启记忆注入。`,'warning');
-                    return;
-                }
-            }
             s.safeMemoryInject = !!e.target.checked;
             saveSettings();
             refreshSafeMemoryInjectionV0100();
@@ -14186,7 +14251,7 @@ function installNativeExtensionEntry() {
 
         wrap.innerHTML = `
           <div class="inline-drawer-toggle inline-drawer-header">
-            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.55</span></div>
+            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.56</span></div>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
           </div>
           <div class="inline-drawer-content">
@@ -14445,6 +14510,36 @@ async function repairStoryCalendarOnceV01155({force=false}={}) {
     }
 }
 
+let SMM_KNOWLEDGE_REPAIR_RUNNING_V01156=false;
+async function repairKnowledgeContinuityOnceV01156() {
+    if(SMM_KNOWLEDGE_REPAIR_RUNNING_V01156) return null;
+    const mem=M();
+    const signature=JSON.stringify([(mem.timeline||[]).length,mem.last_processed_index,(mem.facts||[]).length]);
+    if(mem?.knowledge_continuity_repair_v01156?.input_signature===signature) return mem.knowledge_continuity_repair_v01156;
+    SMM_KNOWLEDGE_REPAIR_RUNNING_V01156=true;
+    try{
+        const added=promoteCriticalKnowledgeV01156(mem,mem.timeline||[]);
+        mem.facts=retainFactsV01156(mem.facts,Math.max(10,Number(S().maxFacts)||60));
+        const finalSignature=JSON.stringify([(mem.timeline||[]).length,mem.last_processed_index,(mem.facts||[]).length]);
+        mem.knowledge_continuity_repair_v01156={
+            at:new Date().toISOString(),input_signature:finalSignature,promoted_facts:added,api_calls:0
+        };
+        mem.audit=Array.isArray(mem.audit)?mem.audit:[];
+        mem.audit.push({at:mem.knowledge_continuity_repair_v01156.at,type:'critical_knowledge_promotion_v01156',promoted_facts:added,api_calls:0});
+        if(mem.audit.length>50) mem.audit=mem.audit.slice(-50);
+        await saveMeta();
+        refreshSafeMemoryInjectionV0100();
+        renderMemoryInjectionAuditV0119();
+        if(added) toast(`已在本地把 ${added} 条身份/调查/知情信息提升为长期关键事实；未调用 API。`,'success');
+        return mem.knowledge_continuity_repair_v01156;
+    }catch(e){
+        console.warn('[StoryMemory] v0.11.56 knowledge continuity repair failed',e);
+        return null;
+    }finally{
+        SMM_KNOWLEDGE_REPAIR_RUNNING_V01156=false;
+    }
+}
+
 async function maybeAuto() {
     const s=S(); if (!s.enabled || !s.autoSummarize || BUSY) return;
     if(usingPaidProviderV01142(s)&&activeHistoryCatchupV01146(M())) return;
@@ -14490,7 +14585,7 @@ function initializeExtension() {
         }
     };
 
-    safeOn('CHAT_CHANGED', () => setTimeout(() => { installUI(); refresh(); repairStoryCalendarOnceV01155(); }, 450));
+    safeOn('CHAT_CHANGED', () => setTimeout(() => { installUI(); refresh(); repairStoryCalendarOnceV01155(); repairKnowledgeContinuityOnceV01156(); }, 450));
     safeOn('MESSAGE_RECEIVED', () => setTimeout(async () => { refresh(); await maybeAuto(); }, 100));
     safeOn('MESSAGE_SENT', () => setTimeout(refresh, 50));
     safeOn('MESSAGE_EDITED', () => setTimeout(refresh, 50));
@@ -14502,7 +14597,8 @@ function initializeExtension() {
         installUI();
         refresh();
         setTimeout(()=>repairStoryCalendarOnceV01155(),600);
-        console.log('[StoryMemory] v0.11.55 loaded successfully');
+        setTimeout(()=>repairKnowledgeContinuityOnceV01156(),850);
+        console.log('[StoryMemory] v0.11.56 loaded successfully');
     } catch (e) {
         console.error('[StoryMemory] UI initialization failed', e);
     }

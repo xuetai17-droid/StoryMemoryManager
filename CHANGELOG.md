@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.11.56 HYBRID
+
+- Inject confirmed memory even while historical coverage remains incomplete.
+- Include canonical facts and critical character knowledge in the generation prompt.
+- Promote identity, kinship, investigation, verification, and known-secret events into durable facts.
+- Added a zero-API migration for existing timeline knowledge.
+
 ## v0.11.55 HYBRID
 
 - Added preset story-calendar extraction from stored and rendered assistant output.
