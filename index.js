@@ -1,5 +1,5 @@
-// Story Memory Manager v0.11.52
-// local traceable-timeline recovery without another API request
+// Story Memory Manager v0.11.53
+// restarted/concatenated JSON recovery and timeline-first compact skeleton
 // does not rewrite original chat JSONL
 
 const MODULE = 'story_memory_manager_v2';
@@ -59,6 +59,7 @@ const DEFAULTS = Object.freeze({
     adaptiveInputBytesV01150: 144000,
     jsonRepairPolicyV01151: 'local_iterative_missing_delimiters_no_api_retry',
     timelineRecoveryPolicyV01152: 'local_sources_events_facts_no_api_retry',
+    jsonRestartPolicyV01153: 'prefer_latest_complete_root_no_api_retry',
     summaryExternalApiUrl: '',
     summaryExternalApiKey: '',
     summaryExternalApiModel: '',
@@ -121,6 +122,7 @@ function S() {
     const upgradingToV01150 = !Object.hasOwn(c.extensionSettings[MODULE], 'summaryTransportPolicyV01150');
     const upgradingToV01151 = !Object.hasOwn(c.extensionSettings[MODULE], 'jsonRepairPolicyV01151');
     const upgradingToV01152 = !Object.hasOwn(c.extensionSettings[MODULE], 'timelineRecoveryPolicyV01152');
+    const upgradingToV01153 = !Object.hasOwn(c.extensionSettings[MODULE], 'jsonRestartPolicyV01153');
     for (const [k,v] of Object.entries(DEFAULTS)) {
         if (!Object.hasOwn(c.extensionSettings[MODULE], k)) c.extensionSettings[MODULE][k] = v;
     }
@@ -223,6 +225,10 @@ function S() {
     }
     if (upgradingToV01152) {
         c.extensionSettings[MODULE].timelineRecoveryPolicyV01152='local_sources_events_facts_no_api_retry';
+        try { c.saveSettingsDebounced?.(); } catch (_) {}
+    }
+    if (upgradingToV01153) {
+        c.extensionSettings[MODULE].jsonRestartPolicyV01153='prefer_latest_complete_root_no_api_retry';
         try { c.saveSettingsDebounced?.(); } catch (_) {}
     }
     if (upgradingToV01144) {
@@ -1528,18 +1534,7 @@ function repairMissingJSONDelimitersV01151(input,maxPasses=24) {
     return candidate;
 }
 
-function parseJSON(text) {
-    let t = String(text ?? '').trim();
-    if (!t) throw new Error('模型返回为空，无法解析 JSON');
-
-    t = t.replace(/^```(?:json)?\s*/i,'').replace(/\s*```$/,'').trim();
-    const a = t.indexOf('{'), b = t.lastIndexOf('}');
-    if (a >= 0 && b > a) t = t.slice(a, b + 1);
-    else {
-        const preview = t.replace(/\s+/g, ' ').slice(0, 240);
-        throw new Error(`模型未返回 JSON 对象：${preview}`);
-    }
-
+function parseJSONCandidateV01153(t) {
     let obj, firstErr=null;
     try { obj = JSON.parse(t); }
     catch (e) { firstErr=e; }
@@ -1564,14 +1559,56 @@ function parseJSON(text) {
             const combinedRepair=repairMissingJSONDelimitersV01151(stringRepaired);
             try { obj=JSON.parse(combinedRepair); }
             catch(finalError){
-                const preview=t.replace(/\s+/g,' ').slice(0,240);
-                throw new Error(`JSON 解析失败：${firstErr?.message||'未知'}；三阶段本地修复后仍失败：${finalError.message}；响应开头：${preview}`);
+                const err=new Error(`JSON 解析失败：${firstErr?.message||'未知'}；三阶段本地修复后仍失败：${finalError.message}`);
+                err.smmJsonCandidateFailureV01153=true;
+                throw err;
             }
         }
     }
 
     if (!obj || typeof obj !== 'object' || Array.isArray(obj)) throw new Error('返回内容不是 JSON 对象');
     return obj;
+}
+
+function parseJSON(text) {
+    let raw=String(text??'').trim();
+    if(!raw) throw new Error('模型返回为空，无法解析 JSON');
+    raw=raw.replace(/^```(?:json)?\s*/i,'').replace(/\s*```$/,'').trim();
+
+    const lastClose=raw.lastIndexOf('}');
+    const starts=[];
+    const restartRe=/\{\s*"(?:story_start|timeline|current_story_date)"\s*:/g;
+    let match;
+    while((match=restartRe.exec(raw))) starts.push(match.index);
+
+    // v0.11.53: some gateways/models restart the root JSON in the middle of
+    // an unfinished string, effectively gluing two responses together. Try
+    // the newest root first; a complete later object is preferable to
+    // inventing content to finish the corrupted earlier object.
+    if(starts.length>1&&lastClose>=0){
+        for(let i=starts.length-1;i>=1;i--){
+            const candidate=raw.slice(starts[i],lastClose+1).trim();
+            try{
+                const obj=parseJSONCandidateV01153(candidate);
+                console.info('[StoryMemory] recovered restarted JSON locally',{
+                    rootCandidates:starts.length,selected:i,apiCallsAdded:0
+                });
+                return obj;
+            }catch(_candidateError){}
+        }
+    }
+
+    const firstOpen=raw.indexOf('{');
+    if(firstOpen<0||lastClose<=firstOpen){
+        const preview=raw.replace(/\s+/g,' ').slice(0,240);
+        throw new Error(`模型未返回 JSON 对象：${preview}`);
+    }
+    const candidate=raw.slice(firstOpen,lastClose+1);
+    try{return parseJSONCandidateV01153(candidate);}
+    catch(error){
+        const preview=raw.replace(/\s+/g,' ').slice(0,240);
+        throw new Error(`${error?.message||error}；响应开头：${preview}`);
+    }
 }
 
 const SUMMARY_KEYS_V01118=new Set([
@@ -5086,6 +5123,15 @@ function schema() {
     };
 }
 
+function directDeltaSchemaV01153() {
+    const full=schema();
+    return {
+        ...full,
+        name:'StoryMemoryIncrementalDelta',
+        value:{...full.value,required:['timeline']}
+    };
+}
+
 function compact(mem) {
     // v0.11.0 trusted-core profile: old low-confidence facts/current-scene notes are
     // deliberately not fed back into the summarizer. This breaks contamination loops.
@@ -6519,7 +6565,7 @@ ${messagesText(start,end)}
 2. 角色回复中明确标注的剧情摘要及其剧情日期/时间可作为同楼证据；SillyTavern 消息时间、手机时间和现实日期绝不是剧情时间。
 3. 时间优先级：角色卡明确剧情时间 > 正文明确时间或“第二天/跨午夜” > 未知。没有证据就用 null 或“具体时刻未明确”，绝不编日期。
 4. timeline 是必填核心字段：只要本批存在任何剧情动作、对白、决定、地点/时间推进或关系变化，timeline 必须至少输出1项，不能用 facts/events 代替。每项必须含 date、time、event、source；source 只能引用 #${start} 到 #${Math.max(start,end-1)} 的真实编号。同一事件跨多楼时合并。
-5. 主要人物写入 characters；次要人物写入 npcs 极简档案。同时提取明确的关系变化、关键事实、事件、地点、物品、未完成约定和重要语义锚点。
+5. timeline 之外只输出本批确有变化的可选增量字段：facts、events、characters、npcs、relationships、character_anchors、active_arcs、open_loops、locations、items、semantic_anchors、current_scene、current_story_date、current_story_time。主要人物写入 characters，次要人物写入 npcs 极简档案；没有变化的可选字段可直接省略。
 6. story_start 保持已有值。只返回增量；本批未变化的分类用空数组或空对象，禁止复述整份旧记忆。
 7. 输出尽量简洁，目标不超过约1800 tokens。只输出符合上方 JSON 骨架的对象。`;
 }
@@ -6539,7 +6585,8 @@ function summarySystemForTransportV01150() {
 function summaryRequestStatsForRangeV01149(start,end,mem=M()) {
     const prompt=summaryPromptForTransportV01150(start,end,mem);
     const systemPrompt=summarySystemForTransportV01150();
-    const requestPrompt=promptWithCompactJsonSkeletonV01140(prompt,schema());
+    const jsonSchema=String(S().summaryProvider||'current')==='external'?directDeltaSchemaV01153():schema();
+    const requestPrompt=promptWithCompactJsonSkeletonV01140(prompt,jsonSchema);
     const merged=[
         String(systemPrompt||'').trim(),
         String(systemPrompt||'').trim()?'---':'',
@@ -6600,7 +6647,8 @@ async function summarizeRange(start, end, options={}) {
     // sent back to the model for a second or third paid attempt.
     let raw;
     try {
-        const generation=smmGenerateV093({systemPrompt,prompt,jsonSchema:schema()});
+        const jsonSchema=String(S().summaryProvider||'current')==='external'?directDeltaSchemaV01153():schema();
+        const generation=smmGenerateV093({systemPrompt,prompt,jsonSchema});
         raw = String(S().summaryProvider||'current')==='external'
             ? await generation
             : await withSmmTimeout(generation,SMM_GENERATE_TIMEOUT_MS,`静默总结 #${start+1}-#${end}`);
@@ -10866,7 +10914,7 @@ function stat() {
 function panelHTML() {
     return `<div id="${PANEL_ID}" class="smm2-hidden">
       <div class="smm2-card">
-        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.52</span></div><button id="smm2_close">×</button></div>
+        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.53</span></div><button id="smm2_close">×</button></div>
         <div id="smm2_stats" class="smm2-stats"></div>
         <div class="smm2-grid">
           <button id="smm2_new">总结新增</button>
@@ -13875,7 +13923,7 @@ function installNativeExtensionEntry() {
 
         wrap.innerHTML = `
           <div class="inline-drawer-toggle inline-drawer-header">
-            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.52</span></div>
+            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.53</span></div>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
           </div>
           <div class="inline-drawer-content">
@@ -14140,7 +14188,7 @@ function initializeExtension() {
     try {
         installUI();
         refresh();
-        console.log('[StoryMemory] v0.11.52 loaded successfully');
+        console.log('[StoryMemory] v0.11.53 loaded successfully');
     } catch (e) {
         console.error('[StoryMemory] UI initialization failed', e);
     }

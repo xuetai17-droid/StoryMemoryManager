@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.11.53 HYBRID
+
+- Added local recovery for restarted or concatenated root JSON objects, preferring the latest complete root.
+- Reduced the direct-API compact skeleton to a required timeline core; other memory categories remain optional incremental fields.
+- Preserved all v0.11.52 source normalization and local timeline recovery behavior.
+- No parsing or recovery path makes another API request.
+
 ## v0.11.52 HYBRID
 
 - Required at least one timeline item for narrative batches in the compact external prompt.

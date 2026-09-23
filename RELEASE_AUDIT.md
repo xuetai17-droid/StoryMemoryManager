@@ -1,4 +1,11 @@
-# v0.11.52 HYBRID Release Audit
+# v0.11.53 HYBRID Release Audit
+
+## v0.11.53 restarted JSON audit
+
+- Trigger observed: a timeline event string was interrupted by a second `{"story_start":...}` root, producing a concatenated malformed response.
+- Parser locates repeated root markers and tries candidates newest-first. It only accepts a candidate that passes the existing local JSON parser/repair stages.
+- Direct external schema retains all original properties but marks only timeline as required, so the transmitted skeleton is substantially smaller while optional delta categories remain supported.
+- No restart recovery, delimiter repair, source recovery, or validation path invokes the API.
 
 ## v0.11.52 traceable timeline recovery audit
 
