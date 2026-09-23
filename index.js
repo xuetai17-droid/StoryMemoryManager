@@ -1,5 +1,5 @@
-// Story Memory Manager v0.11.54
-// direct external API uses a plain-text line protocol with local JSON conversion
+// Story Memory Manager v0.11.55
+// preset story-calendar authority and local repair of previously inferred dates
 // does not rewrite original chat JSONL
 
 const MODULE = 'story_memory_manager_v2';
@@ -61,6 +61,7 @@ const DEFAULTS = Object.freeze({
     timelineRecoveryPolicyV01152: 'local_sources_events_facts_no_api_retry',
     jsonRestartPolicyV01153: 'prefer_latest_complete_root_no_api_retry',
     directLineProtocolV01154: 'smm_lines_v1_local_conversion_no_api_retry',
+    storyCalendarPolicyV01155: 'preset_selected_or_event_day_over_model_inference',
     summaryExternalApiUrl: '',
     summaryExternalApiKey: '',
     summaryExternalApiModel: '',
@@ -125,6 +126,7 @@ function S() {
     const upgradingToV01152 = !Object.hasOwn(c.extensionSettings[MODULE], 'timelineRecoveryPolicyV01152');
     const upgradingToV01153 = !Object.hasOwn(c.extensionSettings[MODULE], 'jsonRestartPolicyV01153');
     const upgradingToV01154 = !Object.hasOwn(c.extensionSettings[MODULE], 'directLineProtocolV01154');
+    const upgradingToV01155 = !Object.hasOwn(c.extensionSettings[MODULE], 'storyCalendarPolicyV01155');
     for (const [k,v] of Object.entries(DEFAULTS)) {
         if (!Object.hasOwn(c.extensionSettings[MODULE], k)) c.extensionSettings[MODULE][k] = v;
     }
@@ -235,6 +237,10 @@ function S() {
     }
     if (upgradingToV01154) {
         c.extensionSettings[MODULE].directLineProtocolV01154='smm_lines_v1_local_conversion_no_api_retry';
+        try { c.saveSettingsDebounced?.(); } catch (_) {}
+    }
+    if (upgradingToV01155) {
+        c.extensionSettings[MODULE].storyCalendarPolicyV01155='preset_selected_or_event_day_over_model_inference';
         try { c.saveSettingsDebounced?.(); } catch (_) {}
     }
     if (upgradingToV01144) {
@@ -1217,6 +1223,118 @@ function isUnresolvedStoryTimeV0112(value) {
     return parseStoryClock(s)==null && /(?:具体)?时间[^。；]*?(?:未明确|无法验证|未知)/.test(s);
 }
 
+function storyCalendarSnapshotFromElementV01155(root) {
+    if(!root||typeof root.querySelectorAll!=='function') return {current:null,entries:[]};
+    const text=String(root.textContent||'').replace(/\s+/g,' ');
+    if(!/(?:STORY\s*CALENDAR|剧情日历|故事日历|灰烬日历)/i.test(text)) return {current:null,entries:[]};
+    const ym=text.match(/(20\d{2})\s*年\s*(\d{1,2})\s*月/i);
+    if(!ym) return {current:null,entries:[]};
+    const year=Number(ym[1]),month=Number(ym[2]);
+    const candidates=[];
+    const dayEntries=new Map();
+    for(const el of root.querySelectorAll('[data-date],[datetime],[aria-current],[aria-selected],[data-selected],*')){
+        const attrs=[el.getAttribute?.('data-date'),el.getAttribute?.('datetime')].filter(Boolean).join(' ');
+        const exact=attrs.match(/(20\d{2})[-\/.年](\d{1,2})[-\/.月](\d{1,2})/);
+        const cls=String(el.className||'');
+        const state=[cls,el.id||'',el.getAttribute?.('aria-current')||'',el.getAttribute?.('aria-selected')||'',el.getAttribute?.('data-selected')||'',el.getAttribute?.('style')||''].join(' ');
+        const marker=el.querySelector?.('[class*="today-dot"],[class*="current-dot"],[class*="selected-dot"],[class~="dot"]');
+        const selected=/(?:today|current|selected|active|checked|focus|highlight|is-today|is-current|当天|今日|选中)/i.test(state)
+            || el.getAttribute?.('aria-current')==='date'
+            || el.getAttribute?.('aria-selected')==='true'
+            || el.getAttribute?.('data-selected')==='true'
+            || !!marker;
+        if(exact&&selected){
+            const iso=normalizeDateInput(`${exact[1]}-${exact[2]}-${exact[3]}`)?.iso||null;
+            if(iso) candidates.push({iso,score:9});
+        }
+        const own=String(el.textContent||'').trim();
+        const dayHit=own.match(/^(\d{1,2})(?=\D|$)/);
+        if(!dayHit||own.length>160) continue;
+        const day=Number(dayHit[1]);
+        const iso=normalizeDateInput(`${year}-${String(month).padStart(2,'0')}-${String(day).padStart(2,'0')}`)?.iso||null;
+        if(!iso) continue;
+        const label=own.slice(dayHit[1].length).replace(/^(?:\s*(?:七|八|九|十|冬|腊|正)月[初十廿三一二三四五六七八九\s]*)/,'').replace(/\s+/g,' ').trim();
+        if(label&&label.length<=120){
+            const old=dayEntries.get(day);
+            if(!old||label.length<old.label.length) dayEntries.set(day,{date:iso,label});
+        }
+        if(!selected) continue;
+        const dot=marker||el.querySelector?.('[class*="today"],[class*="current"],[class*="selected"]');
+        candidates.push({iso,score:(dot?7:5)+(own.length<45?1:0)});
+    }
+    candidates.sort((a,b)=>a.score-b.score);
+    return {current:candidates.at(-1)?.iso||null,entries:[...dayEntries.values()]};
+}
+
+function storyCalendarDateFromElementV01155(root,event='') {
+    const snapshot=storyCalendarSnapshotFromElementV01155(root);
+    const target=String(event||'').trim();
+    if(target&&snapshot.entries.length){
+        const normalizedTarget=normalizeEventText(target);
+        const ranked=snapshot.entries.map(x=>{
+            const normalizedLabel=normalizeEventText(x.label);
+            const contained=normalizedLabel.length>=4&&normalizedTarget.includes(normalizedLabel);
+            return {...x,similarity:contained?1:textSimilarity(target,x.label)};
+        }).sort((a,b)=>a.similarity-b.similarity);
+        const best=ranked.at(-1);
+        if(best&&best.similarity>=0.08) return {date:best.date,matched_event:true,label:best.label};
+    }
+    const relativeCalendarCue=/(?:冬至|夏至|跨年夜|除夕|春节|元旦|正月|腊月|中秋|重阳|清明|端午)/.test(target);
+    if(relativeCalendarCue) return {date:null,matched_event:false,label:null};
+    return {date:snapshot.current,matched_event:false,label:null};
+}
+
+function extractStoryCalendarDateV01155(message,index=-1,event='') {
+    if(!message||message.is_user) return null;
+    const raw=String(message.mes||'');
+    if(!/(?:STORY\s*CALENDAR|剧情日历|故事日历|灰烬日历|story[-_ ]?calendar)/i.test(raw)) return null;
+    const relativeCalendarCue=/(?:冬至|夏至|跨年夜|除夕|春节|元旦|正月|腊月|中秋|重阳|清明|端午)/.test(String(event||''));
+
+    // Calendar event cells may name a historical event on a day other than the
+    // currently selected day. Match the event label before falling back to the
+    // selected/current cell.
+    if(typeof DOMParser==='function'){
+        try{
+            const doc=new DOMParser().parseFromString(raw,'text/html');
+            const picked=storyCalendarDateFromElementV01155(doc.body||doc,event);
+            if(picked?.date) return {date:picked.date,index,kind:'story_calendar',reason:picked.matched_event?`预设日历事件“${picked.label}”对应日期`:'预设日历选中日期'};
+        }catch(_){ }
+    }
+    if(relativeCalendarCue) return null;
+
+    // Explicit machine-readable values are preferred when the visual calendar
+    // did not expose a matching day cell.
+    const explicitPatterns=[
+        /(?:currentDate|current_date|storyDate|story_date|selectedDate|selected_date|calendarDate|calendar_date|today)\s*[:=]\s*["'](20\d{2}-\d{1,2}-\d{1,2})["']/i,
+        /(?:data-(?:current|selected|story|calendar-)?date|aria-label)\s*=\s*["'][^"']*?(20\d{2}-\d{1,2}-\d{1,2})[^"']*["']/i
+    ];
+    for(const re of explicitPatterns){
+        const hit=raw.match(re);
+        const iso=normalizeDateInput(hit?.[1]||'')?.iso||null;
+        if(iso) return {date:iso,index,kind:'story_calendar',reason:'预设日历显式当前日期'};
+    }
+
+    // The rendered message is useful when the card builds its calendar through
+    // client-side HTML/CSS and the stored message contains only the template.
+    if(typeof document!=='undefined'&&Number.isInteger(Number(index))){
+        try{
+            const root=document.querySelector(`.mes[mesid="${Number(index)}"], .mes[data-message-id="${Number(index)}"]`);
+            const picked=storyCalendarDateFromElementV01155(root,event);
+            if(picked?.date) return {date:picked.date,index,kind:'story_calendar',reason:picked.matched_event?`预设日历事件“${picked.label}”对应日期`:'预设日历渲染后的选中日期'};
+        }catch(_){ }
+    }
+    return null;
+}
+
+function latestStoryCalendarInRangeV01155(start,endExclusive) {
+    const chat=C().chat||[];
+    for(let i=Math.min(endExclusive,chat.length)-1;i>=Math.max(0,start);i--){
+        const hit=extractStoryCalendarDateV01155(chat[i],i);
+        if(hit?.date) return hit;
+    }
+    return null;
+}
+
 function applyWorldStateMetadataFallbackV0112(parsed, start, endExclusive) {
     if (!parsed || typeof parsed !== 'object') return parsed;
     const chat = C().chat || [];
@@ -1232,13 +1350,25 @@ function applyWorldStateMetadataFallbackV0112(parsed, start, endExclusive) {
     // summary wins; otherwise the MVU world/reality clock remains the fallback.
     if (Array.isArray(parsed.timeline)) {
         for (const e of parsed.timeline) {
+            const calendar=[...sourceIndexes(e?.source)].sort((a,b)=>b-a)
+                .map(i=>i>=start&&i<endExclusive?extractStoryCalendarDateV01155(chat[i],i,e?.event||''):null)
+                .find(x=>x?.date)||null;
             const idx = [...sourceIndexes(e?.source)].sort((a,b)=>b-a)
                 .find(i => i>=start && i<endExclusive && (narrativeRecAt(i)||extractWorldStateMetadataV0112(chat[i])));
+            if(calendar?.date){
+                e.date=calendar.date;
+                e.date_evidence='explicit';
+                e.date_evidence_label='预设日历日期';
+                e.date_evidence_reason=calendar.reason;
+                e.__story_calendar_v01155=true;
+            }
             if (!Number.isInteger(idx)) continue;
             const meta = extractWorldStateMetadataV0112(chat[idx]);
             const narrative=narrativeRecAt(idx);
-            if(narrative?.date) e.date=narrative.date;
-            else if (meta?.date && (meta.date_reality || isMissingStoryValueV0112(e?.date))) e.date=meta.date;
+            if(!calendar?.date){
+                if(narrative?.date) e.date=narrative.date;
+                else if (meta?.date && (meta.date_reality || isMissingStoryValueV0112(e?.date))) e.date=meta.date;
+            }
             if(narrative?.time) e.time=narrative.time;
             else if ((isMissingStoryValueV0112(e?.time) || (isUnresolvedStoryTimeV0112(e?.time) && parseStoryClock(meta?.time)!=null)) && meta?.time) e.time=meta.time;
         }
@@ -1247,16 +1377,18 @@ function applyWorldStateMetadataFallbackV0112(parsed, start, endExclusive) {
     // Top-level current story state uses world metadata only as a fallback.
     // v0.11.30 no longer lets /world/reality-time overwrite an explicit dated
     // narrative scene (for example a 2003 simulation inside a 2026 card).
+    const latestCalendar=latestStoryCalendarInRangeV01155(start,endExclusive);
     const latest = latestWorldStateMetaInRangeV0112(start,endExclusive);
     let latestNarrative=null;
     for(let i=Math.min(endExclusive,chat.length)-1;i>=Math.max(0,start);i--){
         const rec=narrativeRecAt(i);
         if(rec&&(rec.date||rec.time)){latestNarrative={index:i,...rec};break;}
     }
-    if (latest||latestNarrative) {
+    if (latestCalendar||latest||latestNarrative) {
         const parsedDate=normalizeDateInput(parsed.current_story_date||'')?.iso||null;
         const latestDate=normalizeDateInput(latest?.date||'')?.iso||null;
-        if(latestNarrative?.date) parsed.current_story_date=latestNarrative.date;
+        if(latestCalendar?.date) parsed.current_story_date=latestCalendar.date;
+        else if(latestNarrative?.date) parsed.current_story_date=latestNarrative.date;
         else if(latest?.date && (isMissingStoryValueV0112(parsed.current_story_date) ||
             (latest?.date_reality&&parsedDate&&latestDate&&parsedDate.slice(0,4)===latestDate.slice(0,4)&&latestDate>=parsedDate)))
             parsed.current_story_date=latest.date;
@@ -1280,7 +1412,9 @@ function messagesText(start, end) {
         const body = cleanMesForSummaryV0110(m);
         const meta = worldStateMetaPromptLineV0112(m, idx);
         const recapTime = roleCardRecapTimePromptLineV01144(m,idx);
-        return `[#${idx} ${who}]\n${body}${recapTime ? `\n${recapTime}` : ''}${meta ? `\n${meta}` : ''}`;
+        const calendar=extractStoryCalendarDateV01155(m,idx);
+        const calendarLine=calendar?.date?`[SMM_STORY_CALENDAR #${idx} | preset selected story date | ${calendar.date}]`:'';
+        return `[#${idx} ${who}]\n${body}${calendarLine?`\n${calendarLine}`:''}${recapTime ? `\n${recapTime}` : ''}${meta ? `\n${meta}` : ''}`;
     }).join('\n\n');
 }
 
@@ -1646,11 +1780,15 @@ function parseDirectLinesV01154(text) {
         if(['T','TL','TIMELINE','时间线'].includes(tag)&&parts.length>=4){
             const [source,date,time,...eventParts]=parts;
             const event=lineValueV01154(eventParts.join('｜'));
-            if(event){
+            // A protocol header echoed into the payload is transport metadata,
+            // never a story event.
+            const protocolOnly=/^(?:[\p{L}\p{N}_·•.．\-—–]{0,24})?SMM-LINES(?:-1)?[。.!！]?$/iu.test(event.replace(/\s+/g,''));
+            if(event&&!protocolOnly){
                 out.timeline.push({
                     date:lineValueV01154(date,{nullable:true}),
                     time:lineValueV01154(time,{nullable:true}),
-                    event,source:lineValueV01154(source,{nullable:true})
+                    event,source:lineValueV01154(source,{nullable:true}),
+                    __direct_line_v01154:true
                 });
                 recognized++;
             }
@@ -6674,8 +6812,8 @@ ${messagesText(start,end)}
 
 【硬规则】
 1. 同时读取 user 与 assistant 的真实正文，只总结本批已经发生的内容；忽略 thinking、分析、传闻栏和普通状态碎片。
-2. 角色回复中明确标注的剧情摘要及其剧情日期/时间可作为同楼证据；SillyTavern 消息时间、手机时间和现实日期绝不是剧情时间。
-3. 时间优先级：角色卡明确剧情时间 > 正文明确时间或“第二天/跨午夜” > 未知。没有证据就用 null 或“具体时刻未明确”，绝不编日期。
+2. [SMM_STORY_CALENDAR #N | ... | YYYY-MM-DD] 是插件从同楼预设剧情日历读取的选中日/事件日，是该楼日期的最高权威；角色回复中明确标注的剧情摘要日期/时间是次级证据。SillyTavern 消息时间、手机时间和现实日期绝不是剧情时间。
+3. 时间优先级：同楼 SMM_STORY_CALENDAR > 角色卡明确剧情时间 > 正文明确时间或“第二天/跨午夜” > 未知。星期、节气、农历日期不能自行换算成公历日期；没有证据就写 -，绝不编日期。
 4. 时间线是必填核心：只要本批存在剧情动作、对白、决定、地点/时间推进或关系变化，至少输出一行 T；source 只能引用 #${start} 到 #${Math.max(start,end-1)} 的真实编号。同一事件跨多楼时合并。
 5. 只使用下面的普通文本格式；字段以两个 @ 分隔，每条记录独占一行，正文中若出现 @ 请改为中文“在”。未知日期或时间写 -：
 T@@source@@YYYY-MM-DD或-@@时间或-@@已经发生的事件
@@ -8362,14 +8500,17 @@ function narrativeEvidenceForRowV01130(e,mem=M()) {
     const unpacked=unpackSecondarySceneTimeV01130(e?.time);
     let status=null;
     let prose=null;
+    let calendar=null;
     for(const i of [...indexes].reverse()){
+        if(!calendar) calendar=extractStoryCalendarDateV01155(chat[i],i,e?.event||'');
         if(!status) status=markedCurrentStatusV01130(chat[i],i);
         const cue=currentStoryCueFromMessageV01121(chat[i],i);
         if(cue?.date){prose={...cue,kind:'canonical_scene_cue'};break;}
     }
     const world=exactWorldStateMetaSameSourceV0117(indexes);
     let primary=null;
-    if(summary&&(summary.date||summary.time)) primary={...summary,kind:'preset_summary'};
+    if(calendar?.date) primary={...calendar,kind:'story_calendar'};
+    else if(summary&&(summary.date||summary.time)) primary={...summary,kind:'preset_summary'};
     else if(unpacked?.date) primary={...unpacked,index:sourceLast(e?.source),kind:'v01129_secondary_label'};
     else if(status?.date) primary=status;
     else if(prose?.date) primary=prose;
@@ -8399,7 +8540,7 @@ function repairNarrativeCalendarV01130(mem=M(),endInclusive=null) {
             e?.date_precision||null,e?.time||null
         ])
     ]);
-    if(mem?.narrative_calendar_v01130?.version==='0.11.44'&&mem?.narrative_calendar_v01130?.input_fingerprint===fingerprint){
+    if(mem?.narrative_calendar_v01130?.version==='0.11.55'&&mem?.narrative_calendar_v01130?.input_fingerprint===fingerprint){
         return {found:true,changed:false,rows_fixed:0,cached:true};
     }
 
@@ -8435,7 +8576,7 @@ function repairNarrativeCalendarV01130(mem=M(),endInclusive=null) {
                 rollingDate=date;
                 if(normalizeDateInput(row.e.date||'')?.iso!==date){row.e.date=date;changed=true;rowsFixed++;}
                 if(clearTimelineMonthPrecisionV01132(row.e)) changed=true;
-                const directDateReason=`同 source 的${p.kind==='preset_summary'?'预设剧情摘要':'正文/状态'}明确给出完整日期`;
+                const directDateReason=`同 source 的${p.kind==='story_calendar'?'预设日历选中日':(p.kind==='preset_summary'?'预设剧情摘要':'正文/状态')}明确给出完整日期`;
                 for(const [key,value] of [
                     ['date_evidence','explicit'],
                     ['date_evidence_label','原文明确日期'],
@@ -8571,7 +8712,7 @@ function repairNarrativeCalendarV01130(mem=M(),endInclusive=null) {
         ])
     ]);
     mem.narrative_calendar_v01130={
-        version:'0.11.44',at:new Date().toISOString(),input_fingerprint:finalFingerprint,
+        version:'0.11.55',at:new Date().toISOString(),input_fingerprint:finalFingerprint,
         processed_to:cap,scan_from:scanFrom,
         direct_anchors:directCount,rows_fixed:rowsFixed,time_fixed:timeFixed,
         time_precision_changed:precision.changed,time_precision_downgraded:precisionDowngraded,
@@ -11036,7 +11177,7 @@ function stat() {
 function panelHTML() {
     return `<div id="${PANEL_ID}" class="smm2-hidden">
       <div class="smm2-card">
-        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.54</span></div><button id="smm2_close">×</button></div>
+        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.55</span></div><button id="smm2_close">×</button></div>
         <div id="smm2_stats" class="smm2-stats"></div>
         <div class="smm2-grid">
           <button id="smm2_new">总结新增</button>
@@ -14045,7 +14186,7 @@ function installNativeExtensionEntry() {
 
         wrap.innerHTML = `
           <div class="inline-drawer-toggle inline-drawer-header">
-            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.54</span></div>
+            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.55</span></div>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
           </div>
           <div class="inline-drawer-content">
@@ -14254,6 +14395,56 @@ function refresh() {
     }
 }
 
+let SMM_CALENDAR_REPAIR_RUNNING_V01155=false;
+function protocolTimelineArtifactV01155(event) {
+    return /^(?:[\p{L}\p{N}_·•.．\-—–]{0,24})?SMM-LINES(?:-1)?[。.!！]?$/iu.test(String(event||'').replace(/\s+/g,''));
+}
+
+async function repairStoryCalendarOnceV01155({force=false}={}) {
+    if(SMM_CALENDAR_REPAIR_RUNNING_V01155) return null;
+    const mem=M();
+    const chat=C().chat||[];
+    const cap=Math.min(chat.length-1,Math.max(-1,Number(mem.last_processed_index??-1)));
+    const signature=JSON.stringify([cap,(mem.timeline||[]).map(x=>[x?.source,x?.date,x?.time,x?.event])]);
+    if(!force&&mem?.story_calendar_repair_v01155?.input_signature===signature) return mem.story_calendar_repair_v01155;
+    SMM_CALENDAR_REPAIR_RUNNING_V01155=true;
+    try{
+        const before=(mem.timeline||[]).length;
+        mem.timeline=(mem.timeline||[]).filter(x=>!protocolTimelineArtifactV01155(x?.event));
+        const protocolRemoved=before-mem.timeline.length;
+        // Force one calendar-aware pass over already-summarized v0.11.54 rows.
+        delete mem.narrative_calendar_v01130;
+        const calendar=repairNarrativeCalendarV01130(mem,cap);
+        const precision=repairTimelinePrecisionV01131(mem,cap,{audit:false});
+        syncCurrentDateFromTimeline(mem,null);
+        resolveCurrentNarrativeStateV01130(mem,cap);
+        const finalSignature=JSON.stringify([cap,(mem.timeline||[]).map(x=>[x?.source,x?.date,x?.time,x?.event])]);
+        mem.story_calendar_repair_v01155={
+            at:new Date().toISOString(),input_signature:finalSignature,
+            protocol_removed:protocolRemoved,calendar_rows_fixed:Number(calendar?.rows_fixed||0),
+            time_rows_fixed:Number(calendar?.time_fixed||0)+Number(precision?.changed||0),api_calls:0
+        };
+        mem.audit=Array.isArray(mem.audit)?mem.audit:[];
+        mem.audit.push({
+            at:mem.story_calendar_repair_v01155.at,type:'preset_story_calendar_repair_v01155',
+            ...mem.story_calendar_repair_v01155,
+            reason:'预设日历选中日/事件日优先；清除 SMM-LINES 协议标题；不调用 API'
+        });
+        if(mem.audit.length>50) mem.audit=mem.audit.slice(-50);
+        await saveMeta();
+        if(protocolRemoved||calendar?.changed||precision?.changed){
+            toast(`已用预设日历本地校准：日期 ${Number(calendar?.rows_fixed||0)} 条，时间 ${Number(calendar?.time_fixed||0)+Number(precision?.changed||0)} 条，清除协议标题 ${protocolRemoved} 条；未调用 API。`,'success');
+        }
+        refresh();
+        return mem.story_calendar_repair_v01155;
+    }catch(e){
+        console.warn('[StoryMemory] v0.11.55 story calendar repair failed',e);
+        return null;
+    }finally{
+        SMM_CALENDAR_REPAIR_RUNNING_V01155=false;
+    }
+}
+
 async function maybeAuto() {
     const s=S(); if (!s.enabled || !s.autoSummarize || BUSY) return;
     if(usingPaidProviderV01142(s)&&activeHistoryCatchupV01146(M())) return;
@@ -14299,7 +14490,7 @@ function initializeExtension() {
         }
     };
 
-    safeOn('CHAT_CHANGED', () => setTimeout(() => { installUI(); refresh(); }, 150));
+    safeOn('CHAT_CHANGED', () => setTimeout(() => { installUI(); refresh(); repairStoryCalendarOnceV01155(); }, 450));
     safeOn('MESSAGE_RECEIVED', () => setTimeout(async () => { refresh(); await maybeAuto(); }, 100));
     safeOn('MESSAGE_SENT', () => setTimeout(refresh, 50));
     safeOn('MESSAGE_EDITED', () => setTimeout(refresh, 50));
@@ -14310,7 +14501,8 @@ function initializeExtension() {
     try {
         installUI();
         refresh();
-        console.log('[StoryMemory] v0.11.54 loaded successfully');
+        setTimeout(()=>repairStoryCalendarOnceV01155(),600);
+        console.log('[StoryMemory] v0.11.55 loaded successfully');
     } catch (e) {
         console.error('[StoryMemory] UI initialization failed', e);
     }

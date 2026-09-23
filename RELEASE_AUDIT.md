@@ -1,4 +1,11 @@
-# v0.11.54 HYBRID Release Audit
+# v0.11.55 HYBRID Release Audit
+
+## v0.11.55 preset calendar audit
+
+- Reads explicit date attributes, selected calendar cells, and rendered calendar state.
+- Matches named calendar events to their own day before using the selected current day.
+- Reprocesses existing timeline dates locally with zero API calls and no cursor movement.
+- Removes protocol-header artifacts without removing story events.
 
 ## v0.11.54 direct line-protocol audit
 

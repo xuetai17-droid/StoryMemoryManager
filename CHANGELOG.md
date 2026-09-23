@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.11.55 HYBRID
+
+- Added preset story-calendar extraction from stored and rendered assistant output.
+- Calendar selected/event dates override unsupported model weekday-to-date inference.
+- Added a zero-API migration for existing timeline dates and protocol-header cleanup.
+
 ## v0.11.54 HYBRID
 
 - Direct external summaries now request a plain-text `SMM-LINES-1` protocol instead of JSON.
