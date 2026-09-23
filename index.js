@@ -1,5 +1,5 @@
-// Story Memory Manager v0.11.51
-// local malformed-JSON delimiter recovery without another API request
+// Story Memory Manager v0.11.52
+// local traceable-timeline recovery without another API request
 // does not rewrite original chat JSONL
 
 const MODULE = 'story_memory_manager_v2';
@@ -58,6 +58,7 @@ const DEFAULTS = Object.freeze({
     adaptiveInputTokensV01150: 36000,
     adaptiveInputBytesV01150: 144000,
     jsonRepairPolicyV01151: 'local_iterative_missing_delimiters_no_api_retry',
+    timelineRecoveryPolicyV01152: 'local_sources_events_facts_no_api_retry',
     summaryExternalApiUrl: '',
     summaryExternalApiKey: '',
     summaryExternalApiModel: '',
@@ -119,6 +120,7 @@ function S() {
     const upgradingToV01149 = !Object.hasOwn(c.extensionSettings[MODULE], 'summaryBatchPolicyV01149');
     const upgradingToV01150 = !Object.hasOwn(c.extensionSettings[MODULE], 'summaryTransportPolicyV01150');
     const upgradingToV01151 = !Object.hasOwn(c.extensionSettings[MODULE], 'jsonRepairPolicyV01151');
+    const upgradingToV01152 = !Object.hasOwn(c.extensionSettings[MODULE], 'timelineRecoveryPolicyV01152');
     for (const [k,v] of Object.entries(DEFAULTS)) {
         if (!Object.hasOwn(c.extensionSettings[MODULE], k)) c.extensionSettings[MODULE][k] = v;
     }
@@ -217,6 +219,10 @@ function S() {
     }
     if (upgradingToV01151) {
         c.extensionSettings[MODULE].jsonRepairPolicyV01151='local_iterative_missing_delimiters_no_api_retry';
+        try { c.saveSettingsDebounced?.(); } catch (_) {}
+    }
+    if (upgradingToV01152) {
+        c.extensionSettings[MODULE].timelineRecoveryPolicyV01152='local_sources_events_facts_no_api_retry';
         try { c.saveSettingsDebounced?.(); } catch (_) {}
     }
     if (upgradingToV01144) {
@@ -1796,6 +1802,82 @@ function normalizeTimelineSourcesV0113(delta, start, endExclusive) {
         }
     }
     return {normalized, unresolved};
+}
+
+function relativeBatchSourceV01152(source,start,endExclusive) {
+    const raw=String(source??'').trim();
+    const count=Math.max(0,endExclusive-start);
+    if(!raw||count<=0||sourceWithinBatchV0112(raw,start,endExclusive)) return null;
+    if(/主线总结|剧情总结|历史总结|summary/i.test(raw)) return null;
+    let nums=sourceIndexes(raw);
+    if(!nums.length) nums=[...raw.matchAll(/\d{1,4}/g)].map(m=>Number(m[0])).filter(Number.isInteger);
+    if(!nums.length) return null;
+
+    let mapped=null;
+    if(nums.every(n=>n>=1&&n<=count)) mapped=nums.map(n=>start+n-1);
+    else if(nums.includes(0)&&nums.every(n=>n>=0&&n<count)) mapped=nums.map(n=>start+n);
+    if(!mapped||!mapped.every(n=>n>=start&&n<endExclusive)) return null;
+    return canonicalSourceV0113(mapped);
+}
+
+function normalizeSummarySourcesV01152(delta,start,endExclusive) {
+    if(!delta||typeof delta!=='object') return 0;
+    const collections=['timeline','facts','events','npcs','relationships','character_anchors','active_arcs','open_loops','items','conflicts','quarantined','semantic_anchors'];
+    let normalized=0;
+    for(const key of collections){
+        for(const item of Array.isArray(delta[key])?delta[key]:[]){
+            if(!item||typeof item!=='object'||sourceWithinBatchV0112(item.source,start,endExclusive)) continue;
+            const relative=relativeBatchSourceV01152(item.source,start,endExclusive);
+            const loose=canonicalSourceV0113(looseSourceIndexesV0113(item.source,start,endExclusive));
+            const canonical=relative||loose;
+            if(canonical){item.source=canonical;normalized++;}
+        }
+    }
+    return normalized;
+}
+
+function recoverTraceableTimelineV01152(delta,start,endExclusive) {
+    if(!delta||typeof delta!=='object') return {added:0,source_normalized:0};
+    const sourceNormalized=normalizeSummarySourcesV01152(delta,start,endExclusive);
+    delta.timeline=Array.isArray(delta.timeline)?delta.timeline:[];
+    normalizeTimelineSourcesV0113(delta,start,endExclusive);
+    if(delta.timeline.some(item=>sourceWithinBatchV0112(item?.source,start,endExclusive))){
+        return {added:0,source_normalized:sourceNormalized};
+    }
+
+    const candidates=[];
+    const add=(event,source,date=null,time=null)=>{
+        const text=String(event||'').replace(/\s+/g,' ').trim();
+        if(!text) return;
+        let canonical=sourceWithinBatchV0112(source,start,endExclusive)?String(source):null;
+        if(!canonical) canonical=relativeBatchSourceV01152(source,start,endExclusive)
+            || canonicalSourceV0113(looseSourceIndexesV0113(source,start,endExclusive));
+        if(!canonical) return;
+        const signature=`${canonical}|${text}`;
+        if(candidates.some(x=>x.signature===signature)) return;
+        candidates.push({signature,item:{date:date||null,time:time||null,event:text.slice(0,800),source:canonical}});
+    };
+
+    for(const item of Array.isArray(delta.events)?delta.events:[]){
+        add([item?.title,item?.result].filter(Boolean).join('：'),item?.source,item?.date,null);
+    }
+    for(const item of Array.isArray(delta.semantic_anchors)?delta.semantic_anchors:[]){
+        add(item?.event,item?.source,null,null);
+    }
+    for(const item of Array.isArray(delta.facts)?delta.facts:[]){
+        add(item?.fact,item?.source,null,null);
+    }
+    for(const item of Array.isArray(delta.relationships)?delta.relationships:[]){
+        const people=Array.isArray(item?.people)?item.people.filter(Boolean).join('、'):'';
+        add(`${people}${people?'：':''}${item?.change||item?.state||''}`,item?.source,null,null);
+    }
+    for(const item of Array.isArray(delta.npcs)?delta.npcs:[]){
+        add(`${item?.name||'NPC'}：${item?.brief||item?.current_status||''}`,item?.source,null,null);
+    }
+
+    const recovered=candidates.slice(0,12).map(x=>x.item);
+    if(recovered.length) delta.timeline.push(...recovered);
+    return {added:recovered.length,source_normalized:sourceNormalized};
 }
 
 function canonicalBatchStatsV0112(start, endExclusive) {
@@ -6436,7 +6518,7 @@ ${messagesText(start,end)}
 1. 同时读取 user 与 assistant 的真实正文，只总结本批已经发生的内容；忽略 thinking、分析、传闻栏和普通状态碎片。
 2. 角色回复中明确标注的剧情摘要及其剧情日期/时间可作为同楼证据；SillyTavern 消息时间、手机时间和现实日期绝不是剧情时间。
 3. 时间优先级：角色卡明确剧情时间 > 正文明确时间或“第二天/跨午夜” > 未知。没有证据就用 null 或“具体时刻未明确”，绝不编日期。
-4. timeline 每项必须含 date、time、event、source；source 只能引用 #${start} 到 #${Math.max(start,end-1)} 的真实编号。同一事件跨多楼时合并。
+4. timeline 是必填核心字段：只要本批存在任何剧情动作、对白、决定、地点/时间推进或关系变化，timeline 必须至少输出1项，不能用 facts/events 代替。每项必须含 date、time、event、source；source 只能引用 #${start} 到 #${Math.max(start,end-1)} 的真实编号。同一事件跨多楼时合并。
 5. 主要人物写入 characters；次要人物写入 npcs 极简档案。同时提取明确的关系变化、关键事实、事件、地点、物品、未完成约定和重要语义锚点。
 6. story_start 保持已有值。只返回增量；本批未变化的分类用空数组或空对象，禁止复述整份旧记忆。
 7. 输出尽量简洁，目标不超过约1800 tokens。只输出符合上方 JSON 骨架的对象。`;
@@ -6545,6 +6627,16 @@ async function summarizeRange(start, end, options={}) {
     // structured world-state metadata. Canonical story prose remains the authority.
     applyWorldStateMetadataFallbackV0112(parsed, start, end);
 
+    // v0.11.52: a valid paid response may contain sourced events/facts while
+    // leaving timeline empty or numbering sources relative to the batch. Reuse
+    // that already-paid structured content locally; never call the model again.
+    const timelineRecoveryV01152=recoverTraceableTimelineV01152(parsed,start,end);
+    if(timelineRecoveryV01152.added||timelineRecoveryV01152.source_normalized){
+        console.info('[StoryMemory] local timeline recovery',{
+            range:[start,end-1],...timelineRecoveryV01152,apiCallsAdded:0
+        });
+    }
+
     let validation;
     try {
         validation = validateBatchCommitV0112(parsed, start, end);
@@ -6579,7 +6671,7 @@ async function summarizeRange(start, end, options={}) {
 
     if (options?.save !== false) await saveMeta();
     const provider=String(S().summaryProvider||'current');
-    return {...validation,mode:'ai',api_calls:1,transport:provider==='external'?'external_direct':(provider==='profile'?'profile':'current_quiet')};
+    return {...validation,timeline_recovery_v01152:timelineRecoveryV01152,mode:'ai',api_calls:1,transport:provider==='external'?'external_direct':(provider==='profile'?'profile':'current_quiet')};
 }
 
 let BUSY = false;
@@ -10774,7 +10866,7 @@ function stat() {
 function panelHTML() {
     return `<div id="${PANEL_ID}" class="smm2-hidden">
       <div class="smm2-card">
-        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.51</span></div><button id="smm2_close">×</button></div>
+        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.52</span></div><button id="smm2_close">×</button></div>
         <div id="smm2_stats" class="smm2-stats"></div>
         <div class="smm2-grid">
           <button id="smm2_new">总结新增</button>
@@ -13783,7 +13875,7 @@ function installNativeExtensionEntry() {
 
         wrap.innerHTML = `
           <div class="inline-drawer-toggle inline-drawer-header">
-            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.51</span></div>
+            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.52</span></div>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
           </div>
           <div class="inline-drawer-content">
@@ -14048,7 +14140,7 @@ function initializeExtension() {
     try {
         installUI();
         refresh();
-        console.log('[StoryMemory] v0.11.51 loaded successfully');
+        console.log('[StoryMemory] v0.11.52 loaded successfully');
     } catch (e) {
         console.error('[StoryMemory] UI initialization failed', e);
     }

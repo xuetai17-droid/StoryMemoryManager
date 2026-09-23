@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.11.52 HYBRID
+
+- Required at least one timeline item for narrative batches in the compact external prompt.
+- Added strict relative-to-absolute batch source normalization.
+- Added local timeline recovery from already-paid sourced events, semantic anchors, facts, relationships, and NPC records.
+- Recovery performs zero additional model/API calls and retains the existing commit guard.
+
 ## v0.11.51 HYBRID
 
 - Added iterative local recovery for missing commas between array elements and object properties.

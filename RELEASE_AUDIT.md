@@ -1,4 +1,12 @@
-# v0.11.51 HYBRID Release Audit
+# v0.11.52 HYBRID Release Audit
+
+## v0.11.52 traceable timeline recovery audit
+
+- Trigger observed: HTTP 200 / usable JSON for batch `#36-#45`, followed by zero traceable timeline nodes and cursor preservation.
+- Relative sources are mapped only when every referenced ordinal fits the current batch size; dates and out-of-range values are rejected.
+- Timeline recovery only accepts entries carrying a source that resolves inside the current batch.
+- Recovery priority: events → semantic anchors → facts → relationships → NPC summaries; maximum 12 recovered nodes.
+- The recovered delta still passes the unchanged commit validator. Zero-source responses remain rejected; no second API request exists in the recovery path.
 
 ## v0.11.51 malformed JSON audit
 

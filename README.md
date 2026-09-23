@@ -1,4 +1,12 @@
-# Story Memory Manager v0.11.51 HYBRID
+# Story Memory Manager v0.11.52 HYBRID
+
+## v0.11.52 本地恢复可追溯时间线
+
+- 修复“API HTTP 200、JSON可用，但 timeline 为空或 source 不在本批范围”导致整批付费结果被拒绝的问题。
+- 提示词明确要求：存在剧情内容时 timeline 至少一项，facts/events 不能替代 timeline。
+- 如果模型把本批编号写成相对编号 `#1～#15`，插件会严格映射到当前真实楼层范围。
+- 如果 timeline 为空，插件会从同一次响应中带有效 source 的 events、semantic_anchors、facts、relationships、NPC记录依次恢复时间线。
+- 本地恢复不调用API；恢复后仍需通过原有楼层范围与提交校验。没有任何可追溯来源时仍拒绝写入。
 
 ## v0.11.51 本地修复模型返回的残缺 JSON
 
