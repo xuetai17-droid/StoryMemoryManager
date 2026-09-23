@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.11.57 HYBRID
+
+- 将关键的已确认事实置于记忆提示前部，并缩短普通历史内容。
+- 对生成时注入长度施加约 8500 字符的优先级裁剪；本地模拟验证。
+
 ## v0.11.56 HYBRID
 
 - Inject confirmed memory even while historical coverage remains incomplete.

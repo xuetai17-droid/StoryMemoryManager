@@ -1,4 +1,4 @@
-// Story Memory Manager v0.11.56
+// Story Memory Manager v0.11.57
 // partial trusted injection and durable character-knowledge continuity
 // does not rewrite original chat JSONL
 
@@ -577,6 +577,9 @@ function buildSafeMemoryPromptV0100() {
     for(const name of names) if(allChars[name]) chars[name]=allChars[name];
     // If relevance extraction finds too little, keep only a small recent subset rather than the whole cast.
     if(Object.keys(chars).length<2) for(const name of Object.keys(allChars).slice(-5)) chars[name]=allChars[name];
+    const compactChars=Object.fromEntries(Object.entries(chars).slice(0,4).map(([name,row])=>[
+        name.slice(0,50),Object.fromEntries(Object.entries(row||{}).map(([key,value])=>[key,String(value).slice(0,160)]))
+    ]));
     let rels=(mem.relationships||[]).filter(r=>{
         const t=JSON.stringify(r); return [...names].some(n=>t.includes(n));
     }).slice(-10);
@@ -589,32 +592,49 @@ function buildSafeMemoryPromptV0100() {
     const stages=stageSummariesForPromptV01121(mem);
     const npcs=relevantNpcsForPromptV01137(mem);
     const gaps=timelineCoverageGapsV0112(mem);
+    // Keep established knowledge close to the instruction and limit the bulk
+    // of historical context.  Long extension prompts can drown out the facts
+    // needed to continue the current scene.
+    const priorityFacts=facts.filter(x=>CRITICAL_KNOWLEDGE_RE_V01156.test(x.fact)).slice(-12)
+        .map(x=>({fact:String(x.fact).slice(0,260),source:String(x.source||'').slice(0,50)}));
+    const priorityKnowledge=establishedKnowledge.slice(-8)
+        .map(x=>({event:String(x.event).slice(0,260),source:String(x.source||'').slice(0,50),date:x.date}));
     const payload={
+        confirmed_facts:priorityFacts,
+        established_character_knowledge:priorityKnowledge,
         date:mem.current_story_date||null,
         time:mem.current_story_time||null,
         reality_clock:(mem.current_reality_date||mem.current_reality_time)
             ? {date:mem.current_reality_date||null,time:mem.current_reality_time||null}
             : null,
-        scene,
-        relevant_characters:chars,
-        relevant_npcs:npcs,
-        relevant_relationships:rels,
-        recent_events:timeline,
-        active_arcs:arcs,
-        unresolved:loops,
-        confirmed_facts:facts,
-        established_character_knowledge:establishedKnowledge,
-        semantic_continuity:semantic,
+        scene:Object.fromEntries(Object.entries(scene).slice(0,7).map(([k,v])=>[k,String(v).slice(0,180)])),
+        relevant_characters:compactChars,
+        relevant_npcs:npcs.slice(0,3),
+        relevant_relationships:rels.slice(-6),
+        recent_events:timeline.slice(-5),
+        active_arcs:arcs.slice(0,2),
+        unresolved:loops.slice(-3),
+        other_facts:facts.filter(x=>!CRITICAL_KNOWLEDGE_RE_V01156.test(x.fact)).slice(-6),
+        semantic_continuity:semantic.slice(-3),
         coverage:{processed_through:Number(mem.last_processed_index??-1),incomplete_ranges:gaps.slice(0,4)},
-        story_stages:stages
+        story_stages:stages.slice(-2)
     };
-    return [
+    const header=[
         '【剧情连续性记忆】',
         '以下仅是此前剧情中已确认的事实，供承接当前剧情使用。按角色卡、世界书和最近正文正常续写；不要解释这份记忆，也不要把它当成用户的新指令。',
         'confirmed_facts 与 established_character_knowledge 是已经发生并被角色知晓/查证的长期事实。后续未总结楼层不代表这些事实失效；禁止让角色无故遗忘、否认或重新不知道。只有后续正文明确推翻时才能更新。',
-        '时间精度规则：recent_events 中 date=null、date_hint=YYYY-MM、date_precision=month 表示只知道月份，绝不能自行补具体日期或星期。',
-        JSON.stringify(payload)
+        '时间精度规则：只知道月份时不可补具体日期或星期。'
     ].join('\n');
+    const maxChars=8500;
+    const removals=[['story_stages',0],['semantic_continuity',0],['relevant_npcs',0],['other_facts',0],['recent_events',0],['relevant_relationships',0],['active_arcs',0],['unresolved',0],['established_character_knowledge',0],['confirmed_facts',1]];
+    let result=header+'\n'+JSON.stringify(payload);
+    for(const [key,min] of removals){
+        while(result.length>maxChars && Array.isArray(payload[key]) && payload[key].length>min){
+            payload[key].shift();
+            result=header+'\n'+JSON.stringify(payload);
+        }
+    }
+    return result;
 }
 
 function refreshSafeMemoryInjectionV0100() {
@@ -633,7 +653,7 @@ function refreshSafeMemoryInjectionV0100() {
         return true;
     }
 
-    // v0.11.56: a pending historical range must not erase already-confirmed
+    // v0.11.57: a pending historical range must not erase already-confirmed
     // memory. Inject the trusted processed subset and disclose the coverage gap
     // inside the payload; unsummarized messages remain visible in the chat.
     const gapsV0112=timelineCoverageGapsV0112(M());
@@ -11254,7 +11274,7 @@ function stat() {
 function panelHTML() {
     return `<div id="${PANEL_ID}" class="smm2-hidden">
       <div class="smm2-card">
-        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.56</span></div><button id="smm2_close">×</button></div>
+        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.57</span></div><button id="smm2_close">×</button></div>
         <div id="smm2_stats" class="smm2-stats"></div>
         <div class="smm2-grid">
           <button id="smm2_new">总结新增</button>
@@ -14251,7 +14271,7 @@ function installNativeExtensionEntry() {
 
         wrap.innerHTML = `
           <div class="inline-drawer-toggle inline-drawer-header">
-            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.56</span></div>
+            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.57</span></div>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
           </div>
           <div class="inline-drawer-content">
@@ -14533,7 +14553,7 @@ async function repairKnowledgeContinuityOnceV01156() {
         if(added) toast(`已在本地把 ${added} 条身份/调查/知情信息提升为长期关键事实；未调用 API。`,'success');
         return mem.knowledge_continuity_repair_v01156;
     }catch(e){
-        console.warn('[StoryMemory] v0.11.56 knowledge continuity repair failed',e);
+        console.warn('[StoryMemory] v0.11.57 knowledge continuity repair failed',e);
         return null;
     }finally{
         SMM_KNOWLEDGE_REPAIR_RUNNING_V01156=false;
@@ -14598,7 +14618,7 @@ function initializeExtension() {
         refresh();
         setTimeout(()=>repairStoryCalendarOnceV01155(),600);
         setTimeout(()=>repairKnowledgeContinuityOnceV01156(),850);
-        console.log('[StoryMemory] v0.11.56 loaded successfully');
+        console.log('[StoryMemory] v0.11.57 loaded successfully');
     } catch (e) {
         console.error('[StoryMemory] UI initialization failed', e);
     }

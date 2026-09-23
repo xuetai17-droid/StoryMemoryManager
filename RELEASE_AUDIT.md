@@ -1,6 +1,6 @@
-# v0.11.56 HYBRID Release Audit
+# v0.11.57 HYBRID Release Audit
 
-## v0.11.56 memory injection audit
+## v0.11.57 memory injection audit
 
 - Coverage gaps are disclosed but no longer suppress already-confirmed memory.
 - Canonical facts, critical historical knowledge, current roles, relationships, and recent events are injected separately.
