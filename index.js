@@ -1,5 +1,5 @@
-// Story Memory Manager v0.11.53
-// restarted/concatenated JSON recovery and timeline-first compact skeleton
+// Story Memory Manager v0.11.54
+// direct external API uses a plain-text line protocol with local JSON conversion
 // does not rewrite original chat JSONL
 
 const MODULE = 'story_memory_manager_v2';
@@ -60,6 +60,7 @@ const DEFAULTS = Object.freeze({
     jsonRepairPolicyV01151: 'local_iterative_missing_delimiters_no_api_retry',
     timelineRecoveryPolicyV01152: 'local_sources_events_facts_no_api_retry',
     jsonRestartPolicyV01153: 'prefer_latest_complete_root_no_api_retry',
+    directLineProtocolV01154: 'smm_lines_v1_local_conversion_no_api_retry',
     summaryExternalApiUrl: '',
     summaryExternalApiKey: '',
     summaryExternalApiModel: '',
@@ -123,6 +124,7 @@ function S() {
     const upgradingToV01151 = !Object.hasOwn(c.extensionSettings[MODULE], 'jsonRepairPolicyV01151');
     const upgradingToV01152 = !Object.hasOwn(c.extensionSettings[MODULE], 'timelineRecoveryPolicyV01152');
     const upgradingToV01153 = !Object.hasOwn(c.extensionSettings[MODULE], 'jsonRestartPolicyV01153');
+    const upgradingToV01154 = !Object.hasOwn(c.extensionSettings[MODULE], 'directLineProtocolV01154');
     for (const [k,v] of Object.entries(DEFAULTS)) {
         if (!Object.hasOwn(c.extensionSettings[MODULE], k)) c.extensionSettings[MODULE][k] = v;
     }
@@ -229,6 +231,10 @@ function S() {
     }
     if (upgradingToV01153) {
         c.extensionSettings[MODULE].jsonRestartPolicyV01153='prefer_latest_complete_root_no_api_retry';
+        try { c.saveSettingsDebounced?.(); } catch (_) {}
+    }
+    if (upgradingToV01154) {
+        c.extensionSettings[MODULE].directLineProtocolV01154='smm_lines_v1_local_conversion_no_api_retry';
         try { c.saveSettingsDebounced?.(); } catch (_) {}
     }
     if (upgradingToV01144) {
@@ -1608,6 +1614,108 @@ function parseJSON(text) {
     catch(error){
         const preview=raw.replace(/\s+/g,' ').slice(0,240);
         throw new Error(`${error?.message||error}；响应开头：${preview}`);
+    }
+}
+
+function emptyDirectDeltaV01154() {
+    return {
+        story_start:null,current_story_date:null,current_story_time:null,current_scene:{},
+        timeline:[],facts:[],events:[],characters:{},npcs:[],relationships:[],
+        character_anchors:[],active_arcs:[],open_loops:[],locations:[],items:[],
+        conflicts:[],quarantined:[],semantic_anchors:[]
+    };
+}
+
+function lineValueV01154(value,{nullable=false}={}) {
+    const text=String(value??'').trim();
+    if(nullable&&(!text||/^(?:-|null|none|未知|不明|未明确|具体时刻未明确)$/i.test(text))) return null;
+    return text;
+}
+
+function parseDirectLinesV01154(text) {
+    const raw=String(text??'').replace(/```(?:text)?/gi,'').trim();
+    if(!raw) throw new Error('模型返回为空');
+    const out=emptyDirectDeltaV01154();
+    let recognized=0;
+    const rows=raw.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
+    for(const original of rows){
+        const line=original.replace(/^[-*•]\s*/,'').trim();
+        if(/^SMM-LINES(?:-1)?$/i.test(line)){ recognized++; continue; }
+        const parts=line.split(/\s*(?:@@|｜|\|)\s*/);
+        const tag=String(parts.shift()||'').trim().toUpperCase();
+        if(['T','TL','TIMELINE','时间线'].includes(tag)&&parts.length>=4){
+            const [source,date,time,...eventParts]=parts;
+            const event=lineValueV01154(eventParts.join('｜'));
+            if(event){
+                out.timeline.push({
+                    date:lineValueV01154(date,{nullable:true}),
+                    time:lineValueV01154(time,{nullable:true}),
+                    event,source:lineValueV01154(source,{nullable:true})
+                });
+                recognized++;
+            }
+            continue;
+        }
+        if(['F','FACT','事实'].includes(tag)&&parts.length>=2){
+            const [source,...factParts]=parts;
+            const fact=lineValueV01154(factParts.join('｜'));
+            if(fact){ out.facts.push({fact,source:lineValueV01154(source,{nullable:true})}); recognized++; }
+            continue;
+        }
+        if(['N','NPC'].includes(tag)&&parts.length>=3){
+            const [source,name,identity,...rest]=parts;
+            const brief=lineValueV01154(rest.shift());
+            const current_status=lineValueV01154(rest.join('｜'),{nullable:true});
+            if(lineValueV01154(name)&&brief){
+                out.npcs.push({name:lineValueV01154(name),identity:lineValueV01154(identity,{nullable:true}),brief,current_status,aliases:[],source:lineValueV01154(source,{nullable:true})});
+                recognized++;
+            }
+            continue;
+        }
+        if(['P','CHAR','CHARACTER','人物'].includes(tag)&&parts.length>=3){
+            const [source,name,identity,...profileParts]=parts;
+            const cleanName=lineValueV01154(name);
+            const profile=lineValueV01154(profileParts.join('｜'));
+            if(cleanName&&profile){
+                out.characters[cleanName]={identity:lineValueV01154(identity,{nullable:true}),profile,source:lineValueV01154(source,{nullable:true})};
+                recognized++;
+            }
+            continue;
+        }
+        if(['R','REL','RELATION','关系'].includes(tag)&&parts.length>=4){
+            const [source,peopleText,state,...changeParts]=parts;
+            const people=String(peopleText||'').split(/\s*(?:,|，|、|&|和)\s*/).filter(Boolean);
+            const change=lineValueV01154(changeParts.join('｜'));
+            if(people.length>=2&&change){
+                out.relationships.push({people,state:lineValueV01154(state),change,source:lineValueV01154(source,{nullable:true})});
+                recognized++;
+            }
+            continue;
+        }
+        if(['C','NOW','SCENE','当前'].includes(tag)&&parts.length>=3){
+            const [date,time,...locationParts]=parts;
+            out.current_story_date=lineValueV01154(date,{nullable:true});
+            out.current_story_time=lineValueV01154(time,{nullable:true});
+            const location=lineValueV01154(locationParts.join('｜'),{nullable:true});
+            if(location) out.current_scene={location};
+            recognized++;
+            continue;
+        }
+    }
+    if(!out.timeline.length){
+        throw new Error(`模型没有返回可识别的 T@@source@@date@@time@@event 行：${raw.replace(/\s+/g,' ').slice(0,240)}`);
+    }
+    console.info('[StoryMemory] converted SMM-LINES locally',{recognized,timeline:out.timeline.length,apiCallsAdded:0});
+    return out;
+}
+
+function parseDirectSummaryV01154(text) {
+    try { return parseJSON(text); }
+    catch(jsonError){
+        try { return parseDirectLinesV01154(text); }
+        catch(lineError){
+            throw new Error(`${lineError.message}；JSON 兼容解析也失败：${jsonError.message}`);
+        }
     }
 }
 
@@ -5495,7 +5603,11 @@ async function generateViaExternalApiV01142({prompt='',systemPrompt='',jsonSchem
     const url=externalApiChatUrlV01142(s.summaryExternalApiUrl||'');
     const key=String(s.summaryExternalApiKey||'').trim();
     const model=String(s.summaryExternalApiModel||'').trim();
-    const requestPrompt=promptWithCompactJsonSkeletonV01140(prompt,jsonSchema);
+    // v0.11.54: direct external models have repeatedly produced broken JSON or
+    // explicitly refused the JSON task. The direct route now asks for a small
+    // plain-text line protocol and converts it to the canonical object locally.
+    // Profile/current transports retain their existing JSON behavior.
+    const requestPrompt=String(prompt||'').trim();
     const merged=[String(systemPrompt||'').trim(),String(systemPrompt||'').trim()?'---':'',requestPrompt]
         .filter(Boolean).join('\n\n');
     const messages=[{role:'user',content:merged}];
@@ -6551,7 +6663,7 @@ ${messagesText(start, end)}
 特别检查日期连续性：没有新增原始聊天中的明确跨月证据，就必须继承已有可靠月份；禁止仅凭 AI <date> 或自行推算跨月。`;
 }
 
-const SYSTEM_PROMPT_COMPACT_V01150 = `你是剧情长期记忆的增量抽取器。只记录本批 user 与 assistant 正文中已经发生的事实；禁止创作、猜测或把计划当成已发生事实。严格输出一个 JSON 对象，不要 Markdown 或解释。所有 source 必须引用本批真实 #楼层。没有新增内容的数组输出 []，没有变化的对象输出 {}。`;
+const SYSTEM_PROMPT_COMPACT_V01150 = `你是剧情长期记忆的增量摘录员。只记录本批 user 与 assistant 正文中已经发生的事实；禁止创作、猜测或把计划当成已发生事实。回答使用普通文本分行记录，不使用 JSON、Markdown、代码块、前言或解释。所有 source 必须引用本批真实 #楼层。`;
 
 function buildCompactDirectPromptV01150(start,end,mem=M()) {
     return `【已有压缩记忆（只用于连续性，不是本批新事实）】
@@ -6564,10 +6676,16 @@ ${messagesText(start,end)}
 1. 同时读取 user 与 assistant 的真实正文，只总结本批已经发生的内容；忽略 thinking、分析、传闻栏和普通状态碎片。
 2. 角色回复中明确标注的剧情摘要及其剧情日期/时间可作为同楼证据；SillyTavern 消息时间、手机时间和现实日期绝不是剧情时间。
 3. 时间优先级：角色卡明确剧情时间 > 正文明确时间或“第二天/跨午夜” > 未知。没有证据就用 null 或“具体时刻未明确”，绝不编日期。
-4. timeline 是必填核心字段：只要本批存在任何剧情动作、对白、决定、地点/时间推进或关系变化，timeline 必须至少输出1项，不能用 facts/events 代替。每项必须含 date、time、event、source；source 只能引用 #${start} 到 #${Math.max(start,end-1)} 的真实编号。同一事件跨多楼时合并。
-5. timeline 之外只输出本批确有变化的可选增量字段：facts、events、characters、npcs、relationships、character_anchors、active_arcs、open_loops、locations、items、semantic_anchors、current_scene、current_story_date、current_story_time。主要人物写入 characters，次要人物写入 npcs 极简档案；没有变化的可选字段可直接省略。
-6. story_start 保持已有值。只返回增量；本批未变化的分类用空数组或空对象，禁止复述整份旧记忆。
-7. 输出尽量简洁，目标不超过约1800 tokens。只输出符合上方 JSON 骨架的对象。`;
+4. 时间线是必填核心：只要本批存在剧情动作、对白、决定、地点/时间推进或关系变化，至少输出一行 T；source 只能引用 #${start} 到 #${Math.max(start,end-1)} 的真实编号。同一事件跨多楼时合并。
+5. 只使用下面的普通文本格式；字段以两个 @ 分隔，每条记录独占一行，正文中若出现 @ 请改为中文“在”。未知日期或时间写 -：
+T@@source@@YYYY-MM-DD或-@@时间或-@@已经发生的事件
+F@@source@@稳定事实
+P@@source@@主要人物姓名@@身份@@稳定人物资料或当前状态变化
+N@@source@@次要人物姓名@@身份@@极简档案@@当前状态
+R@@source@@人物1、人物2@@当前关系@@本批关系变化
+C@@YYYY-MM-DD或-@@当前剧情时间或-@@当前地点或-
+6. 第一行写 SMM-LINES-1。T 行必填；F/P/N/R/C 仅在本批确有新增或变化时输出，禁止复述整份旧记忆。
+7. 输出尽量简洁，目标不超过约1800 tokens。不要输出 JSON，也不要解释格式。`;
 }
 
 function summaryPromptForTransportV01150(start,end,mem=M()) {
@@ -6585,8 +6703,9 @@ function summarySystemForTransportV01150() {
 function summaryRequestStatsForRangeV01149(start,end,mem=M()) {
     const prompt=summaryPromptForTransportV01150(start,end,mem);
     const systemPrompt=summarySystemForTransportV01150();
-    const jsonSchema=String(S().summaryProvider||'current')==='external'?directDeltaSchemaV01153():schema();
-    const requestPrompt=promptWithCompactJsonSkeletonV01140(prompt,jsonSchema);
+    const external=String(S().summaryProvider||'current')==='external';
+    const jsonSchema=external?null:schema();
+    const requestPrompt=external?String(prompt||'').trim():promptWithCompactJsonSkeletonV01140(prompt,jsonSchema);
     const merged=[
         String(systemPrompt||'').trim(),
         String(systemPrompt||'').trim()?'---':'',
@@ -6647,7 +6766,7 @@ async function summarizeRange(start, end, options={}) {
     // sent back to the model for a second or third paid attempt.
     let raw;
     try {
-        const jsonSchema=String(S().summaryProvider||'current')==='external'?directDeltaSchemaV01153():schema();
+        const jsonSchema=String(S().summaryProvider||'current')==='external'?null:schema();
         const generation=smmGenerateV093({systemPrompt,prompt,jsonSchema});
         raw = String(S().summaryProvider||'current')==='external'
             ? await generation
@@ -6663,10 +6782,13 @@ async function summarizeRange(start, end, options={}) {
 
     let parsed;
     try {
-        parsed = sanitizeSummaryObjectV01118(filterMetaSignals(parseJSON(raw)));
+        const decoded=String(S().summaryProvider||'current')==='external'
+            ? parseDirectSummaryV01154(raw)
+            : parseJSON(raw);
+        parsed = sanitizeSummaryObjectV01118(filterMetaSignals(decoded));
     } catch (e) {
         if(usingPaidProviderV01142(S())) lockSelectedPaidProviderV01142('独立 API 返回非 JSON',e);
-        const err = new Error(`当前模型本批输出不是可用 JSON；未写入记忆，待总结楼层仍保留。本批只调用了 1 次：${e?.message||e}`);
+        const err = new Error(`当前模型本批输出不是可用的摘要记录；未写入记忆，待总结楼层仍保留。本批只调用了 1 次：${e?.message||e}`);
         err.smmSingleRequestInvalidJsonV01136 = true;
         throw err;
     }
@@ -10914,7 +11036,7 @@ function stat() {
 function panelHTML() {
     return `<div id="${PANEL_ID}" class="smm2-hidden">
       <div class="smm2-card">
-        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.53</span></div><button id="smm2_close">×</button></div>
+        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.54</span></div><button id="smm2_close">×</button></div>
         <div id="smm2_stats" class="smm2-stats"></div>
         <div class="smm2-grid">
           <button id="smm2_new">总结新增</button>
@@ -13923,7 +14045,7 @@ function installNativeExtensionEntry() {
 
         wrap.innerHTML = `
           <div class="inline-drawer-toggle inline-drawer-header">
-            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.53</span></div>
+            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.54</span></div>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
           </div>
           <div class="inline-drawer-content">
@@ -14188,7 +14310,7 @@ function initializeExtension() {
     try {
         installUI();
         refresh();
-        console.log('[StoryMemory] v0.11.53 loaded successfully');
+        console.log('[StoryMemory] v0.11.54 loaded successfully');
     } catch (e) {
         console.error('[StoryMemory] UI initialization failed', e);
     }

@@ -1,4 +1,11 @@
-# v0.11.53 HYBRID Release Audit
+# v0.11.54 HYBRID Release Audit
+
+## v0.11.54 direct line-protocol audit
+
+- Direct external prompt explicitly requests non-JSON `SMM-LINES-1` records.
+- Local parser converts valid T/F/P/N/R/C records without any model retry.
+- A refusal or malformed record cannot commit memory or advance the cursor.
+- Legacy JSON, JSON repair, and restarted-root recovery remain available.
 
 ## v0.11.53 restarted JSON audit
 

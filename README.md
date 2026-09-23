@@ -1,4 +1,11 @@
-# Story Memory Manager v0.11.53 HYBRID
+# Story Memory Manager v0.11.54 HYBRID
+
+## v0.11.54 独立 API 改用普通文本行协议
+
+- 直接外部 API 不再要求模型生成 JSON，改为简短的 `SMM-LINES-1` 分行摘要。
+- 插件在本地将 T/F/P/N/R/C 行转换为原有长期记忆结构，不改变既有记忆架构。
+- 仍然每批只请求一次；本地转换不会追加 API 调用，失败不写入且不推进游标。
+- 兼容模型偶尔仍返回的旧 JSON，并保留 v0.11.53 的粘连 JSON 恢复。
 
 ## v0.11.53 修复同一响应中JSON重新开头/粘连
 

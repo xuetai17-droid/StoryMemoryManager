@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.11.54 HYBRID
+
+- Direct external summaries now request a plain-text `SMM-LINES-1` protocol instead of JSON.
+- Added local conversion of timeline, facts, primary characters, NPCs, relationships, and current scene into the canonical memory delta.
+- Kept one request per batch, no paid repair retries, cursor preservation, and backward-compatible JSON parsing.
+
 ## v0.11.53 HYBRID
 
 - Added local recovery for restarted or concatenated root JSON objects, preferring the latest complete root.
