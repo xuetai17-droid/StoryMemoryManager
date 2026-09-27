@@ -1,3 +1,11 @@
+# v0.11.58 HYBRID Release Audit
+
+- Failure pause is stored in current-chat metadata; failure does not advance `last_processed_index` or commit new memory. A later event cannot silently repeat the same automatic model request. A deliberate manual action clears the pause.
+- Local panel diagnostics distinguish plugin disabled, auto toggle disabled, no observed `MESSAGE_RECEIVED`, below-threshold pending count, active catch-up, and failure pause. The diagnostic cannot reconstruct pre-upgrade event history or read a phone's local extension settings from an exported memory JSON.
+- `knowledge_states` accepts only explicit statuses with a real source inside the active batch and at least one named knower/unaware person. Invalid or out-of-batch states are excluded and audited. Timeline/facts remain the canonical long-term architecture.
+- Generation injection labels keyword-promoted facts as author-level truth and only supplies person-level knowledge from explicit knowledge-state records; unknown awareness remains undetermined and may not be disclosed.
+- No API is used during migration/repair. Original chat JSONL is unchanged.
+
 # v0.11.57 HYBRID Release Audit
 
 ## v0.11.57 memory injection audit
