@@ -1,3 +1,15 @@
+# v0.11.66 release audit
+
+Observed device evidence: current chat book contains actual SMM text; duplicate attributed/unattributed recap facts and premature downgrade of explicit time intervals were visible.
+
+Changes: digest timeline rows excluded from legacy keyword promotion; dedup ignores the attribution prefix for display only; recap evidence now carries both interval endpoints; source-matched repair preserves memory row count and processed cursor. No character knowledge inferred. Existing stored facts are preserved.
+
+New activation preflight uses the current context's getWorldInfoPrompt(reverseChat, maxContext, true). It checks enabled constant SMM entry and looks for the complete selected memory body. Current chat-completion context size is used for OpenAI-compatible backends. No Generate/sendRequest/summary request or global budget change. Missing scan API or context size reports an incomplete check instead of guessing. Preflight is not proof of final model request inclusion or model adoption.
+
+Local tests passed: original 46-message export, 22 digests/23 timeline rows/11 character snapshots, cursor 44, 4 source-time conflicts, current date/time 2024-08-27 08:05; no paid API calls. Added checks for prefix dedup, skipped duplicate promotion, restored intervals, activation match/miss, and existing rollback/idempotence checks. Phone-side preflight remains to be run.
+
+## Previous audits
+
 # v0.11.65 HYBRID Release Audit
 
 Actual export used locally: story-raw-chat-1792001629198.json. 46 messages, 23 assistant messages, 22 complete digests. The initial greeting #0 has no digest; the last user message #45 has no response.
