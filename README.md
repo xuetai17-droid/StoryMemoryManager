@@ -1,4 +1,6 @@
-# Story Memory Manager v0.11.63 HYBRID
+# Story Memory Manager v0.11.64 HYBRID
+
+本版统一版本标识，并使用新的脚本文件名，避免浏览器复用旧脚本。安装后重新加载酒馆，SMM 标题应显示 v0.11.64。没有选择角色卡时，启用按钮只提示先进入聊天，不创建世界书。
 
 ## 最简单的用法
 

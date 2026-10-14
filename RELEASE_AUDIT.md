@@ -1,4 +1,4 @@
-# v0.11.63 HYBRID Release Audit
+# v0.11.64 HYBRID Release Audit
 
 - One click creates an SMM-owned World Info book for the current chat, writes the current confirmed memory table, and binds it as this chat's Chat Lorebook.
 - Future SMM memory saves update only the marked SMM entry. No import/export step, global binding, or summary API call is needed for setup/sync.
@@ -7,9 +7,11 @@
 - The mobile panel foregrounds one-click chat memory setup, summary, and memory preview; repair controls and model configuration remain under advanced details.
 - Local validation: JavaScript syntax, manifest JSON, and mocked one-click create/bind/sync. Android/ST 1.18.0 final prompt placement and model adoption remain device-side checks.
 
+- v0.11.64: manifest points to a newly named script; both UI badges and the load log read the same version constant. No selected character/group means setup stops before World Info or memory writes.
+
 ## Manual Android acceptance check
 
-1. Install the zip and open a test chat.
+1. Install the zip, reload SillyTavern, and verify that the SMM title shows v0.11.64 before opening a test chat.
 2. Tap **一键启用本聊天记忆**. Confirm that SMM reports success and the current chat has an SMM Chat Lorebook.
 3. Inspect the prompt once: the SMM entry should show the current memory table.
 4. Keep automatic summary off until ready; setup and synchronization send no summary request.
