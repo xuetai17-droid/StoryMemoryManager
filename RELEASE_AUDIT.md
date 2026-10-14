@@ -1,3 +1,17 @@
+# v0.11.65 HYBRID Release Audit
+
+Actual export used locally: story-raw-chat-1792001629198.json. 46 messages, 23 assistant messages, 22 complete digests. The initial greeting #0 has no digest; the last user message #45 has no response.
+
+Validated runtime results: 23 timeline records, 11 named character snapshots, scan cursor #44, current scene 2024-08-27 08:05. #36 retains a 2024-08-26 record and a 2024-08-27 record. Conflicts at #4, #6, #10, #32 retain the literary digest marker instead of substituting a disagreeing Memory endpoint. These are source annotations, not independent semantic verification of the story.
+
+Mocked integrated checks passed: existing worldbook synchronization; second-click idempotence; malformed digest causes no batch commit or cursor advance; metadata save failure rolls back; automatic digest intake ignores an external API circuit lock because it sends no API request; original export unchanged; no inferred knowledge states. Prompt length in the tested initial snapshot: 4,266 characters.
+
+Both manual and automatic digest paths make zero summary API calls. The automatic setting is chat-local. Missing digests are not silently upgraded to paid requests. Only bounded Memory character fields are carried; private psychology, generic relationship labels, and inferred knowers are not generated. Missing #0 remains deferred; original greeting stays in the chat.
+
+Android acceptance: upload all ZIP files to the GitHub repository root, update the installed extension, reopen the page and verify v0.11.65. On the same bound chat, click “读取已有摘要（0 API）”; inspect the saved memory/worldbook. Actual final prompt placement and model adoption remain to be checked on the phone, without an extra summary request.
+
+## Previous audits
+
 # v0.11.64 HYBRID Release Audit
 
 - One click creates an SMM-owned World Info book for the current chat, writes the current confirmed memory table, and binds it as this chat's Chat Lorebook.
