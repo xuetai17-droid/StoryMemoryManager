@@ -1,3 +1,13 @@
+# v0.11.67 release audit
+
+Device screenshot showed only AI/local options in the native mode selector, despite the digest handler existing. The native HTML omitted the digest option, whereas the legacy menu included it but mapped its change event incorrectly to local. Both are corrected. Summary auto controls in the legacy panel now route to chat-local digest settings when appropriate. Digest UI disables API configuration controls and displays the zero-summary-API path. Switching modes disarms global paid autoSummarize; it does not change existing memory, cursor, chat book binding or explicitly enabled chat-local digest intake.
+
+Validation: actual 46-message export retained 22 digests, 23 timeline rows, 11 character snapshots, initial cursor 44, scene end 08:05. Existing malformed/save-failure rollback, idempotence, book synchronization, activation hit/miss and time repair checks passed. Added native/legacy HTML option checks, recovery from explicit digest opt-out, both menu selection values, correct automatic label, disabled provider control and paid automatic disarm when switching modes. Zero paid calls; original export unchanged. JavaScript syntax and ZIP entrypoint/import integrity passed.
+
+Previous phone evidence: v0.11.66 ST World Info dry-run selected the complete 4268-character SMM memory body. This is not verification of the final main model request or model adoption. v0.11.67 menu selection still needs phone confirmation; no additional paid test is necessary.
+
+## Previous audits
+
 # v0.11.66 release audit
 
 Observed device evidence: current chat book contains actual SMM text; duplicate attributed/unattributed recap facts and premature downgrade of explicit time intervals were visible.
