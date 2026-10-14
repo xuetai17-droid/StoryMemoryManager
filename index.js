@@ -1,4 +1,4 @@
-// Story Memory Manager v0.11.58
+// Story Memory Manager v0.11.63
 // partial trusted injection and durable character-knowledge continuity
 // does not rewrite original chat JSONL
 
@@ -10,7 +10,7 @@ const BUTTON_ID = 'smm2_fab';
 const DEFAULTS = Object.freeze({
     enabled: false,
     autoSummarize: false,
-    triggerMessages: 8,
+    triggerMessages: 10,
     batchMessages: 30,
     injectMemory: false,
     maxTimeline: 50,
@@ -87,6 +87,13 @@ function C() { return SillyTavern.getContext(); }
 function S() {
     const c = C();
     if (!c.extensionSettings[MODULE]) c.extensionSettings[MODULE] = structuredClone(DEFAULTS);
+    // v0.11.62: one delivery path only. Disable the legacy extension-prompt
+    // channel once so users cannot accidentally send duplicate/stale memory.
+    if (!c.extensionSettings[MODULE].memoryDeliveryDesignV01162) {
+        c.extensionSettings[MODULE].safeMemoryInject = false;
+        c.extensionSettings[MODULE].memoryDeliveryDesignV01162 = true;
+        c.saveSettingsDebounced?.();
+    }
     // v0.11.29 migration: existing installs did not have an explicit summary
     // mode. Move those installs to the requested 0-API daily workflow and raise
     // the untouched legacy batch default from 20 to 30 messages.
@@ -271,6 +278,7 @@ function freshMemory() {
         // therefore be "2003" while /world/reality-time remains in 2026.
         current_reality_date: null,
         current_reality_time: null,
+        memory_inject_via_worldbook_v01160: false,
         last_processed_index: -1,
         timeline: [],
         facts: [],
@@ -320,7 +328,27 @@ function M() {
     return mem;
 }
 
-async function saveMeta() { await C().saveMetadata(); }
+async function saveMeta() {
+    await C().saveMetadata();
+    // Keep the chat-bound World Info projection current without adding any
+    // summary/API calls to the memory save path.
+    if (M().smm_worldbook_name_v01163) {
+        SMM_WORLDBOOK_SYNC_DIRTY_V01163 = true;
+    }
+    if (M().smm_worldbook_name_v01163 && !SMM_WORLDBOOK_SYNC_PENDING_V01163) {
+        SMM_WORLDBOOK_SYNC_PENDING_V01163 = true;
+        Promise.resolve().then(async()=>{
+            try {
+                while(SMM_WORLDBOOK_SYNC_DIRTY_V01163) {
+                    SMM_WORLDBOOK_SYNC_DIRTY_V01163 = false;
+                    await syncSmmWorldbookV01163();
+                }
+            }
+            catch(e) { console.warn('[StoryMemory] World Info sync failed',e); }
+            finally { SMM_WORLDBOOK_SYNC_PENDING_V01163 = false; }
+        });
+    }
+}
 function saveSettings() { C().saveSettingsDebounced(); }
 
 function toast(msg, kind='info') {
@@ -628,49 +656,271 @@ function buildSafeMemoryPromptV0100() {
     const stages=stageSummariesForPromptV01121(mem);
     const npcs=relevantNpcsForPromptV01137(mem);
     const gaps=timelineCoverageGapsV0112(mem);
-    // Keep established knowledge close to the instruction and limit the bulk
-    // of historical context.  Long extension prompts can drown out the facts
-    // needed to continue the current scene.
-    const priorityFacts=facts.filter(x=>CRITICAL_KNOWLEDGE_RE_V01156.test(x.fact)).slice(-12)
-        .map(x=>({fact:String(x.fact).slice(0,260),source:String(x.source||'').slice(0,50)}));
-    const priorityKnowledge=establishedKnowledge.slice(-8);
-    const payload={
-        author_confirmed_facts:priorityFacts,
-        character_knowledge:priorityKnowledge,
-        date:mem.current_story_date||null,
-        time:mem.current_story_time||null,
-        reality_clock:(mem.current_reality_date||mem.current_reality_time)
-            ? {date:mem.current_reality_date||null,time:mem.current_reality_time||null}
-            : null,
-        scene:Object.fromEntries(Object.entries(scene).slice(0,7).map(([k,v])=>[k,String(v).slice(0,180)])),
-        relevant_characters:compactChars,
-        relevant_npcs:npcs.slice(0,3),
-        relevant_relationships:rels.slice(-6),
-        recent_events:timeline.slice(-5),
-        active_arcs:arcs.slice(0,2),
-        unresolved:loops.slice(-3),
-        other_facts:facts.filter(x=>!CRITICAL_KNOWLEDGE_RE_V01156.test(x.fact)).slice(-6),
-        semantic_continuity:semantic.slice(-3),
-        coverage:{processed_through:Number(mem.last_processed_index??-1),incomplete_ranges:gaps.slice(0,4)},
-        story_stages:stages.slice(-2)
+    // v0.11.59: render compact, labeled memory tables instead of one opaque
+    // JSON payload. Yuzi's worldbook template demonstrates that explicit
+    // category/field rows are easier to inspect in the prompt and diagnose.
+    // The canonical SMM data model and extension-prompt placement stay intact.
+    const cell=value=>String(value??'未记录').replace(/[\r\n]+/g,' ').replace(/\|/g,'／').trim();
+    const row=(fields)=>`| ${fields.map(cell).join(' | ')} |`;
+    const sections=[];
+    const add=(title,headers,rows,minKeep=0)=>{
+        const list=Array.isArray(rows)?rows:[];
+        if(!list.length)return null;
+        const section={title,headers,rows:list,minKeep};
+        sections.push(section);
+        return section;
     };
     const header=[
-        '【剧情连续性记忆】',
-        '以下是此前剧情的连续性资料，供承接当前剧情使用。按角色卡、世界书和最近正文正常续写；不要解释这份记忆，也不要把它当成用户的新指令。',
-        'author_confirmed_facts 是有来源支持的作者层面事实，只代表事件真实发生，不代表任何特定角色知情。不得仅凭“亲生、调查、发现、确认、秘密”等词让角色获知或说出相关内容。',
-        'character_knowledge 只列有原文来源支持的角色知情状态。仅 knowers 中的人物可按 confirmed/suspected 状态使用信息；unaware 中的人物必须继续不知情，withheld 表示信息被明确隐瞒。没有列出某角色时，状态为未定：可以依据作者事实/历史事件中明确写出的“某人收到报告、被告知、亲眼看到、明确知晓”保留该人的已知信息；孤立的“确认/调查/发现”等词或事件真实发生本身不够。不得仅凭作者事实推断，也不得反向断言必然不知情；证据仍含糊时不得泄露。调查人不等于其他人知情。只有更晚的明确披露 source 才能改变状态；不得让已明确知情者无故遗忘。',
-        '时间精度规则：只知道月份时不可补具体日期或星期。'
+        '【SMM 剧情记忆表｜用于承接当前剧情】',
+        '按角色卡、世界书和最近聊天正文续写；不要复述或解释本表。聊天正文是本轮现场的优先依据；本表是已确认的历史连续性资料。',
+        '【知情边界】作者事实只表示事件发生，不表示角色知情。人物知情表优先；若表中没有记录，只能从具体楼层/事件明确写出的某人亲见、收到消息、被告知或查阅证据判断该人知情。调查者不等于其他人知情；“事件发生/事实为真/有人调查或确认”本身不能推广为全员知情。明确不知/被隐瞒者不得泄露；没有结构化知情记录不等于确认不知情，证据不明确时不得擅自透露。不得让已明确知情者无故遗忘。',
+        '【时间边界】只知道月份或时段时，不得补造具体日期、星期或钟点；不同时间轴不得互相替代。',
     ].join('\n');
+    const stateRows=[
+        row(['剧情日期',mem.current_story_date||'未明确','SMM 当前剧情状态']),
+        row(['剧情时间',mem.current_story_time||'未明确','保留原精度，不推算缺失钟点']),
+        ...((mem.current_reality_date||mem.current_reality_time)?[
+            row(['现实时间轴',[mem.current_reality_date,mem.current_reality_time].filter(Boolean).join(' ')||'未明确','与场景时间分开'])
+        ]:[]),
+        ...Object.entries(scene).slice(0,6).map(([key,value])=>row([key,value,'当前场景记录']))
+    ];
+    add('【当前状态表】',['字段','当前记录','证据/精度'],stateRows,1);
+
+    const knowledgeRows=establishedKnowledge.slice(-8).map(x=>row([
+        x.fact,
+        `已知：${(x.knowers||[]).join('、')||'未登记'}`,
+        `不知/被隐瞒：${(x.unaware||[]).join('、')||'未登记'}`,
+        ({confirmed:'已确认',suspected:'仅怀疑',withheld:'明确隐瞒',unknown:'状态未明'})[x.status]||x.status,
+        x.source||'来源缺失'
+    ]));
+    if(!knowledgeRows.length) knowledgeRows.push(row(['暂无结构化知情记录','按下方具体事件中的信息传递证据逐人判断','未登记','未登记','未登记']));
+    add('【人物知情表｜按角色隔离信息】',['事实','已知角色','不知/被隐瞒角色','状态','楼层来源'],knowledgeRows,1);
+
+    const criticalRows=facts.filter(x=>CRITICAL_KNOWLEDGE_RE_V01156.test(x.fact)).slice(-12)
+        .map(x=>row([x.fact,x.source||'来源缺失']));
+    add('【已确认事实表｜作者层事实，不代表角色知情】',['事实','楼层来源'],criticalRows,1);
+
+    const characterRows=Object.entries(compactChars).slice(0,4).flatMap(([name,fields])=>
+        Object.entries(fields).slice(0,5).map(([key,value])=>row([name,`${key}：${value}`]))
+    );
+    add('【主要人物状态表】',['人物','档案记录'],characterRows,0);
+    add('【相关 NPC 表】',['NPC','身份','状态/近期记录','楼层来源'],npcs.slice(0,3).map(x=>row([
+        x.name||'未命名',x.identity||'',x.brief||x.current_status||'',x.source||x.last_source||''
+    ])),0);
+    add('【人物关系表】',['人物','当前关系','变化/说明','楼层来源'],rels.slice(-6).map(x=>row([
+        (x.people||[]).join('—'),x.state||'',x.change||'',x.source||''
+    ])),0);
+
+    const recentRows=timeline.slice(-5).map(x=>row([
+        [x.date,x.time].filter(Boolean).join(' ')||'时间未明确',
+        x.event||'',x.location||'',x.source||'',
+        x.time_evidence_label||x.date_evidence_label||''
+    ]));
+    add('【近期事件表｜按时间顺序承接】',['日期/时间','已发生事件','地点','楼层来源','时间精度'],recentRows,1);
+    add('【其他已确认事实表】',['事实','楼层来源'],facts.filter(x=>!CRITICAL_KNOWLEDGE_RE_V01156.test(x.fact)).slice(-6)
+        .map(x=>row([x.fact,x.source||''])),0);
+    add('【主线与待办表】',['类别','事项/当前状态','期限','楼层来源'],[
+        ...arcs.slice(0,2).map(x=>row(['主线',x.title||x.name||x.summary||JSON.stringify(x),'',x.source||''])),
+        ...loops.slice(-3).map(x=>row(['未完成事项',x.description||x.text||'',x.due||'',x.source||'']))
+    ],0);
+    add('【连续性锚点表】',['持续信息','楼层来源'],semantic.slice(-3).map(x=>row([
+        x.anchor||x.text||x.fact||JSON.stringify(x),x.source||''
+    ])),0);
+    add('【阶段摘要表】',['阶段','摘要','楼层范围'],stages.slice(-2).map(x=>row([
+        x.title||'',x.summary||'',x.source_range||x.source||''
+    ])),0);
+
+    const render=()=>header+'\n\n'+sections.filter(x=>x.rows.length)
+        .map(x=>`${x.title}\n${row(x.headers)}\n${row(x.headers.map(()=>':---'))}\n${x.rows.join('\n')}`).join('\n\n');
     const maxChars=8500;
-    const removals=[['story_stages',0],['semantic_continuity',0],['relevant_npcs',0],['other_facts',0],['recent_events',0],['relevant_relationships',0],['active_arcs',0],['unresolved',0],['character_knowledge',0],['author_confirmed_facts',1]];
-    let result=header+'\n'+JSON.stringify(payload);
-    for(const [key,min] of removals){
-        while(result.length>maxChars && Array.isArray(payload[key]) && payload[key].length>min){
-            payload[key].shift();
-            result=header+'\n'+JSON.stringify(payload);
+    // Remove the oldest/lowest-priority context first. Keep current state,
+    // knowledge boundaries, confirmed critical facts, and recent events.
+    const trimOrder=['【阶段摘要表】','【连续性锚点表】','【其他已确认事实表】','【相关 NPC 表】',
+        '【主要人物状态表】','【人物关系表】','【近期事件表｜按时间顺序承接】','【主线与待办表】',
+        '【已确认事实表｜作者层事实，不代表角色知情】'];
+    let result=render();
+    for(const title of trimOrder){
+        const section=sections.find(x=>x.title===title);
+        while(result.length>maxChars&&section&&section.rows.length>section.minKeep){
+            section.rows.shift();
+            result=render();
         }
     }
     return result;
+}
+
+let SMM_WORLDINFO_MACRO_READY_V01160 = false;
+let SMM_WORLDBOOK_SYNC_PENDING_V01163 = false;
+let SMM_WORLDBOOK_SYNC_DIRTY_V01163 = false;
+const SMM_WORLDINFO_ENTRY_MARKER_V01163 = 'SMM 当前聊天长期记忆｜自动维护';
+
+function makeSmmWorldbookEntryV01163(content) {
+    const uid=0;
+    return {
+        uid,key:[],keysecondary:[],comment:SMM_WORLDINFO_ENTRY_MARKER_V01163,content,
+        constant:true,vectorized:false,selective:true,selectiveLogic:0,addMemo:true,
+        order:100,position:1,disable:false,ignoreBudget:false,excludeRecursion:false,
+        preventRecursion:false,matchPersonaDescription:false,matchCharacterDescription:false,
+        matchCharacterPersonality:false,matchCharacterDepthPrompt:false,matchScenario:false,
+        matchCreatorNotes:false,delayUntilRecursion:false,probability:100,useProbability:true,
+        depth:4,outletName:'',group:'',groupOverride:false,groupWeight:100,scanDepth:null,
+        caseSensitive:null,matchWholeWords:null,useGroupScoring:null,automationId:'',role:null,
+        sticky:0,cooldown:0,delay:0,triggers:[],displayIndex:uid,
+        characterFilter:{isExclude:false,names:[],tags:[]}
+    };
+}
+
+function canManageSmmWorldbookV01163(ctx=C()) {
+    return typeof ctx?.loadWorldInfo==='function' &&
+        typeof ctx?.saveWorldInfo==='function' &&
+        typeof ctx?.updateWorldInfoList==='function' &&
+        !!ctx?.chatMetadata && typeof ctx?.saveMetadata==='function';
+}
+
+async function syncSmmWorldbookV01163() {
+    const ctx=C(), name=M().smm_worldbook_name_v01163;
+    if(!name || !canManageSmmWorldbookV01163(ctx) || ctx.chatMetadata.world_info!==name) return false;
+    const book=await ctx.loadWorldInfo(name);
+    const entries=book?.entries;
+    if(!entries || typeof entries!=='object') throw new Error('找不到已绑定的 SMM 世界书');
+    const entry=Object.values(entries).find(x=>x?.comment===SMM_WORLDINFO_ENTRY_MARKER_V01163);
+    if(!entry) throw new Error('SMM 专属记忆条目不存在；为保护其他条目，已停止同步');
+    entry.content=buildSafeMemoryPromptV0100();
+    await ctx.saveWorldInfo(name,book);
+    return true;
+}
+
+async function enableSmmChatWorldbookV01163() {
+    const ctx=C();
+    if(!canManageSmmWorldbookV01163(ctx)) {
+        toast('当前酒馆版本没有开放聊天世界书管理接口。SMM 尚未修改设置或数据。','error');
+        return false;
+    }
+    const oldBinding=String(ctx.chatMetadata.world_info||'');
+    const managedName=String(M().smm_worldbook_name_v01163||'');
+    const oldManagedName=managedName;
+    const oldWorldbookMode=!!M().memory_inject_via_worldbook_v01160;
+    const oldSafeInject=!!S().safeMemoryInject;
+    const alreadyManaged=!!managedName && oldBinding===managedName;
+    if(oldBinding && !alreadyManaged && !confirm(`这段聊天已经绑定「${oldBinding}」。\n\nSMM 会保留那本世界书，但将当前聊天切换到 SMM 专属记忆书。继续吗？`)) return false;
+
+    const name=alreadyManaged ? managedName : `SMM Chat Memory ${Date.now()}`;
+    const content=buildSafeMemoryPromptV0100();
+    let book={entries:{}};
+    if(alreadyManaged) {
+        book=await ctx.loadWorldInfo(name);
+        if(!book || !book.entries) throw new Error('现有 SMM 世界书无法读取；没有更改当前绑定');
+        const existing=Object.values(book.entries).find(x=>x?.comment===SMM_WORLDINFO_ENTRY_MARKER_V01163);
+        if(existing) existing.content=content;
+        else throw new Error('现有 SMM 世界书条目标记不匹配；没有覆盖任何条目');
+    } else {
+        book.entries={'0':makeSmmWorldbookEntryV01163(content)};
+    }
+    await ctx.saveWorldInfo(name,book);
+    await ctx.updateWorldInfoList();
+
+    ctx.chatMetadata.world_info=name;
+    M().smm_worldbook_name_v01163=name;
+    M().memory_inject_via_worldbook_v01160=true;
+    S().safeMemoryInject=false;
+    try {
+        await saveSettings();
+        await ctx.saveMetadata();
+    } catch(e) {
+        ctx.chatMetadata.world_info=oldBinding;
+        if(oldManagedName) M().smm_worldbook_name_v01163=oldManagedName;
+        else delete M().smm_worldbook_name_v01163;
+        M().memory_inject_via_worldbook_v01160=oldWorldbookMode;
+        S().safeMemoryInject=oldSafeInject;
+        try { await ctx.saveMetadata(); await saveSettings(); } catch(_) {}
+        throw e;
+    }
+    refreshSafeMemoryInjectionV0100();
+    refreshNative();
+    renderMemoryInjectionAuditV0119();
+    toast('已完成：SMM 记忆书已绑定到本聊天，并会随记忆保存自动更新。','success');
+    return true;
+}
+
+function smmWorldInfoTableMacroV01160() {
+    if(!M().memory_inject_via_worldbook_v01160) return '';
+    try { return buildSafeMemoryPromptV0100(); }
+    catch(e) {
+        console.warn('[StoryMemory] World Info macro render failed',e);
+        return '【SMM记忆暂不可用】本轮不得根据缺失的SMM记忆推断剧情事实。';
+    }
+}
+
+function registerSmmWorldInfoMacroV01160(ctx=C()) {
+    if(SMM_WORLDINFO_MACRO_READY_V01160) return true;
+    try {
+        if(typeof ctx?.macros?.register==='function') {
+            ctx.macros.register('smm_memory_table',{
+                description:'当前聊天的 SMM 长期记忆表（仅在 SMM 世界书模式启用时输出）',
+                handler:()=>smmWorldInfoTableMacroV01160()
+            });
+            SMM_WORLDINFO_MACRO_READY_V01160=true;
+            return true;
+        }
+        if(typeof ctx?.registerMacro==='function') {
+            ctx.registerMacro('smm_memory_table',()=>smmWorldInfoTableMacroV01160());
+            SMM_WORLDINFO_MACRO_READY_V01160=true;
+            return true;
+        }
+    } catch(e) {
+        console.warn('[StoryMemory] World Info macro registration failed',e);
+    }
+    return false;
+}
+
+function buildSmmWorldbookFileV01160() {
+    const uid=0;
+    const entries={
+        [String(uid)]:{
+            uid,key:[],keysecondary:[],comment:'SMM 剧情记忆表（绑定到当前聊天）',content:'{{smm_memory_table}}',
+            constant:true,vectorized:false,selective:true,selectiveLogic:0,addMemo:true,
+            order:100,position:1,disable:false,ignoreBudget:false,excludeRecursion:false,
+            preventRecursion:false,matchPersonaDescription:false,matchCharacterDescription:false,
+            matchCharacterPersonality:false,matchCharacterDepthPrompt:false,matchScenario:false,
+            matchCreatorNotes:false,delayUntilRecursion:false,probability:100,useProbability:true,
+            depth:4,outletName:'',group:'',groupOverride:false,groupWeight:100,scanDepth:null,
+            caseSensitive:null,matchWholeWords:null,useGroupScoring:null,automationId:'',role:null,
+            sticky:0,cooldown:0,delay:0,triggers:[],displayIndex:uid,
+            characterFilter:{isExclude:false,names:[],tags:[]}
+        }
+    };
+    return {entries};
+}
+
+async function exportSmmWorldbookV01160() {
+    const ctx=C();
+    if(!registerSmmWorldInfoMacroV01160(ctx)) {
+        toast('当前 SillyTavern 未提供自定义宏注册接口；未导出世界书。','error');
+        return false;
+    }
+    const previous=!!M().memory_inject_via_worldbook_v01160;
+    M().memory_inject_via_worldbook_v01160=true;
+    S().safeMemoryInject=false;
+    try {
+        await saveSettings();
+        await saveMeta();
+    } catch(e) {
+        M().memory_inject_via_worldbook_v01160=previous;
+        refreshSafeMemoryInjectionV0100();
+        toast('世界书设置未保存，未导出文件。','error');
+        return false;
+    }
+    const blob=new Blob([JSON.stringify(buildSmmWorldbookFileV01160(),null,2)],{type:'application/json'});
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(blob);
+    a.download='SMM-剧情记忆表.json';
+    a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+    refreshSafeMemoryInjectionV0100();
+    refreshNative();
+    renderMemoryInjectionAuditV0119();
+    toast('文件已下载，当前聊天已切换到世界书注入。接下来只需导入文件并绑定到当前聊天。','success');
+    return true;
 }
 
 function refreshSafeMemoryInjectionV0100() {
@@ -684,7 +934,8 @@ function refreshSafeMemoryInjectionV0100() {
 
     const tag = 'story_memory_manager_v2_safe_memory';
 
-    if (!settings.safeMemoryInject) {
+    const worldbookChannelActive=!!M().memory_inject_via_worldbook_v01160&&SMM_WORLDINFO_MACRO_READY_V01160;
+    if (!settings.safeMemoryInject || worldbookChannelActive) {
         ctx.setExtensionPrompt(tag, '', 0, 4, false, 0);
         return true;
     }
@@ -715,7 +966,10 @@ function memoryInjectionAuditV0119() {
     const prompt=buildSafeMemoryPromptV0100();
     const relevantNpcs=relevantNpcsForPromptV01137(mem);
     return {
-        enabled: !!s.safeMemoryInject,
+        enabled: !!s.safeMemoryInject||!!M().memory_inject_via_worldbook_v01160,
+        channel: M().memory_inject_via_worldbook_v01160 ? 'SMM 动态世界书' : 'SMM 扩展提示',
+        worldbook_macro_ready: SMM_WORLDINFO_MACRO_READY_V01160,
+        extension_fallback: !!s.safeMemoryInject&&!SMM_WORLDINFO_MACRO_READY_V01160,
         blocked_by_gap: false,
         partial_coverage: !!gaps.length,
         first_gap: gaps[0] || null,
@@ -744,12 +998,20 @@ function renderMemoryInjectionAuditV0119() {
     if(!box) return;
     const a=memoryInjectionAuditV0119();
     const state=!a.enabled ? '关闭：主聊天模型不会收到 SMM 长期记忆'
+        : a.channel==='SMM 动态世界书'
+            ? a.worldbook_macro_ready
+                ? '世界书渠道已选：smm_memory_table 宏已注册；确认当前聊天已绑定该世界书'
+                : (a.extension_fallback?'世界书宏未注册：暂保留原扩展提示注入':'世界书宏未注册：当前没有有效的 SMM 注入')
         : a.partial_coverage ? `已开启：注入已确认记忆；尚待补总结 #${a.first_gap.start}-#${a.first_gap.end}`
         : '已开启：本轮会提供 SMM 长期剧情记忆';
     const location=a.current_scene?.location || '未建立';
     const empty=a.characters+a.npcs_injected+a.relationships+a.confirmed_facts+a.established_knowledge+a.recent_timeline+a.open_loops+a.active_arcs+a.stage_summaries===0;
     const note=!a.enabled
         ? '当前关闭生成时记忆注入。'
+        : a.channel==='SMM 动态世界书'
+            ? a.worldbook_macro_ready
+                ? '此模式会清空 SMM 扩展提示，记忆只由绑定的世界书条目注入。世界书条目必须在当前聊天生效；下方原文是宏展开预览，不能代替最终提示词检查。'
+                : 'SMM 未能注册自定义宏。若原扩展提示注入开关已开，SMM 会暂时保留扩展提示作为回退；请检查宏是否出现在最终提示词中。'
         : a.partial_coverage
             ? '历史仍在补总结，但已确认的身份、关系、调查结果和近期事件会照常提供给主模型；未总结范围不会使旧事实失效。'
             : empty
@@ -758,6 +1020,7 @@ function renderMemoryInjectionAuditV0119() {
     box.innerHTML=`
       <div class="smm119-state"><b>状态：</b>${esc(state)}</div>
       <div class="smm119-audit-grid">
+        <div><span>注入渠道</span><b>${esc(a.channel)}</b></div>
         <div><span>注入长度</span><b>${a.prompt_chars} 字符</b></div>
         <div><span>当前剧情日期</span><b>${esc(a.current_story_date||'未建立')}</b></div>
         <div><span>当前剧情时间</span><b>${esc(a.current_story_time||'未建立')}</b></div>
@@ -806,8 +1069,8 @@ async function autoHideSummarizedV0101() {
 
     if (!settings.autoHideSummarized) return false;
 
-    if (!settings.safeMemoryInject) {
-        console.warn('[StoryMemory] 自动隐藏跳过：安全记忆注入未开启');
+    if (!settings.safeMemoryInject && !M().memory_inject_via_worldbook_v01160) {
+        console.warn('[StoryMemory] 自动隐藏跳过：尚未启用有效记忆注入渠道');
         return false;
     }
 
@@ -11370,21 +11633,34 @@ function stat() {
 }
 
 const SMM_AUTO_DIAG_V01158={receivedEvents:0,lastReceivedAt:null,lastDecision:'等待 MESSAGE_RECEIVED'};
+function autoSummaryThresholdV01162(s=S()) {
+    return usingPaidProviderV01142(s)
+        ? Math.max(1,Number(s.autoBatchMessagesV01145)||10)
+        : Math.max(1,Number(s.triggerMessages)||10);
+}
+
 function autoSummaryDiagnosticTextV01158(){
     const s=S(),m=M(),st=stat();
     if(m.auto_summary_failure_pause_v01158) return `失败后暂停自动请求（${m.auto_summary_failure_pause_v01158.reason||'请求失败'}）；需手动点击继续`;
     if(!s.enabled) return '插件未启用';
     if(!s.autoSummarize) return '自动增量总结开关关闭';
     if(BUSY) return '总结任务运行中';
-    const threshold=usingPaidProviderV01142(s)?Math.max(1,Number(s.autoBatchMessagesV01145)||10):Math.max(1,Number(s.triggerMessages)||8);
+    const threshold=autoSummaryThresholdV01162(s);
     if(!SMM_AUTO_DIAG_V01158.receivedEvents) return `已开启；尚未观察到 MESSAGE_RECEIVED（阈值 ${threshold}）`;
     return `${SMM_AUTO_DIAG_V01158.lastDecision}；事件 ${SMM_AUTO_DIAG_V01158.receivedEvents} 次；待处理 ${st.pending}/${threshold}`;
+}
+
+function renderAutoSummaryStatusV01162(){
+    const box=document.getElementById('smm_auto_summary_status');
+    if(!box) return;
+    const threshold=autoSummaryThresholdV01162(S());
+    box.textContent=`自动总结：${autoSummaryDiagnosticTextV01158()}。触发门槛 ${threshold} 条；待总结 ${stat().pending} 条。`;
 }
 
 function panelHTML() {
     return `<div id="${PANEL_ID}" class="smm2-hidden">
       <div class="smm2-card">
-        <div class="smm2-head"><div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.58</span></div><button id="smm2_close">×</button></div>
+        <div class="smm2-head"><div class="smm105-title-wrap"><b>SMM 剧情记忆</b><span class="smm105-version-badge">v0.11.62</span></div><button id="smm2_close">×</button></div>
         <div id="smm2_stats" class="smm2-stats"></div>
         <div class="smm2-grid">
           <button id="smm2_new">总结新增</button>
@@ -13345,10 +13621,9 @@ function nativeManagerHTML() {
 
       <!-- v0.9.2 mobile UI cleanup -->
       <div class="smm2-native-grid smm2-main-actions">
-        <button id="smm2_native_new" class="menu_button smm2-primary-tool">总结新增</button>
-        <button id="smm2_native_view" class="menu_button">查看 / 收起记忆</button>
-        <button id="smm136_native_requeue" class="menu_button">撤销错误 0 API 记录并重新排队</button>
-        <button id="smm133_native_backfill" class="menu_button smm2-primary-tool">补录已跳过楼层（0 API）</button>
+        <button id="smm2_native_new" class="menu_button smm2-primary-tool">总结新增剧情</button>
+        <button id="smm2_native_view" class="menu_button">查看记忆</button>
+        <button id="smm163_enable_chat_worldbook" class="menu_button smm2-primary-tool">一键启用本聊天记忆</button>
       </div>
 
       <div id="smm2_native_memory_box" data-open="0"></div>
@@ -13370,6 +13645,7 @@ function nativeManagerHTML() {
               <button id="smm2_native_export" class="menu_button">导出记忆 JSON</button>
               <button id="smm2_native_import" class="menu_button">导入记忆 JSON</button>
               <button id="smm50_export_raw" class="menu_button">导出原始聊天 JSON</button>
+              <div class="smm2-note">备份或迁移时使用；日常使用无需导出。</div>
             </div>
           </details>
 
@@ -13470,22 +13746,22 @@ function nativeManagerHTML() {
         <section class="smm107-settings-card smm107-core-card">
           <div class="smm107-card-head">
             <div>
-              <div class="smm107-card-title">自动管理</div>
-              <div class="smm107-card-subtitle">日常使用只需要这里</div>
+              <div class="smm107-card-title">日常使用</div>
+          <div class="smm107-card-subtitle">一键绑定本聊天的 SMM 记忆</div>
             </div>
           </div>
 
-          <label class="smm107-switch-row">
-            <input id="smm2_native_enabled" type="checkbox">
-            <span><b>启用插件</b><small>SMM 总开关</small></span>
-          </label>
+          <input id="smm2_native_enabled" type="checkbox" hidden aria-hidden="true">
 
           <input id="smm2_native_inject" type="checkbox" hidden aria-hidden="true">
 
           <label class="smm107-switch-row">
             <input id="smm2_native_auto" type="checkbox">
-            <span><b>自动增量总结</b><small>达到阈值后自动处理新增剧情</small></span>
+            <span><b>自动总结新剧情</b><small>每累计 10 条新消息整理一次；失败会暂停，不会自动重试</small></span>
           </label>
+          <div id="smm_auto_summary_status" class="smm2-note"></div>
+
+          <div class="smm2-note">点上方按钮一次即可。SMM 会创建并绑定本聊天专用世界书，之后随记忆自动更新；不会挂全局，也不会调用总结 API。</div>
 
           <div class="smm138-mode-card">
             <div class="smm138-mode-head">
@@ -13499,20 +13775,15 @@ function nativeManagerHTML() {
             <div id="smm129_mode_status" class="smm138-mode-help"></div>
           </div>
 
-          <label class="smm107-switch-row">
-            <input id="smm100_safe_inject" type="checkbox">
-            <span><b>生成时注入剧情记忆</b><small>把可靠长期记忆提供给主聊天模型</small></span>
-          </label>
-
           <details class="smm107-inline-details smm119-audit-details">
-            <summary>检查本轮会注入给主模型的记忆</summary>
+            <summary>预览本聊天注入的记忆</summary>
             <button id="smm119_refresh_injection_audit" class="menu_button smm119-refresh" type="button">刷新诊断</button>
             <div id="smm119_injection_audit" class="smm119-audit"></div>
           </details>
 
           <label class="smm107-switch-row">
             <input id="smm100_auto_hide" type="checkbox">
-            <span><b>总结后自动隐藏旧楼层</b><small>仅在安全记忆注入开启时生效</small></span>
+            <span><b>总结后自动隐藏旧楼层</b><small>仅在当前聊天记忆已注入后生效</small></span>
           </label>
 
           <div class="smm107-inline-setting">
@@ -13524,7 +13795,7 @@ function nativeManagerHTML() {
           </div>
 
           <div id="smm100_hide_status" class="smm2-note smm107-status-note">
-            自动隐藏默认关闭。建议先启用安全记忆注入并验证后再开启。
+            自动隐藏默认关闭。先确认 SMM 世界书已绑定到当前聊天并正常注入，再开启。
           </div>
 
           <details class="smm107-inline-details">
@@ -13535,8 +13806,8 @@ function nativeManagerHTML() {
 
         <details class="smm2-tool-card smm107-settings-card">
           <summary>
-            <span class="smm2-tool-title">总结模型</span>
-            <span class="smm2-tool-subtitle">AI 模式才使用这些设置</span>
+            <span class="smm2-tool-title">高级：总结模型</span>
+            <span class="smm2-tool-subtitle">一般不用改</span>
           </summary>
 
           <div class="smm2-tool-body">
@@ -13606,7 +13877,7 @@ function nativeManagerHTML() {
 
         <details class="smm2-tool-card smm107-settings-card">
           <summary>
-            <span class="smm2-tool-title">阶段大总结</span>
+            <span class="smm2-tool-title">高级：阶段整理</span>
             <span class="smm2-tool-subtitle">把零散长期记忆压缩为章节级剧情阶段</span>
           </summary>
           <div class="smm2-tool-body">
@@ -13620,7 +13891,7 @@ function nativeManagerHTML() {
 
         <details class="smm2-tool-card smm107-settings-card">
           <summary>
-            <span class="smm2-tool-title">总结节奏与剧情起点</span>
+            <span class="smm2-tool-title">高级：总结节奏与剧情起点</span>
             <span class="smm2-tool-subtitle">一般无需频繁调整</span>
           </summary>
           <div class="smm2-tool-body smm107-advanced-grid">
@@ -14108,6 +14379,13 @@ function bindNativeManager() {
         toast(`日期轴重建完成：合并重复 ${r.duplicate_merged}，跨午夜 ${r.confirmed_rollovers||0}，日期变更 ${r.date_reassigned||0}，日期锚点接受 ${r.source_anchor_accepted||0}，拒绝 ${r.source_anchor_rejected||0}，异常提示 ${r.diagnostics.length}。`,'success');
     };
     const raw50=q('smm50_export_raw'); if(raw50) raw50.onclick=exportRawChat;
+    const enableChatWorldbookV01163=q('smm163_enable_chat_worldbook');
+    if(enableChatWorldbookV01163) enableChatWorldbookV01163.onclick=async()=>{
+        enableChatWorldbookV01163.disabled=true;
+        try { await enableSmmChatWorldbookV01163(); }
+        catch(e) { console.error('[StoryMemory] chat World Info setup failed',e); toast(`启用失败：${e?.message||e}。没有发起总结 API 请求。`,'error'); }
+        finally { enableChatWorldbookV01163.disabled=false; }
+    };
     q('smm2_native_import').onclick = importMemory;
     q('smm2_native_export').onclick = exportMemory;
     q('smm2_native_clear').onclick = clearMemory;
@@ -14145,11 +14423,16 @@ function bindNativeManager() {
     };
 
     q('smm2_native_auto').onchange = e => {
+        s.enabled = e.target.checked;
         s.autoSummarize = e.target.checked;
+        const enabledEl=q('smm2_native_enabled');
+        if(enabledEl) enabledEl.checked=e.target.checked;
         saveSettings();
+        refreshNative();
     };
 
     const safeInjectEl = q('smm100_safe_inject');
+    const worldbookModeElV01160=q('smm160_worldbook_mode');
     const autoHideEl = q('smm100_auto_hide');
     const keepRecentEl = q('smm100_keep_recent');
     const unhideBtn = q('smm100_unhide_all');
@@ -14194,13 +14477,40 @@ function bindNativeManager() {
         };
     }
 
+    if(worldbookModeElV01160) {
+        worldbookModeElV01160.onchange=async e=>{
+            if(e.target.checked&&!registerSmmWorldInfoMacroV01160(C())) {
+                e.target.checked=false;
+                toast('SMM 世界书未能启动；旧注入方式保持关闭。','error');
+                return;
+            }
+            const previous=!!M().memory_inject_via_worldbook_v01160;
+            M().memory_inject_via_worldbook_v01160=!!e.target.checked;
+            s.safeMemoryInject=false;
+            saveSettings();
+            try { await saveMeta(); }
+            catch(err) {
+                M().memory_inject_via_worldbook_v01160=previous;
+                e.target.checked=previous;
+                refreshSafeMemoryInjectionV0100();
+                toast('世界书注入设置未保存；旧注入方式仍保持关闭。','error');
+                return;
+            }
+            refreshSafeMemoryInjectionV0100();
+            renderMemoryInjectionAuditV0119();
+            toast(M().memory_inject_via_worldbook_v01160
+                ? '已启用 SMM 世界书注入；请确认当前聊天已绑定这本书。'
+                : '已关闭世界书注入；旧注入方式不会自动开启。','info');
+        };
+    }
+
     if (autoHideEl) {
         autoHideEl.onchange = e => {
-            if (e.target.checked && !s.safeMemoryInject) {
+            if (e.target.checked && !s.safeMemoryInject && !M().memory_inject_via_worldbook_v01160) {
                 e.target.checked = false;
                 s.autoHideSummarized = false;
                 saveSettings();
-                toast('请先启用“生成时注入剧情记忆”，验证正常后再开启自动隐藏。', 'warning');
+                toast('请先启用世界书注入并确认它已绑定到当前聊天，再开启自动隐藏。', 'warning');
                 return;
             }
 
@@ -14245,6 +14555,7 @@ function refreshNative() {
     const s = S();
 
     stats.innerHTML = statsHTMLV0105();
+    renderAutoSummaryStatusV01162();
     refreshStageSummaryStatusV01121();
 
     const setChecked = (id, val) => {
@@ -14259,8 +14570,9 @@ function refreshNative() {
 
     setChecked('smm2_native_enabled', s.enabled);
     setChecked('smm2_native_inject', false);
-    setChecked('smm2_native_auto', s.autoSummarize);
+    setChecked('smm2_native_auto', s.enabled && s.autoSummarize);
     setChecked('smm100_safe_inject', s.safeMemoryInject);
+    setChecked('smm160_worldbook_mode', !!M().memory_inject_via_worldbook_v01160);
     setChecked('smm100_auto_hide', s.autoHideSummarized);
     setValue('smm100_keep_recent', s.keepRecentMessages);
     setValue('smm129_summary_mode', String(s.summaryMode||'ai')==='ai'?'ai':'local');
@@ -14326,14 +14638,15 @@ function refreshNative() {
     if (hideStatus) {
         const hiddenInfo = getSmmAutoHiddenInfoV0101();
 
-        hideStatus.textContent = s.safeMemoryInject
+        const memoryDeliveryEnabled=!!s.safeMemoryInject||!!M().memory_inject_via_worldbook_v01160;
+        hideStatus.textContent = memoryDeliveryEnabled
             ? (s.autoHideSummarized
                 ? '自动隐藏已开启；保留最近 ' + s.keepRecentMessages
                     + ' 楼。当前已隐藏 ' + hiddenInfo.count
                     + (hiddenInfo.last >= 0 ? ' 楼，至 #' + hiddenInfo.last : ' 楼。')
-                : '安全记忆注入已开启；自动隐藏仍关闭。当前已隐藏 '
+                : '记忆注入已开启；自动隐藏仍关闭。当前已隐藏 '
                     + hiddenInfo.count + ' 楼。')
-            : '安全记忆注入未开启；自动隐藏不可启用。';
+            : '世界书注入未开启；自动隐藏不可启用。';
     }
 
     setValue('smm2_native_trigger', s.triggerMessages);
@@ -14381,7 +14694,7 @@ function installNativeExtensionEntry() {
 
         wrap.innerHTML = `
           <div class="inline-drawer-toggle inline-drawer-header">
-            <div class="smm105-title-wrap"><b>剧情自动记忆</b><span class="smm105-version-badge">v0.11.58</span></div>
+            <div class="smm105-title-wrap"><b>SMM 剧情记忆</b><span class="smm105-version-badge">v0.11.62</span></div>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
           </div>
           <div class="inline-drawer-content">
@@ -14684,9 +14997,7 @@ async function maybeAuto() {
         SMM_AUTO_DIAG_V01158.lastDecision='历史补总结进行中，等待手动继续';return;
     }
     const st=stat();
-    const threshold=usingPaidProviderV01142(s)
-        ? Math.max(1,Number(s.autoBatchMessagesV01145)||10)
-        : Math.max(1,Number(s.triggerMessages)||8);
+    const threshold=autoSummaryThresholdV01162(s);
     if (st.pending < threshold){SMM_AUTO_DIAG_V01158.lastDecision='阈值未达到';return;}
     SMM_AUTO_DIAG_V01158.lastDecision='达到阈值，开始自动总结';
     refresh();
@@ -14711,6 +15022,7 @@ function initializeExtension() {
         c = C();
         if (!c) throw new Error('SillyTavern context unavailable');
         S();
+        registerSmmWorldInfoMacroV01160(c);
     } catch (e) {
         console.warn('[StoryMemory] context not ready yet', e);
         setTimeout(initializeExtension, 700);
@@ -14748,7 +15060,7 @@ function initializeExtension() {
         refresh();
         setTimeout(()=>repairStoryCalendarOnceV01155(),600);
         setTimeout(()=>repairKnowledgeContinuityOnceV01156(),850);
-        console.log('[StoryMemory] v0.11.58 loaded successfully');
+    console.log('[StoryMemory] v0.11.62 loaded successfully');
     } catch (e) {
         console.error('[StoryMemory] UI initialization failed', e);
     }

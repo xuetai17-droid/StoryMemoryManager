@@ -1,3 +1,41 @@
+# v0.11.63 HYBRID Release Audit
+
+- One click creates an SMM-owned World Info book for the current chat, writes the current confirmed memory table, and binds it as this chat's Chat Lorebook.
+- Future SMM memory saves update only the marked SMM entry. No import/export step, global binding, or summary API call is needed for setup/sync.
+- If another chat lorebook is already assigned, SMM asks before switching; it preserves the old book file. Missing APIs or a mismatched entry marker stop safely.
+- Automatic summary remains opt-in. Its trigger threshold defaults to 10; failures pause automatic attempts and preserve the cursor.
+- The mobile panel foregrounds one-click chat memory setup, summary, and memory preview; repair controls and model configuration remain under advanced details.
+- Local validation: JavaScript syntax, manifest JSON, and mocked one-click create/bind/sync. Android/ST 1.18.0 final prompt placement and model adoption remain device-side checks.
+
+## Manual Android acceptance check
+
+1. Install the zip and open a test chat.
+2. Tap **一键启用本聊天记忆**. Confirm that SMM reports success and the current chat has an SMM Chat Lorebook.
+3. Inspect the prompt once: the SMM entry should show the current memory table.
+4. Keep automatic summary off until ready; setup and synchronization send no summary request.
+
+## v0.11.61 HYBRID Release Audit (historical)
+
+- Exports six always-active World Info entries, each rendering one SMM memory section through a dedicated macro; the legacy aggregate `smm_memory_table` macro remains registered for older v0.11.60 lorebooks.
+- Section groups preserve the existing SMM storage and priority rules: usage instructions, current state, knowledge/facts, people/relationships, timeline, and plot/continuity.
+- The exported World Info is still chat-bound by the user. No SMM data migration or summary API request is required to export it.
+
+## v0.11.60 HYBRID Release Audit
+
+- Exports a single constant World Info entry whose content expands the synchronous `smm_memory_table` macro to the active chat's current SMM table.
+- Per-chat Worldbook mode clears only the current chat's SMM extension prompt to prevent double injection; disabling worldbook mode restores the extension-prompt channel.
+- Exported lorebook is independent and must be imported and bound by the user. SMM does not modify existing World Info files or chat JSONL.
+- Local tests validate worldbook JSON shape, constant activation, macro handler output, channel exclusivity, syntax, and current-memory table rendering; no summary API call.
+- Mobile SillyTavern final-prompt expansion/binding has not been exercised in this environment.
+
+# v0.11.59 HYBRID Release Audit
+
+- Generation prompt now renders explicit labeled table sections with per-row source floors instead of a single JSON blob.
+- Knowledge state remains separate from author-level facts; absent knowledge rows are labeled as unrecorded rather than treated as proof of awareness or ignorance.
+- Existing SMM memory model, extension-prompt location/depth, injection toggle, and 8,500-character cap are preserved.
+- The output is not a SillyTavern World Info entry and does not consume Yuzi's `{{MEMORY_TABLE}}` variable; it remains an SMM extension prompt. Final phone-side prompt placement is unverified.
+- Local simulation used the supplied SMM memory export and a synthetic, sourced per-character knowledge row; verified source visibility, knowledge boundary text, and length cap. No API request; no chat JSONL, memory record, or cursor mutation.
+
 # v0.11.58 HYBRID Release Audit
 
 - Failure pause is stored in current-chat metadata; failure does not advance `last_processed_index` or commit new memory. A later event cannot silently repeat the same automatic model request. A deliberate manual action clears the pause.

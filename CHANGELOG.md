@@ -1,5 +1,38 @@
 # Changelog
 
+## v0.11.63 HYBRID
+
+- 日常流程改为 SMM 内“一键启用本聊天记忆”：自动创建 SMM 专属 World Info、绑定到当前聊天，并把已确认的长期记忆写入常驻条目。
+- 后续 SMM 保存记忆时自动同步聊天世界书；同步只读写 SMM 自己标记的条目，不调用总结 API，不触碰聊天 JSONL。
+- 若当前聊天已有其他 Chat Lorebook，先说明并确认切换；原世界书文件保留。不会绑定全局世界书。
+- 保留旧导出/宏兼容入口；新工作流不再要求导入文件或手动绑定。
+
+## v0.11.62 HYBRID
+
+- Simplified daily use around one source of truth and one delivery path: SMM's per-chat memory is rendered through one dynamic World Info entry.
+- Export now enables World Info delivery for the current chat and disables the legacy extension-prompt path; the user only imports the file and assigns it to that chat's Chat Lorebook.
+- Reworked the mobile panel around summary, preview, and export actions; repair tools and model configuration remain under advanced sections.
+- Automatic summary diagnostics now show observed events, pending messages, trigger threshold, and failure pause in the main panel. The default trigger threshold is 10 messages.
+- No API request or chat JSONL edit during update/export. Existing memory and cursor are preserved.
+
+## v0.11.61 HYBRID
+
+- SMM 动态世界书改为多个常驻分区条目，分别注入记忆规则、当前状态、角色知情/事实、人物关系、近期时间线、主线待办与连续性资料，便于在提示词检查器中核对，也更接近 Yuzi 的分表注入方式。
+- 分区内容仍由当前聊天的 SMM 记忆即时渲染；不复制 Yuzi 变量、不改写 SMM 存储、不覆盖其他世界书。保留旧 `{{smm_memory_table}}` 宏兼容。
+
+## v0.11.60 HYBRID
+
+- 增加 SMM 动态 World Info 导出：常驻条目以 `{{smm_memory_table}}` 读取当前聊天记忆。
+- 增加按聊天保存的世界书注入模式开关；启用后仅对当前聊天关闭 SMM 扩展提示注入，避免重复记忆。
+- 世界书绑定由用户在 SillyTavern 中完成；没有改写现存世界书或聊天数据，不产生 API 调用。
+
+## v0.11.59 HYBRID
+
+- 改用带字段标题和来源楼层的分区表注入，便于主模型读取与用户核对。
+- 将当前状态、角色知情、作者事实、人物关系、近期事件和待办拆开呈现；保留知情边界、时间精度规则及原注入位置/长度限制。
+- 仍通过 SMM extension prompt 注入，不创建/修改世界书条目，也不依赖 Yuzi 变量；设备端最终提示词位置需另行核对。
+- 仅本地格式转换，无总结 API 调用，不修改聊天 JSONL、游标或现有长期记忆。
+
 ## v0.11.58 HYBRID
 
 - 自动总结失败后暂停自动请求，直到用户手动点击重试；游标与记忆提交规则保持原子性。
