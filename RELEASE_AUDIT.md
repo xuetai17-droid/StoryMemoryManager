@@ -1,3 +1,37 @@
+# v0.11.69 release audit
+
+Observed new evidence: user configured triggerMessages=30 and batchMessages=50, but direct API button still stated max 10. One failed request returned 400 after 4.2 seconds; a subsequent request returned 503 after 3.2 seconds. Screenshots did not contain response bodies, so the true provider/model route failure cannot be determined. Key invalidity, context overflow, unsupported fields or route availability have not been inferred as established causes.
+
+Code cause for cadence inconsistency: native setting handler saved triggerMessages, but autoSummaryThresholdV01162 and paidRoutineBatch read the legacy autoBatchMessagesV01145 default 10; inner summarizeNew independently gated on triggerMessages. Consequently diagnostic thresholds, actual paid batch caps and outer/inner gates disagreed. New shared pure policy uses triggerMessages for cadence, caps paid routine batches by min(triggerMessages,batchMessages), and renders dynamic values. Legacy migration no longer resets an existing explicit 30. Historical manual catch-up retains its separate 15-message cap; token/byte adaptive shrinking remains active. Thirty refers to combined user and assistant messages, not thirty assistant-only turns.
+
+HTTP diagnostic cause: previous code read response.text() but rethrew a generic HTTP error, discarding the returned reason from user-visible errors. New extraction captures limited structured message/code/type/param, redacts current API key, Bearer authorization and common key fields before truncation, adds non-authoritative hints, and persists the safe diagnostic in the originating chat on failure. The diagnostic does not contain request headers, credentials or full chat prompt/response. Global diagnostic projection is now scoped to chat metadata; persistent records remain available on reload. The unchanged minimal request still contains only messages and model; no guessed provider parameters, fallback routes or retries have been introduced.
+
+No real summary or verification API was called. GitHub origin was fetched read-only; at verification origin/main manifest still selected v0.11.67. v0.11.69 includes the earlier local v0.11.68 archive and mode-refresh corrections without changing existing selected mode/provider/credentials/auto settings or clearing failure pauses.
+
+Executed tests/v01169-regression.mjs with a fake fetch implementation and neutral source fixture: 29 pending messages makes zero requests; 30 pending messages makes exactly one actual request covering 30, not 10, when size fits. Simulated HTTP 400 and 503 persist detailed, redacted errors, preserve canonical memory/cursor, and block subsequent automatic attempts. A deliberate manual retry makes one additional request. Diagnostics persist after module-global reset and are absent in another chat. Simulated valid line-protocol success commits once. A chat switch before response consumption prevents parsing/commit. Old settings migration preserves 30. Pure zero-API digest mode continues handling unknown dates and sparse character fields.
+
+Original 46-message export regression also passed: 22 digests produce 23 timeline records and 11 profiles, cursor 44, date 2024-08-27, scene time ending 08:05, no inferred knowledge. A repeated read is idempotent and the original export bytes are unchanged; no network requests. JavaScript syntax, manifest, import closure and ZIP integrity passed.
+
+Actual device/provider 400 and 503 resolution remains unverified: their old bodies are unavailable. Future real-task errors will show the new safe details; viewing details is local and free. Failure pause remains in place on update, avoiding automatic paid diagnostic calls. Do not describe this release as proving the user's API fault is fixed.
+
+## Previous audits
+
+# v0.11.68 release audit
+
+Existing profile parser accepted only location/clothing/identity/age/gender. Worldbook projection retained only stable fields and capped the visible cast at four. Added a separate pure archive parser for existing assistant Memory profile rows, bounded to already processed sources, excluding user/system and thinking text. Adds explicit companions; stores relationship labels, numeric affection and task notes as separate attributed source claims rather than canonical relationship/knowledge/open-loop states. Latest nonempty field records win by source while manual unsourced fields are preserved. No missing character is removed.
+
+The existing read-summary action now also backfills already scanned profiles; when only profiles change it does not add timeline rows or advance the cursor. Metadata-save failure rolls back. Worldbook sync failure is reported after a successful save. Existing chat identity checks protect both commit and book synchronization. All stored fields remain available even if low-priority World Info rows are trimmed.
+
+Projection provides up to 16 compact static identities, relevant last-recorded transient fields, and the latest original digest portrait. Location/clothing/companions have explicit history/source semantics. Old numeric relationship/task claims are never asserted as current, confirmed knowledge or pending tasks. Portrait-only continuation does not infer structured location/clothing/relationships. Raw portraits are capped in the prompt; total projection retains the 8,500-character limit. Full semantic profile updates cannot be promised from unlabeled literary text.
+
+Removed a call from the global mode selector to a function scoped inside the native binding function; this caused the v167 selector to save the mode but stop before refreshing its labels. New tests do not supply a fake global definition for that function.
+
+Local validation used the original 46-message export: 22 digests/23 timeline rows/11 characters, initial cursor 44, scene 2024-08-27 08:05; original input unchanged, zero paid requests. Expanded checks passed for archived companions and source notes, scanned-row backfill, idempotence, save-failure rollback, no inferred knowledge, malformed digest rollback, portrait-only new reply, chat-switch preflight safety, native/legacy selector option and mode switching. Initial projected memory was 6,101 characters, higher than v166 because it now carries more profile context. Syntax/import and ZIP checks passed.
+
+Device acceptance remains: upload all nine ZIP files to GitHub, update/reopen, and click read-existing-summary once in the same chat. Device verification of this version's archive view and final model request remains pending. Prior v166 dry-run selected 4,268 characters; that does not prove the final request or model adoption for the expanded projection.
+
+## Previous audits
+
 # v0.11.67 release audit
 
 Device screenshot showed only AI/local options in the native mode selector, despite the digest handler existing. The native HTML omitted the digest option, whereas the legacy menu included it but mapped its change event incorrectly to local. Both are corrected. Summary auto controls in the legacy panel now route to chat-local digest settings when appropriate. Digest UI disables API configuration controls and displays the zero-summary-API path. Switching modes disarms global paid autoSummarize; it does not change existing memory, cursor, chat book binding or explicitly enabled chat-local digest intake.
