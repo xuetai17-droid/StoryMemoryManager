@@ -1,0 +1,46 @@
+import fs from 'node:fs';import assert from 'node:assert/strict';import {runtime} from './runtime-v01173.mjs';
+import {selectHistoricalEventsV01173} from '../history-selection-v01173.js';
+const marker='SMM 当前聊天长期记忆｜自动维护';
+const mem={last_processed_index:20,timeline:[{source:'#0',date:'2024-01-01',event:'甲与哥哥视频通话，双方互加微信。'},...Array.from({length:8},(_,i)=>({source:'#'+(i+1),date:'2024-01-01',event:'甲整理书本，准备上课。'}))]};
+const before=JSON.stringify(mem);assert(selectHistoricalEventsV01173(mem).some(x=>x.entry.source==='#0'));assert.equal(JSON.stringify(mem),before);
+const pending=structuredClone(mem);pending.last_processed_index=-1;assert.equal(selectHistoricalEventsV01173(pending).length,0);
+const query={last_processed_index:50,timeline:[{source:'#0',event:'乙把备用钥匙交给甲，并说明放在信箱旁。'},...mem.timeline.slice(1)]};
+assert(selectHistoricalEventsV01173(query,{query:'备用钥匙放在什么地方？'}).some(x=>x.entry.source==='#0'));
+const unsafe={last_processed_index:50,timeline:[{source:'unknown',event:'甲与哥哥互加微信。'},{source:'#99',event:'甲与哥哥互加微信。'}]};assert.equal(selectHistoricalEventsV01173(unsafe).length,0);
+const root=new URL('../../',import.meta.url),memory=new URL('recovered/story-memory-1793591524023.json',new URL('../',root));
+const rawPath=new URL('recovered/story-raw-chat-1793591520993.json',new URL('../',root));
+if(fs.existsSync(memory)&&fs.existsSync(rawPath)){
+ const original=JSON.parse(fs.readFileSync(memory)),raw=JSON.parse(fs.readFileSync(rawPath)).messages;
+ const old=runtime(structuredClone(original),raw,'index-v0.11.72.js');assert.equal(old.test.buildSafeMemoryPromptV0100().includes('#473-#480'),false);
+ const current=structuredClone(original),r=runtime(current,raw),messagesBefore=JSON.stringify(r.ctx.chat);
+ r.test.repairNarrativeCalendarV01130(current);
+ const p=r.test.buildSafeMemoryPromptV0100();assert(p.includes('#473-#480'));assert(p.includes('互加微信'));assert(p.length<=8500);
+ assert.equal(r.test.displayTimelineTimeLocalV0119(current.timeline.find(x=>x.source==='#473-#480')),'周一 17:10-18:05');
+ assert(r.test.legacyTimelineHTML(current).includes('17:10-18:05'));assert(r.test.legacyReadableHTML(current).includes('v0.11.73'));
+ assert.equal(current.timeline.length,98);assert.equal(current.last_processed_index,510);
+ assert.deepEqual(current.timeline.map(x=>[x.event,x.source,x.date,x.date_range]),original.timeline.map(x=>[x.event,x.source,x.date,x.date_range]));
+ for(const k of ['facts','knowledge_states','characters','npcs','relationships','open_loops'])assert.deepEqual(current[k],original[k]);
+ assert.equal(JSON.stringify(r.ctx.chat),messagesBefore);
+ // Static fallback remains useful without a macro API.
+ assert(r.test.managedWorldbookContentV01173(r.ctx).includes('#473-#480'));
+ const dynamic=runtime(structuredClone(original),raw),handlers={};
+ dynamic.ctx.macros={register:(name,def)=>{handlers[name]=def.handler;}};
+ dynamic.ctx.substituteParams=value=>value==='{{smm_memory_table}}'?handlers.smm_memory_table():value;
+ assert.equal(dynamic.test.managedWorldbookContentV01173(dynamic.ctx),'{{smm_memory_table}}');
+ // On a supported client the macro uses the latest query, not a saved snapshot.
+ dynamic.ctx.chat.push({is_user:true,mes:'哥哥已经和你互加微信了。'});
+ assert(dynamic.ctx.substituteParams('{{smm_memory_table}}').includes('#473-#480'));
+ const book={entries:{0:{comment:marker,constant:true,disable:false,content:'old'}}};
+ let saves=0;
+ dynamic.ctx.chatMetadata.world_info=dynamic.ctx.chatMetadata.story_memory_manager_v2.smm_worldbook_name_v01163;
+ dynamic.ctx.loadWorldInfo=async()=>book;dynamic.ctx.saveWorldInfo=async()=>{saves++;};dynamic.ctx.updateWorldInfoList=async()=>{};
+ dynamic.ctx.mainApi='openai';dynamic.ctx.chatCompletionSettings={openai_max_context:32768};
+ dynamic.ctx.getWorldInfoPrompt=async()=>({worldInfoAfter:dynamic.ctx.substituteParams(book.entries[0].content)});
+ const repaired=await dynamic.test.repairTimeAndBookV01173();assert.equal(repaired.synced,true);assert(saves>0);
+ assert.equal(book.entries[0].content,'{{smm_memory_table}}');
+ const preflight=await dynamic.test.checkSmmWorldbookActivationV01166();assert.equal(preflight.active,true);assert.equal(preflight.content_mode,'live_macro');assert(preflight.source_refs.includes('#473-#480'));assert.equal(preflight.summary_api_calls,0);
+ const rollback=structuredClone(original),bad=runtime(rollback,raw),saved=JSON.stringify(rollback);bad.ctx.saveMetadata=async()=>{throw Error('TEST SAVE FAILURE');};
+ assert.equal(await bad.test.repairStoryCalendarOnceV01155({force:true}),null);assert.equal(JSON.stringify(rollback),saved);
+ console.log('Actual export: v72 omission reproduced; v73 includes source #473–#480 and mutual WeChat contact, 8500-char cap, readable time, manual repair, dynamic/static book, activation dry-run, rollback and protected fields passed.');
+}else console.log('Private export absent; synthetic source-selection checks passed.');
+console.log('v0.11.73 checks passed; network disabled.');
