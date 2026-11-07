@@ -1,3 +1,31 @@
+# v0.11.76 release audit
+
+The local recap supplement can scan every message up to the active chat's existing processed cursor without asking for a source range. Internal chunks yield to the browser and report progress. Preview pagination affects display only. Existing replies without a supported readable recap are reported, and unchanged duplicates are skipped. All accepted rows are committed together to the existing v75 supplement field; existing coverage, timeline, settings, and worldbook budgets are retained.
+
+The bulk scan snapshots relevant inputs and verifies them again before it returns. Save checks the chat, current memory, and regenerated plan before a single metadata write and retains the previous rollback and scoped worldbook sync behavior. Regression tests exercised 852 scanned floors, existing duplicates and edited recaps, hidden replies, unsupported source reporting, untouched messages beyond the cursor, stale and switched chat protection, storage failure, and preservation of all other fields. Only synthetic chat and mocked persistence were used for the new test; no model requests were sent. The phone's actual recovery count depends on which source replies still contain readable recaps.
+
+## Previous audits
+
+# v0.11.75 release audit
+
+Targeted existing-memory supplementation is an explicit preview/save workflow bounded by the current processed cursor. It reads the saved assistant recap from a recognized complete literary digest or structured plot wrapper, excludes system/user and auxiliary content, and reports unavailable sources instead of fabricating text or making a paid request. Supplemental records live in a separate field. Existing timeline, cursor, current time/location, characters, relationship and task records are not merged or recalibrated by this action.
+
+Preview is read-only. Commit compares the current plan with the preview, rejects chat switches and changed sources, skips identical records, and restores the prior field on metadata save failure. An already-bound owned book can be synchronized independently of the memory save. Topic-related recap annotations remain attributed to the original floor and are omitted if that floor's saved recap no longer matches; they do not act as independently verified events, knowledge states or hide-coverage evidence.
+
+Executed tests/v01175-regression.mjs using synthetic chat and local mocked persistence only. Checks include both recognized formats, hidden assistant replies, exclusion of auxiliary/system blocks, missing floors, duplicate prevention, read-only preview, saving and scoped book sync, source-change rejection, stale injection exclusion, original chat and all other memory fields unchanged, chat-switch protection, and exact rollback. The actual user's older missing details were not supplied as raw source and have not been reconstructed. No real summary requests were made. v74 detailed summarization remains included.
+
+## Previous audits
+
+# v0.11.74 release audit
+
+The supplied device screenshot shows terse existing timeline rows but not the source prose or the API completion body. It does not establish which particular facts the service emitted or omitted. Code review confirmed that direct external requests explicitly requested roughly1800 output tokens for a whole batch, and two timeline cleanup passes could merge different outcomes based on textual similarity. The old behavior was reproduced with a synthetic API response containing two similar but distinct outcomes.
+
+The direct prompt now requests complete factual event beats with causes, attributed important dialogue, outcomes, knowledge boundaries and commitments, without a fixed whole-batch brevity target. The input still contains source-bound canonical prose and the existing date evidence. API body remains messages and model; no new request fields or paid calls are added. Source-bearing details are preserved through calibration and later deduplication, with exact equivalent rows still eligible for deduplication. Existing recovery from sourced response facts preserves long detailed text and all recovered candidates on the direct route. Provider-reported length truncation is rejected before commit; the cursor remains unchanged and no retry is made. Source-coverage diagnostics report missing timeline references without asserting semantic completeness.
+
+Local tests/v01174-regression.mjs compares v73 with v74 using mocked fetch only. It checks input tail and auxiliary-block boundaries, complete saving of two similar events with distinct outcomes and sources, subsequent cleanup, exact duplicate handling, unchanged request fields, one call per case, explicit truncation preserving cursor, and full long sourced-text recovery. The existing v73 actual-export regression also checks worldbook retrieval, time calibration and rollback. No user story is included in the install ZIP; tests use synthetic examples. No real provider request or old-history re-summary occurred. Device behavior and actual model output detail remain to be observed during normal use.
+
+## Previous audits
+
 # v0.11.73 release audit
 
 New device screenshots show imprecise time labels and a model reply claiming a previously recorded family contact did not occur. They do not show the loaded version, actual request, or current exported state. We do not infer that the phone successfully ran v72 or that the model received the omitted event.
