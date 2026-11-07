@@ -1,3 +1,51 @@
+# v0.11.82 release audit
+
+The local archive saves complete preset digest blocks from all processed assistant replies in the active chat. The stored archive is shown within the timeline with explicit source attribution, separately from canonical event rows so timeline facts and current clocks are not rewritten. Unmatched archived floors remain visible. Archive text is preserved without a length cap; live matching entries may be selected as secondary evidence under the existing model prompt budget.
+
+Regression covers full long and multiple blocks, hidden and unmatched floors, repeated scans, memory rollback on save failure, source edit and chat switch handling, and no summary requests or changes to provider settings. An aggregate scan of a previously supplied export identified 256 digest floors. No user data ships in the package.
+
+## Previous audits
+
+# v0.11.81 release audit
+
+The explicit paid-history path previews remaining request count without network calls. Only the reviewed, already processed source range is eligible. The configured external API receives canonical prose and same-floor evidence, with one request per batch. Results with invalid references do not commit. Successful batches add source-ordered, labeled timeline detail and a separate checkpoint; they do not overwrite original rows, current-state fields, or the routine cursor. Stop and request failures do not automatically retry. A returned result is staged in the open page if persistence fails.
+
+Mocked regression verifies preview without requests, a multi-batch pause/resume and failure, stale source and chat guards, save retry without duplicate model calls, and preservation of current state and original rows. No historical job was run against the user's actual provider or chat.
+
+## Previous audits
+
+# v0.11.80 release audit
+
+Direct external API input now includes validated same-floor literary digest fields as attributed secondary evidence, alongside the existing canonical prose and time evidence. Separate chat replies or cumulative memory blocks are not reused as if they described the current floor. One request per batch and the existing request body are retained. A labeled continuation of a T line is parsed and saved with that line. Counts are local diagnostics and do not claim semantic coverage.
+
+In direct API mode the existing safe memory projection can select relevant complete recap passages from already-processed floors, subject to the existing total budget and a two-row supplemental limit. The current source is consulted and no historical requests, writes or mode changes are made by retrieval. New regression compares the old and new request payloads and exercises continuation persistence, historical retrieval, and unchanged settings using mocked fetch only. Actual provider output quality remains dependent on the configured model.
+
+## Previous audits
+
+# v0.11.79 release audit
+
+The complete preset recap reader is distinct from the legacy supplement projection. It reads every supported stored recap block per assistant reply, including hidden replies and replies without timeline coverage, and preserves the full digest fields and body. The viewer does not apply the legacy flat-text transformation, 4,000-character acceptance limit, or deduplication against timeline text. Known legacy recap containers remain explicitly attributed. Content is escaped and read-only; no summaries are regenerated or added to the model prompt by this action.
+
+Synthetic tests cover long and multiple blocks, full time and portrait fields, excluded user/system and auxiliary messages, legacy wrappers, source ranges, archive pages, and unchanged chat, memory and prompt. A local aggregate check recognized all 256 literary recap blocks in a previously supplied export. No user chat content is included in the package.
+
+## Previous audits
+
+# v0.11.78 release audit
+
+Both timeline renderers expose a lazy, read-only original-message reader for explicitly sourced floors. The separate full-chat reader covers the entire active chat, including hidden, unsummarized and unreferenced messages. Pagination is by floor, does not truncate individual messages, and preserves disjoint source ranges. Saved message text is escaped before rendering. The prior recap and timeline records are still available and unchanged; original text is not added to prompt or worldbook output.
+
+The synthetic regression uses 1,300 floors and checks the full tail of a long hidden reply, safe text rendering, first and last pages, interval unions without gap expansion, navigation, on-demand rendering, chat switch protection, and unchanged prompt, chat and memory. No model requests or metadata writes were made. Original messages not present in the current chat cannot be recovered by this viewer.
+
+## Previous audits
+
+# v0.11.77 release audit
+
+Both timeline renderers now display saved v75/v76 recaps directly under the best matching visible source row. Exact floor references and disjoint source spans are respected; narrower coverage wins on overlap, and the source recap is checked against the current original reply. The separate saved collection remains available. This is a read-only view change: no migration, rescan, metadata or worldbook writes, time recalibration, or model calls.
+
+Synthetic regression verifies existing records without a rescan, hidden replies, overlap, disjoint spans and gaps, stale and unmatched entries, multiple recaps, escaping, and unchanged original chat and memory. The user's current saved supplements were not inspected directly.
+
+## Previous audits
+
 # v0.11.76 release audit
 
 The local recap supplement can scan every message up to the active chat's existing processed cursor without asking for a source range. Internal chunks yield to the browser and report progress. Preview pagination affects display only. Existing replies without a supported readable recap are reported, and unchanged duplicates are skipped. All accepted rows are committed together to the existing v75 supplement field; existing coverage, timeline, settings, and worldbook budgets are retained.
