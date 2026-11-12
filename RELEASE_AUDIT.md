@@ -1,3 +1,17 @@
+# v0.11.84 release audit
+
+Automatic continuity selection groups eligible canonical events by latest source floor, picks bounded representatives from distinct groups, orders them by source, and protects them ahead of optional history during the existing prompt trim. Older records remain searchable using the current topic. The change does not mutate chat or memory or call a summary provider.
+
+Local regression reproduced a generic continuation missing a predecessor because the newest floor occupied all recent slots. The updated worldbook projection retains both the predecessor and the latest progression without typed floor references. Additional checks cover budget pressure, shortened chat, and old-topic retrieval. The user's final transmitted prompt and model response were not tested.
+
+## Previous audits
+
+# v0.11.83 release audit
+
+Synthetic regression reproduces the prior failure to retrieve a processed floor by an exact user reference. Explicit references now use source ranges, not keyword ranking; only recent visible user text can request them. A focused user question can also retain a closely matched event under the existing budget. Recorded date/time labels, source, and event text remain attributed. The same selected record is not repeated in the recent, historical, or supplemental sections. Pending and stale supplemental floors cannot enter via exact lookup. No chat/memory edits or summary model requests are involved. The user's actual final request was not inspected.
+
+## Previous audits
+
 # v0.11.82 release audit
 
 The local archive saves complete preset digest blocks from all processed assistant replies in the active chat. The stored archive is shown within the timeline with explicit source attribution, separately from canonical event rows so timeline facts and current clocks are not rewritten. Unmatched archived floors remain visible. Archive text is preserved without a length cap; live matching entries may be selected as secondary evidence under the existing model prompt budget.
