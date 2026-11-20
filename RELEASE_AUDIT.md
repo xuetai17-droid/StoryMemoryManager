@@ -1,3 +1,21 @@
+# v0.11.86 release audit
+
+The generic contextual selector replaces the standalone scenario section with a unified, bounded source-attributed association section. It ranks rare matching phrases and explicitly recorded people, aliases, locations, items and topics across canonical events, valid current recap evidence, sourced facts, promises, and semantic records. Shared specific entities, explicit source evidence or a qualified nearby continuation can expand a seed; proximity alone is insufficient. Source-ordered records are not rewritten into a new cause, knowledge state or current ownership.
+
+No new source data is committed. Groups retain whole original passages and are budgeted with the existing memory text. Prepared-source diagnostics are scoped to chat metadata and reflect groups left after trimming. They are not a claim of final transmission. Existing worldbook binding and API configuration are untouched.
+
+Synthetic regression covers scenario return, ordinary location return, explicit item aliases and lend/return lifecycle, appointments, injury cause, explicit evidence links, unrelated location exclusion, unavailable/pending/invalid sources, edited recap exclusion, budget pressure, and diagnostic chat isolation. It checks worldbook text preparation and no chat, settings or memory writes or model calls. Prior v82, v84 and v85 regression suites also pass against their retained versions. The user's current live JSON or final provider request was not supplied.
+
+## Previous audits
+
+# v0.11.85 release audit
+
+Named scenario recurrence is detected from recent canonical prose, the current scene or a recent explicit entry. Eligible historical records with explicit entry and completion/exit boundaries form candidate episodes; intervening records need not repeat the name. Unbounded episodes do not admit unnamed neighboring events. Original attributed passages are selected into a separate bounded worldbook section, not rewritten as current rules or shared character knowledge. No memory or chat edits or summary calls occur.
+
+Synthetic tests reproduce the reported shape: first visit on floors 100–132 and reentry on floor 292. The old selector misses the unnamed discovery and outcome; the new section retains them without typed floor references. Other scenario, unfinished boundary, pending floor, pronoun follow-up, explicit completion, prompt budget and unchanged data cases are covered. The user's actual current export was unavailable and was not verified. Existing v84 continuity regression also passes.
+
+## Previous audits
+
 # v0.11.84 release audit
 
 Automatic continuity selection groups eligible canonical events by latest source floor, picks bounded representatives from distinct groups, orders them by source, and protects them ahead of optional history during the existing prompt trim. Older records remain searchable using the current topic. The change does not mutate chat or memory or call a summary provider.
